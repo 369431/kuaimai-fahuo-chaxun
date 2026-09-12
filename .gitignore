@@ -1,0 +1,34 @@
+# 凭据 / 密钥 —— 绝不提交
+kuaimai_settings.json
+.env
+aliyun/
+lego/
+*.pem
+*.key
+*.crt
+*.pfx
+*.jks
+keystore*
+
+# 运行时数据 / 缓存 / 日志
+kuaimai_*.json
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# 打包产物
+build/
+dist/
+*.spec
+*.exe
+*.apk
+*.zip
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+__pycache__/
+*.pyc
+Thumbs.db
+desktop.ini
