@@ -2,14 +2,19 @@
 
 快麦 ERP 待发货数量 / 货架在架数 扫码查询工具。包含**电脑版（Tkinter 桌面程序）**和**手机网页版（内嵌 HTTP 服务 + HTTPS 入口，手机摄像头扫码）**。
 
-> ⚠️ 本仓库不含任何真实凭据。`desktop/kuaimai_scan.py` 里的 AppKey / AppSecret / RefreshToken / SessionId 都是占位符 `YOUR_*`，运行前需自己填写，**不要把真实值提交上来**。
+> **注意：本仓库不含任何真实凭据。** 程序**不带默认密钥**：首次运行会弹出「API 设置」窗口填写 AppKey / AppSecret / RefreshToken / SessionId，保存到程序同目录的 `kuaimai_api.json`（已被 `.gitignore` 忽略）。可先在窗口里点「测试连接」验证再保存。**不要把真实值提交上来。**
 
 ## 功能
 
-- 扫商家编码 → 查该编码的**待发货订单数**、**货架在架数**、件数、锁定数、在架货位
+- 扫商家编码 → 结果面板显示：编码（黑色加粗）/ **待发货一单一件** / **待发货一单多件** / **货位（含在架数）**；在架少于待发货件数时红字提示**需补货**
+- **编码不分大小写**（`9681-黑色s` 与 `9681-黑色S` 等价）
 - 声音提示（有待发货订单 = 好听的提示音；无/异常 = 报警音）
+- **后台扫码监听**：程序最小化或切到别的软件时也能扫，右下角弹浮窗显示结果（不抢焦点，10 秒自动消失）
+- 单实例保护（第二个实例只弹提示，不会抢同一个数据库）
 - 订单商品数量筛选（> / < / = N）
-- 扫码记录、导出 CSV
+- 订单缓存用 **SQLite**（`kuaimai_data.db`），全量拉取事务内整体替换、增量按 sid UPSERT；拉取失败或结果为空**绝不覆盖**已有数据
+- 扫码记录、导出 CSV（手机端）/ Excel（电脑端）
+- **API 设置**窗口：换账号 / 换网关 / 换 API 版本不用重新打包
 - 手机网页版：局域网/外网访问，手机**摄像头扫码**（也可用扫码枪或手动输入）
 
 ## 目录结构
@@ -36,14 +41,16 @@ https/                    手机网页版的 HTTPS 入口（浏览器调摄像�
 
 依赖：Python 3.10+（仅标准库 + tkinter，无第三方包）。
 
-1. 打开 `desktop/kuaimai_scan.py`，填好文件顶部 `【配置区域】` 的 `KM_APP_KEY` / `KM_APP_SECRET` / `KM_REFRESH_TOKEN` / `INIT_SESSION_ID`。
-2. 运行 `python kuaimai_scan.py`。
-3. 程序启动后会在 `0.0.0.0:8790`（同时监听 IPv6）提供手机网页服务，界面底部会显示访问地址和访问口令。
+1. 运行 `python desktop/kuaimai_scan.py`（源码里**不含任何密钥**）。
+2. 首次运行会弹出「**API 设置**」窗口：填 appKey / appSecret / refreshToken / sessionId(accessToken) 四项，可先点「测试连接」验证，再点「保存并应用」。
+   参数保存在程序同目录的 `kuaimai_api.json`（不建议提交，已加入 `.gitignore`）。
+3. 保存后自动开始「全量拉取」（约 20 分钟，界面有进度）；数据落在同目录的 `kuaimai_data.db`（SQLite）。
+4. 程序在 `0.0.0.0:8790`（同时监听 IPv6）提供手机网页服务，界面底部会显示访问地址和访问口令。
 
 打包 exe（可选）：
 
 ```bash
-python -m PyInstaller --noconfirm --onefile kuaimai_scan.py
+python -m PyInstaller --noconfirm --onefile desktop/kuaimai_scan.py
 ```
 
 ## 手机网页版（为什么需要 HTTPS）
@@ -92,7 +99,7 @@ node  https/_zxing_selftest.js   # ZXing 1D 解码往返
 
 ## 隐私
 
-仓库只包含程序代码。以下内容**不提交**（见 `.gitignore`）：`kuaimai_settings.json`、`aliyun/` 凭据、`lego/` 证书与账号私钥、各类 `kuaimai_*.json` 缓存、`*.db` 数据、`*.log`、打包产物。
+仓库只包含程序代码。以下内容**不提交**（见 `.gitignore`）：`kuaimai_api.json`（AppKey/AppSecret/RefreshToken/SessionId）、`kuaimai_settings.json`、`aliyun/` 凭据、`lego/` 证书与账号私钥、各类 `kuaimai_*.json` 缓存、`*.db` 数据、`*.log`、打包产物。
 
 ## 第三方
 

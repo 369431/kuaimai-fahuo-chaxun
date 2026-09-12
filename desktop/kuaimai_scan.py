@@ -51,14 +51,15 @@ try:
 except Exception:  # pragma: no cover
     winsound = None
 
-# ====================== 【配置区域，修改这里】======================
-# ⚠️ 下面四项是本地的私有凭据，开源仓库里一律用占位符。
-#    真要运行，请把你的真实值填在这里（不要提交到任何公开仓库）。
-KM_APP_KEY = "YOUR_KM_APP_KEY"
-KM_APP_SECRET = "YOUR_KM_APP_SECRET"
-KM_REFRESH_TOKEN = "YOUR_KM_REFRESH_TOKEN"
-# 【重要】初始可用 sessionId（accessToken）
-INIT_SESSION_ID = "YOUR_INIT_SESSION_ID"
+# ====================== 【配置区域】======================
+# 【发布版这里不放任何密钥】首次使用请在程序界面点「API 设置」填写：
+#   appKey / appSecret / refreshToken / sessionId(accessToken)
+# 填完存在 exe 同目录的 kuaimai_api.json，以后就直接用。
+KM_APP_KEY = ""
+KM_APP_SECRET = ""
+KM_REFRESH_TOKEN = ""
+INIT_SESSION_ID = ""
+# 非密钥默认值（一般不用改）
 KM_SIGN_METHOD = "hmac-sha256"
 KM_SIGN_UPPER = False
 GATEWAY = "https://gw.superboss.cc/router"
@@ -96,6 +97,8 @@ SETTINGS_FILE = os.path.join(BASE_DIR, "kuaimai_settings.json")
 PULL_PROGRESS_FILE = os.path.join(BASE_DIR, "kuaimai_pull_progress.json")
 DB_FILE = os.path.join(BASE_DIR, "scan_log.db")
 ORDERS_DB_FILE = os.path.join(BASE_DIR, "kuaimai_data.db")   # 订单缓存（SQLite，替代 kuaimai_pending_cache.json）
+API_FILE = os.path.join(BASE_DIR, "kuaimai_api.json")         # API 参数（界面可改；没有它就用写死的默认值）
+_INSTANCE_MUTEX = None       # 单实例互斥体句柄（进程退出自动释放）
 
 PENDING_CACHE_MAX_AGE = 30 * 60      # 待发货缓存视为“新鲜”的秒数
 STOCK_CACHE_TTL = 120                # 可售库存缓存有效期（秒）
@@ -149,6 +152,30 @@ def now_gmt8():
     return datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def ci_key(code):
+    """编码归一化：快麦的商家编码不区分字母大小写，比较时统一转大写。"""
+    return str(code or "").strip().upper()
+
+
+def dict_get_ci(d, code):
+    """在字典里按编码取值：先精确匹配，再忽略大小写。返回 (值, 实际键)。
+
+    命中后返回库里那个写法（用于显示和记录）；上千个键的线性比对也就毫秒级。
+    """
+    if not d:
+        return None, code
+    v = d.get(code)
+    if v is not None:
+        return v, code
+    t = ci_key(code)
+    if not t:
+        return None, code
+    for k, val in d.items():
+        if ci_key(k) == t:
+            return val, k
+    return None, code
+
+
 def sign(params, secret, sign_method="hmac-sha256", upper=False):
     """签名：去掉 sign 与空值，按参数名 ASCII 升序拼接 k+v（不含 secret）。"""
     data = {k: v for k, v in params.items() if v not in (None, "") and k != "sign"}
@@ -165,21 +192,25 @@ def sign(params, secret, sign_method="hmac-sha256", upper=False):
 
 
 def api_call(method, business, session, timeout=40):
-    """通用调用：公共参数 + 业务参数 → POST 表单。"""
+    """通用调用：公共参数 + 业务参数 → POST 表单（参数来自 API_CONF，界面上可改）。"""
+    if not (API_CONF.get("appKey") and API_CONF.get("appSecret")):
+        raise RuntimeError("未配置 API 参数：请点界面上的「API 设置」填写 appKey / appSecret / "
+                           "refreshToken / sessionId 后保存")
     params = {
         "method": method,
-        "appKey": KM_APP_KEY,
+        "appKey": API_CONF["appKey"],
         "timestamp": now_gmt8(),
         "format": "json",
-        "version": "1.0",
-        "sign_method": KM_SIGN_METHOD,
+        "version": str(API_CONF.get("version") or "1.0"),
+        "sign_method": API_CONF.get("signMethod") or KM_SIGN_METHOD,
         "session": session,
     }
     params.update({k: v for k, v in business.items() if v not in (None, "")})
-    params["sign"] = sign(params, KM_APP_SECRET, KM_SIGN_METHOD, KM_SIGN_UPPER)
+    params["sign"] = sign(params, API_CONF["appSecret"], params["sign_method"],
+                          bool(API_CONF.get("signUpper")))
     body = urllib.parse.urlencode(params).encode("utf-8")
     req = urllib.request.Request(
-        GATEWAY,
+        API_CONF.get("gateway") or GATEWAY,
         data=body,
         method="POST",
         headers={"Content-Type": "application/x-www-form-urlencoded; charset=utf-8"},
@@ -214,9 +245,64 @@ def save_settings(data):
         pass
 
 
+# ============================ API 参数（界面上可改） ============================
+# 写死的值只当「默认值」；exe 同目录的 kuaimai_api.json 里的同名字段会覆盖它。
+# 换账号 / 换网关 / 换版本都不用重新打包：界面上「API 设置」改完保存即可。
+DEFAULT_API = {
+    "gateway": GATEWAY,
+    "version": "1.0",
+    "signMethod": KM_SIGN_METHOD,
+    "signUpper": KM_SIGN_UPPER,
+    "appKey": KM_APP_KEY,
+    "appSecret": KM_APP_SECRET,
+    "refreshToken": KM_REFRESH_TOKEN,
+    "sessionId": INIT_SESSION_ID,
+}
+API_CONF = dict(DEFAULT_API)
+
+
+def reload_api_conf():
+    """读 kuaimai_api.json 覆盖默认值（文件不存在/读不出就用写死的默认值）。"""
+    global API_CONF
+    conf = dict(DEFAULT_API)
+    saved = load_json(API_FILE, None)
+    if isinstance(saved, dict):
+        for k in DEFAULT_API:
+            if k in saved and saved[k] not in (None, ""):
+                conf[k] = saved[k]
+    API_CONF = conf
+    return conf
+
+
+def save_api_conf(conf):
+    """写 kuaimai_api.json 并立即生效；同时清掉旧会话缓存（换了账号旧 session 无效）。"""
+    out = {}
+    for k in DEFAULT_API:
+        v = conf.get(k, DEFAULT_API[k])
+        if k == "signUpper":
+            v = bool(v)
+        elif k == "version":
+            v = str(v or "1.0").strip() or "1.0"
+        else:
+            v = str(v or "").strip()
+        out[k] = v
+    save_json(API_FILE, out)
+    reload_api_conf()
+    try:
+        if os.path.exists(CACHE_FILE):
+            os.remove(CACHE_FILE)
+    except Exception:
+        pass
+    return out
+
+
+reload_api_conf()
+
+
 # ============================ Token 续期 ============================
 def load_token_cache():
-    return load_json(CACHE_FILE, {"sessionId": INIT_SESSION_ID, "last_refresh_ts": 0})
+    return load_json(CACHE_FILE, {"sessionId": API_CONF.get("sessionId") or INIT_SESSION_ID,
+                                "last_refresh_ts": 0})
 
 
 def save_token_cache(session_id, last_refresh_ts):
@@ -225,7 +311,8 @@ def save_token_cache(session_id, last_refresh_ts):
 
 def refresh_access_token(old_session):
     """open.token.refresh（续期）：成功返回的 sessionId 不变，仅有效期 +30 天。限流 1 次/小时。"""
-    res = api_call("open.token.refresh", {"refreshToken": KM_REFRESH_TOKEN}, old_session)
+    res = api_call("open.token.refresh",
+                   {"refreshToken": API_CONF.get("refreshToken") or KM_REFRESH_TOKEN}, old_session)
     if isinstance(res, dict) and res.get("success"):
         data = res.get("data") or {}
         new_session = data.get("sessionId") or old_session
@@ -237,8 +324,8 @@ def refresh_access_token(old_session):
 
 
 def current_session():
-    """当前会话：优先本地缓存，否则用初始 sessionId。不主动联网刷新（刷新接口限流 1 次/小时）。"""
-    return load_token_cache().get("sessionId") or INIT_SESSION_ID
+    """当前会话：优先本地缓存，否则用设置里的 sessionId。不主动联网刷新（刷新接口限流 1 次/小时）。"""
+    return load_token_cache().get("sessionId") or API_CONF.get("sessionId") or INIT_SESSION_ID
 
 
 _AUTH_HINTS = ("token", "session", "授权", "登录", "过期", "无效", "appkey", "app key", "签名")
@@ -1362,6 +1449,163 @@ def start_web_server(app):
     return None, 0
 
 
+# ============================ 全局扫码监听（程序不在前台也能扫） ============================
+class ScanKeyHook:
+    """系统级键盘监听：用 WH_KEYBOARD_LL 抓「扫码枪」的输入。
+
+    · 只认「像扫码枪」的输入：字符间隔 < 80ms、长度 ≥ 3、以回车结束；
+    · 不拦截、不修改任何按键（照样传给当前窗口），也不保存其它任何输入；
+    · 支持中文/Unicode（扫码枪以 VK_PACKET 注字符时直接取该字符）。
+    """
+
+    VK_RETURN = 0x0D
+    VK_SHIFT = (0x10, 0xA0, 0xA1)
+    VK_CAPITAL = 0x14
+    VK_PACKET = 0xE7
+    GAP = 0.08          # 相邻字符最大间隔（秒）—— 人手打字达不到
+    MIN_LEN = 3
+    MAX_SEC = 1.2       # 整串最长耗时
+    MAX_BUF = 96
+
+    def __init__(self, on_code):
+        self.on_code = on_code
+        self.ok = False
+        self.err = ""
+        self._buf = ""
+        self._t0 = 0.0
+        self._last = 0.0
+        self._shift = False
+        self._caps = False
+        self._stop = threading.Event()
+        self._tid = 0
+        self._thread = None
+        self._proc = None
+
+    def alive(self):
+        return bool(self._thread and self._thread.is_alive())
+
+    def start(self):
+        if self.alive():
+            return True
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True, name="km-scan-hook")
+        self._thread.start()
+        return True
+
+    def stop(self):
+        self._stop.set()
+        try:
+            if self._tid:
+                ctypes.windll.user32.PostThreadMessageW(self._tid, 0x0012, 0, 0)   # WM_QUIT
+        except Exception:
+            pass
+
+    def _run(self):
+        import ctypes
+        from ctypes import wintypes
+        try:
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+            class KBDLLHOOKSTRUCT(ctypes.Structure):
+                _fields_ = [("vkCode", wintypes.DWORD), ("scanCode", wintypes.DWORD),
+                            ("flags", wintypes.DWORD), ("time", wintypes.DWORD),
+                            ("dwExtraInfo", ctypes.c_void_p)]
+
+            LRESULT = ctypes.c_ssize_t
+            HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+
+            # 必须声明参数/返回类型：否则 64 位下句柄会被当成 32 位整数截断（曾报 err=126）
+            user32.SetWindowsHookExW.argtypes = [ctypes.c_int, HOOKPROC, wintypes.HANDLE, wintypes.DWORD]
+            user32.SetWindowsHookExW.restype = wintypes.HANDLE
+            user32.UnhookWindowsHookEx.argtypes = [wintypes.HANDLE]
+            user32.CallNextHookEx.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM]
+            user32.CallNextHookEx.restype = LRESULT
+            user32.GetMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT]
+            user32.GetMessageW.restype = ctypes.c_int
+            user32.TranslateMessage.argtypes = [ctypes.POINTER(wintypes.MSG)]
+            user32.DispatchMessageW.argtypes = [ctypes.POINTER(wintypes.MSG)]
+            user32.ToUnicodeEx.restype = ctypes.c_int
+            user32.GetKeyboardLayout.restype = wintypes.HANDLE
+            user32.GetForegroundWindow.restype = wintypes.HWND
+            kernel32.GetModuleHandleW.restype = wintypes.HANDLE
+            kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+            user32.PostThreadMessageW.argtypes = [wintypes.DWORD, wintypes.UINT,
+                                                  wintypes.WPARAM, wintypes.LPARAM]
+
+            def translate(vk, scan):
+                st = (ctypes.c_ubyte * 256)()
+                if self._shift:
+                    st[0x10] = 0x80
+                if self._caps:
+                    st[0x14] = 0x01
+                buf = ctypes.create_unicode_buffer(8)
+                n = user32.ToUnicodeEx(vk, scan, st, buf, 8, 0, user32.GetKeyboardLayout(0))
+                return buf.value if n > 0 else ""
+
+            def proc(nCode, wParam, lParam):
+                try:
+                    if nCode == 0:
+                        kb = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+                        vk = kb.vkCode
+                        if wParam in (0x0100, 0x0104):          # KEYDOWN / SYSKEYDOWN
+                            if vk in self.VK_SHIFT:
+                                self._shift = True
+                            elif vk == self.VK_CAPITAL:
+                                self._caps = not self._caps
+                            elif vk == self.VK_RETURN:
+                                code = self._buf
+                                fast = (len(code) >= self.MIN_LEN) and \
+                                       ((time.time() - self._t0) <= self.MAX_SEC)
+                                self._buf, self._t0, self._last = "", 0.0, 0.0
+                                if fast:
+                                    try:
+                                        self.on_code(code)
+                                    except Exception:
+                                        pass
+                            else:
+                                ch = (chr(kb.scanCode & 0xFFFF) if vk == self.VK_PACKET
+                                      else translate(vk, kb.scanCode))
+                                if ch and ch.isprintable():
+                                    now = time.time()
+                                    if self._buf and (now - self._last) > self.GAP:
+                                        self._buf, self._t0 = "", 0.0
+                                    if not self._t0:
+                                        self._t0 = now
+                                    self._buf = (self._buf + ch)[-self.MAX_BUF:]
+                                    self._last = now
+                        elif wParam in (0x0101, 0x0105):        # KEYUP / SYSKEYUP
+                            if vk in self.VK_SHIFT:
+                                self._shift = False
+                except Exception:
+                    pass
+                return user32.CallNextHookEx(None, nCode, wParam, lParam)
+
+            self._proc = HOOKPROC(proc)          # 必须保引用，否则回调会被回收
+            self._tid = kernel32.GetCurrentThreadId()
+            hook = user32.SetWindowsHookExW(13, self._proc, kernel32.GetModuleHandleW(None), 0)
+            if not hook:
+                self._err1 = ctypes.get_last_error()
+                hook = user32.SetWindowsHookExW(13, self._proc, None, 0)
+            if not hook:
+                self.err = "SetWindowsHookEx 失败 err=%s/%s" % (getattr(self, "_err1", ""),
+                                                              ctypes.get_last_error())
+                return
+            self.ok = True
+            msg = wintypes.MSG()
+            while not self._stop.is_set():
+                r = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
+                if r in (0, -1):
+                    break
+                user32.TranslateMessage(ctypes.byref(msg))
+                user32.DispatchMessageW(ctypes.byref(msg))
+            user32.UnhookWindowsHookEx(hook)
+            self.ok = False
+        except Exception as e:
+            self.err = str(e)[:120]
+            self.ok = False
+
+
 # ============================ 界面 ============================
 class ScanApp:
     GREEN = "#1e9e4a"
@@ -1388,6 +1632,10 @@ class ScanApp:
         self.lock_at_ts = 0
         self._scan_after = None         # 输入停顿自动提交定时器
         self._scanning = False
+        self._hook = None               # 后台扫码监听
+        self._last_hook_code, self._last_hook_at = "", 0.0
+        self._float = None              # 扫码浮窗
+        self._float_after = None
         self.store_orders = 0           # 订单库里的订单总数（不再把全部订单读进内存）
         self.db_note = ""               # 首次从 JSON 导入的提示
         self.last_sync_ts = 0
@@ -1414,6 +1662,9 @@ class ScanApp:
         self._key_saved = bool(settings.get("require_key", True))
         self.require_key = self._key_saved
         self.key_on = tk.BooleanVar(value=self.require_key)
+        self.hook_on = tk.BooleanVar(value=bool(settings.get("bg_scan_hook", True)))
+        # 手动输入不再自动查（与网页一致）：回车/点「查询」才查；只有勾选此项才按输入停顿自动查
+        self.autosubmit_on = tk.BooleanVar(value=bool(settings.get("auto_submit", False)))
 
         self._build_ui()
         init_db()
@@ -1424,6 +1675,8 @@ class ScanApp:
         self._restore_lock_cache()
         self._start_web()          # 数据恢复完再对外服务，避免手机端拿到半成品
         self.root.after(100, self._drain_queue)
+        self.root.after(1200, self._first_run_api_hint)    # 新电脑首次装：提示填 API
+        self.root.after(1500, self._init_scan_hook)      # 后台扫码监听（最小化也能扫）
         self.root.after(300, lambda: self.sync_pending(background=True))
         self.root.after(600, lambda: self.reload_shelf(background=True))
         self.root.after(900, lambda: self.reload_lock(background=True))
@@ -1554,11 +1807,14 @@ class ScanApp:
 
     def web_lookup(self, code, rel, n):
         idx, _stat = self._web_index(rel, n)
-        e = idx.get(code) or {}
-        sh = self.shelf_map.get(code) or {}
-        lk = self.lock_map.get(code) or {}
+        e, canon = dict_get_ci(idx, code)          # 编码不分大小写
+        e = e or {}
+        sh, _k = dict_get_ci(self.shelf_map, canon)
+        lk, _k2 = dict_get_ci(self.lock_map, canon)
+        sh = sh or {}
+        lk = lk or {}
         return {
-            "code": code,
+            "code": canon,
             "orders": int(e.get("orders", 0) or 0),
             "pieces": int(e.get("qty", 0) or 0),
             "ones": int(e.get("ones", 0) or 0),
@@ -1593,15 +1849,20 @@ class ScanApp:
         ttk.Checkbutton(scan_box, text="手机访问需口令", variable=self.key_on,
                         command=self.on_key_toggle).grid(row=2, column=0, columnspan=4, sticky="w", padx=6, pady=(0, 6))
 
-        # 结果面板（对比一行）
+        # 结果面板：第一行=编码（黑色加粗），下面三行=一单一件/一单多件/货位
         self.result = tk.Label(
-            main, text="待发货订单数  —    货架在架数  —",
-            font=("Microsoft YaHei", 22, "bold"),
-            bg=self.GREY_BG, fg=self.GREY, height=2, anchor="center",
+            main, text="扫码后显示编码",
+            font=("Microsoft YaHei", 26, "bold"),
+            bg=self.GREY_BG, fg="#000000", height=2, anchor="center",
         )
         self.result.grid(row=1, column=0, sticky="ew", pady=8)
-        self.result_detail = tk.Label(main, text="", font=("Microsoft YaHei", 10), fg="#333")
-        self.result_detail.grid(row=2, column=0, sticky="w")
+        det = ttk.Frame(main)
+        det.grid(row=2, column=0, sticky="ew")
+        self.result_detail = tk.Label(det, text="", font=("Microsoft YaHei", 12), fg="#222",
+                                      justify="left", anchor="w")
+        self.result_detail.pack(anchor="w")
+        self.warn_label = tk.Label(det, text="", font=("Microsoft YaHei", 18, "bold"), fg=self.RED)
+        self.warn_label.pack(anchor="w", pady=(4, 0))
 
         # 商品数量筛选
         flt = ttk.LabelFrame(main, text="商品数量筛选（按订单商品件数加载待发货订单）")
@@ -1622,6 +1883,11 @@ class ScanApp:
         ttk.Button(ops, text="刷新货位库存", command=lambda: self.reload_shelf(background=True)).pack(side=tk.LEFT, padx=4)
         ttk.Button(ops, text="刷新锁定数", command=lambda: self.reload_lock(background=True)).pack(side=tk.LEFT, padx=4)
         ttk.Button(ops, text="清空日志", command=self.on_clear_logs).pack(side=tk.LEFT, padx=4)
+        ttk.Button(ops, text="API 设置", command=self.on_api_settings).pack(side=tk.LEFT, padx=4)
+        ttk.Checkbutton(ops, text="后台扫码监听（最小化也能扫）", variable=self.hook_on,
+                        command=self.on_hook_toggle).pack(side=tk.LEFT, padx=8)
+        ttk.Checkbutton(ops, text="不回车的扫码枪：停顿时自动查", variable=self.autosubmit_on,
+                        command=self.on_autosubmit_toggle).pack(side=tk.LEFT, padx=8)
 
         # 刷新周期
         itv = ttk.LabelFrame(main, text="刷新周期（分钟）")
@@ -1876,6 +2142,293 @@ class ScanApp:
         self.rebuild_local()
         self._show_load_status(prefix="已按条件筛选：")
 
+    # ---------- 首次使用（未配置 API）----------
+    def _first_run_api_hint(self):
+        """没配置 API 参数时（新电脑首次装）：提示并直接打开设置窗口。"""
+        if API_CONF.get("appKey") and API_CONF.get("sessionId"):
+            return
+        self.status_text.set("还没配置 API 参数：点「API 设置」填 appKey / appSecret / refreshToken / sessionId")
+        try:
+            messagebox.showinfo("首次使用",
+                                "还没有配置快麦接口参数。\n\n"
+                                "请在接下来的窗口里填写 appKey / appSecret / refreshToken / sessionId，\n"
+                                "可以点「测试连接」验证，然后「保存并应用」——之后会自动开始拉取数据。",
+                                parent=self.root)
+        except Exception:
+            pass
+        self.on_api_settings()
+
+    # ---------- 后台扫码监听（最小化 / 不在前台也能扫） ----------
+    def _init_scan_hook(self):
+        """按设置启动全局键盘监听；抓到扫码枪就查询并弹浮窗，不依赖窗口焦点。"""
+        if self.hook_on.get():
+            self._start_hook()
+        else:
+            self.status_text.set("后台扫码监听：已关闭（勾选「后台扫码监听」可开启）")
+
+    def _start_hook(self):
+        try:
+            if self._hook is None or not self._hook.alive():
+                self._hook = ScanKeyHook(self._on_hook_code)
+                self._hook.start()
+
+            def _report():
+                h = self._hook
+                if h and h.ok:
+                    self.status_text.set("后台扫码监听：已开启（最小化/不在前台也能扫）")
+                else:
+                    self.status_text.set("后台扫码监听：启动失败 %s" % ((h.err if h else "") or ""))
+
+            self.root.after(800, _report)
+        except Exception as e:
+            self.status_text.set("后台扫码监听启动失败：%s" % str(e)[:80])
+
+    def on_autosubmit_toggle(self):
+        """「不回车的扫码枪：停顿时自动查」开关（默认关 = 手动输入不自动查）。"""
+        val = bool(self.autosubmit_on.get())
+        s = load_settings()
+        s["auto_submit"] = val
+        save_settings(s)
+        self.status_text.set("输入停顿自动查询：%s（%s）"
+                             % ("已开启" if val else "已关闭",
+                                "打字停顿约 0.35 秒就查询" if val else "回车或点「查询」才查"))
+
+    def on_hook_toggle(self):
+        val = bool(self.hook_on.get())
+        s = load_settings()
+        s["bg_scan_hook"] = val
+        save_settings(s)
+        if val:
+            self._start_hook()
+        else:
+            try:
+                if self._hook:
+                    self._hook.stop()
+            except Exception:
+                pass
+            self._hide_float()
+            self.status_text.set("后台扫码监听：已关闭")
+
+    def _on_hook_code(self, code):
+        """钩子线程回调：只把结果丢进队列（Tk 只能主线程碰）。"""
+        try:
+            code = (code or "").strip()
+            if code:
+                self.q.put(lambda: self._hook_scan(code))
+        except Exception:
+            pass
+
+    def _hook_scan(self, code):
+        """全局监听捕到的扫码。程序在前台时由输入框处理，这里不重复记。"""
+        if self._scanning:
+            return
+        if self._is_foreground():
+            return
+        now = time.time()
+        if code == self._last_hook_code and (now - self._last_hook_at) < 1.5:
+            return
+        self._last_hook_code, self._last_hook_at = code, now
+        self._scanning = True
+        self._run_bg(self._worker_scan, code, True)
+
+    def _is_foreground(self):
+        """当前前台窗口是不是本程序。"""
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            hwnd = user32.GetForegroundWindow()
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            return int(pid.value) == os.getpid()
+        except Exception:
+            return False
+
+    # ---------- 扫码浮窗（后台扫码时显示） ----------
+    FLOAT_MS = 10000        # 停留时间（毫秒）
+
+    def _show_float(self, code, one_piece, multi_piece, bin_txt, shelf, ok, short):
+        """置顶浮窗：不抢焦点、10 秒自动消失、点一下立即关。"""
+        try:
+            bg = self.GREEN_BG if ok else self.RED_BG
+            if self._float is None:
+                f = tk.Toplevel(self.root)
+                f.overrideredirect(True)
+                f.attributes("-topmost", True)
+                f.configure(bg="#9aa0a6")
+                inner = tk.Frame(f, bg=bg)
+                inner.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+                self._float_inner = inner
+                self._float_code = tk.Label(inner, text="", font=("Microsoft YaHei", 24, "bold"),
+                                            fg="#000000", bg=bg, anchor="w", justify="left")
+                self._float_code.pack(fill=tk.X, padx=16, pady=(12, 2))
+                self._float_body = tk.Label(inner, text="", font=("Microsoft YaHei", 13),
+                                            fg="#222222", bg=bg, anchor="w", justify="left")
+                self._float_body.pack(fill=tk.X, padx=16)
+                self._float_warn = tk.Label(inner, text="", font=("Microsoft YaHei", 22, "bold"),
+                                            fg=self.RED, bg=bg, anchor="w")
+                self._float_warn.pack(fill=tk.X, padx=16, pady=(0, 12))
+                for w in (f, inner, self._float_code, self._float_body, self._float_warn):
+                    w.bind("<Button-1>", lambda e: self._hide_float())
+                self._float = f
+            self._float_inner.configure(bg=bg)
+            for w in (self._float_code, self._float_body, self._float_warn):
+                w.configure(bg=bg)
+            self._float_code.config(text=code)
+            self._float_body.config(text="待发货一单一件：%d\n待发货一单多件：%d\n货位：%s（在架 %d）"
+                                         % (one_piece, multi_piece, bin_txt, shelf))
+            self._float_warn.config(text="需补货" if short else "")
+            self._float.update_idletasks()
+            x, y = self._float_pos()
+            self._float.geometry("+%d+%d" % (x, y))
+            self._float.deiconify()
+            self._float.lift()
+            if self._float_after:
+                try:
+                    self.root.after_cancel(self._float_after)
+                except Exception:
+                    pass
+            self._float_after = self.root.after(self.FLOAT_MS, self._hide_float)
+        except Exception as e:
+            self.status_text.set("浮窗显示失败：%s" % str(e)[:80])
+
+    def _float_pos(self):
+        """屏幕右下角（按工作区算，避开任务栏）。"""
+        try:
+            import ctypes
+
+            class RECT(ctypes.Structure):
+                _fields_ = [("l", ctypes.c_long), ("t", ctypes.c_long),
+                            ("r", ctypes.c_long), ("b", ctypes.c_long)]
+
+            r = RECT()
+            ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(r), 0)  # SPI_GETWORKAREA
+            w = self._float.winfo_reqwidth()
+            h = self._float.winfo_reqheight()
+            return r.r - w - 18, r.b - h - 18
+        except Exception:
+            return (max(0, self.root.winfo_screenwidth() - 400),
+                    max(0, self.root.winfo_screenheight() - 240))
+
+    def _hide_float(self):
+        try:
+            if self._float is not None:
+                self._float.withdraw()
+        except Exception:
+            pass
+        if self._float_after:
+            try:
+                self.root.after_cancel(self._float_after)
+            except Exception:
+                pass
+            self._float_after = None
+
+    # ---------- API 设置 ----------
+    def on_api_settings(self):
+        """改 appKey/appSecret/refreshToken/session/网关/版本 —— 换账号不用重新打包。"""
+        win = tk.Toplevel(self.root)
+        win.title("API 设置（换账号 / 换网关 / 换版本）")
+        win.transient(self.root)
+        win.resizable(False, False)
+        conf = dict(API_CONF)
+        rows = (("gateway", "网关地址"),
+                ("version", "API 版本"),
+                ("appKey", "appKey"),
+                ("appSecret", "appSecret"),
+                ("refreshToken", "refreshToken"),
+                ("sessionId", "sessionId (accessToken)"))
+        frm = ttk.Frame(win, padding=10)
+        frm.pack(fill=tk.BOTH, expand=True)
+        frm.columnconfigure(1, weight=1)
+        vars_ = {}
+        for i, (key, label) in enumerate(rows):
+            ttk.Label(frm, text=label).grid(row=i, column=0, sticky="w", padx=(0, 8), pady=3)
+            v = tk.StringVar(value=str(conf.get(key) or ""))
+            vars_[key] = v
+            ttk.Entry(frm, textvariable=v, width=54).grid(row=i, column=1, sticky="ew", pady=3)
+        sm_var = tk.StringVar(value=str(conf.get("signMethod") or "hmac-sha256"))
+        up_var = tk.BooleanVar(value=bool(conf.get("signUpper")))
+        ttk.Label(frm, text="签名方式").grid(row=len(rows), column=0, sticky="w", padx=(0, 8), pady=3)
+        sub = ttk.Frame(frm)
+        sub.grid(row=len(rows), column=1, sticky="w", pady=3)
+        ttk.Combobox(sub, textvariable=sm_var, values=("hmac-sha256", "hmac", "md5"),
+                     width=14, state="readonly").pack(side=tk.LEFT)
+        ttk.Checkbutton(sub, text="签名结果大写", variable=up_var).pack(side=tk.LEFT, padx=10)
+        ttk.Label(frm, foreground="#666", justify="left",
+                  text="· 改完点「保存并应用」；换账号后建议再点「全量重拉」重建数据（旧账号的单会留在库里）。\n"
+                       "· 这些值存在 exe 同目录的 kuaimai_api.json（可直接拷到别的电脑，不用重打包）。"
+                  ).grid(row=len(rows) + 1, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        tip = tk.StringVar(value="")
+        ttk.Label(frm, textvariable=tip, foreground="#0b5394").grid(
+            row=len(rows) + 2, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
+        def _collect():
+            c = {k: vars_[k].get().strip() for k in vars_}
+            c["signMethod"] = sm_var.get()
+            c["signUpper"] = bool(up_var.get())
+            return c
+
+        def _restore_defaults():
+            for k in vars_:
+                vars_[k].set(str(DEFAULT_API.get(k) or ""))
+            sm_var.set(DEFAULT_API["signMethod"])
+            up_var.set(bool(DEFAULT_API["signUpper"]))
+            tip.set("已填入内置默认值（还没保存）")
+
+        def _do_save():
+            try:
+                save_api_conf(_collect())
+            except Exception as e:
+                messagebox.showerror("保存失败", str(e), parent=win)
+                return
+            self.status_text.set("API 参数已更新：网关 %s，版本 %s（存在 kuaimai_api.json）"
+                                 % (API_CONF.get("gateway"), API_CONF.get("version")))
+            win.destroy()
+            if db_orders_total() <= 0:
+                messagebox.showinfo("已保存",
+                                    "API 参数已生效。\n\n本地还没有订单数据，现在开始全量拉取"
+                                    "（约 20 分钟，界面上有进度）。", parent=self.root)
+                self.full_reload(background=True)
+            elif messagebox.askyesno("已保存",
+                                     "API 参数已生效。\n\n换了账号/网关的话，库里还是旧账号的数据。\n"
+                                     "现在马上「全量重拉」吗？", parent=self.root):
+                self.full_reload(background=True)
+
+        def _do_test():
+            c = _collect()
+            tip.set("测试中（用输入框里的值，不影响已保存的设置）…")
+            saved = dict(API_CONF)
+
+            def work():
+                try:
+                    API_CONF.clear()
+                    API_CONF.update(c)
+                    res = api_call("erp.trade.list.query",
+                                   {"status": "WAIT_SEND_GOODS", "pageNo": "1", "pageSize": "1"},
+                                   c.get("sessionId") or "", 20)
+                    if isinstance(res, dict) and res.get("success"):
+                        msg = "✓ 连接成功（待发货总数 %s）" % res.get("total", "?")
+                    else:
+                        code = res.get("code") if isinstance(res, dict) else "?"
+                        m = res.get("msg") if isinstance(res, dict) else str(res)[:80]
+                        msg = "✗ 失败 code=%s msg=%s" % (code, m)
+                except Exception as e:
+                    msg = "✗ 网络/接口异常：%s" % str(e)[:120]
+                finally:
+                    API_CONF.clear()
+                    API_CONF.update(saved)
+                self.q.put(lambda: tip.set(msg))
+
+            threading.Thread(target=work, daemon=True).start()
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=len(rows) + 3, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        ttk.Button(btns, text="保存并应用", command=_do_save).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="测试连接", command=_do_test).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="恢复默认值", command=_restore_defaults).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="取消", command=win.destroy).pack(side=tk.LEFT, padx=4)
+        win.grab_set()
+
     def apply_intervals(self):
         """应用界面上的三个刷新周期（分钟），并持久化。"""
         def _iv(var, lo, hi, default):
@@ -2008,7 +2561,13 @@ class ScanApp:
 
     # ---------- 扫码 ----------
     def _on_scan_key(self, event):
-        """扫码枪多数以回车结尾（Return 已绑定）；部分不回车，这里按输入停顿自动查询。"""
+        """回车提交由 <Return> 绑定负责。
+
+        手动输入**不再自动查**（与手机网页一致）；只有勾了「不回车的扫码枪：停顿时自动查」
+        才按输入停顿自动提交（老型号枪不回车时用）。
+        """
+        if not self.autosubmit_on.get():
+            return
         if event.keysym in ("Return", "KP_Enter", "Tab", "Escape"):
             return
         if self._scan_after:
@@ -2047,60 +2606,67 @@ class ScanApp:
         self.status_text.set("查询中：%s …" % code)
         self._run_bg(self._worker_scan, code)
 
-    def _worker_scan(self, code):
+    def _worker_scan(self, code, from_hook=False):
         try:
-            entry = self.index.get(code) or {"qty": 0, "orders": 0, "ones": 0, "main": False}
+            # 编码不分大小写：先精确、再忽略大小写；命中后用库里那个写法
+            entry, canon = dict_get_ci(self.index, code)
+            entry = entry or {"qty": 0, "orders": 0, "ones": 0, "main": False}
             pending = int(entry.get("qty", 0))
             orders_count = int(entry.get("orders", 0))
             ones = int(entry.get("ones", 0))
 
             # 货架在架数：直接取本地货位缓存（秒查，不联网）
-            shelf_entry = self.shelf_map.get(code) or {}
+            shelf_entry, _k = dict_get_ci(self.shelf_map, canon)
+            shelf_entry = shelf_entry or {}
             shelf = int(shelf_entry.get("shelf", 0) or 0)
             bins = shelf_entry.get("bins") or []
             shelf_note = "货位缓存 %s" % self.shelf_at if self.shelf_map else "货位缓存未加载"
 
             # 库存锁定数：本地缓存
-            lock_entry = self.lock_map.get(code) or {}
+            lock_entry, _k = dict_get_ci(self.lock_map, canon)
+            lock_entry = lock_entry or {}
             lock_n = int(lock_entry.get("lock", 0) or 0)
             sell_n = int(lock_entry.get("sellable", 0) or 0)
             avail_n = int(lock_entry.get("avail", 0) or 0)
 
             light = "绿" if orders_count > 0 else "红"
-            insert_scan(code, orders_count, shelf, pending, light)
-            self.q.put(lambda: self._apply_scan(code, orders_count, pending, ones, shelf, shelf_note,
-                                               bins, lock_n, sell_n, avail_n))
+            insert_scan(canon, orders_count, shelf, pending, light)
+            self.q.put(lambda: self._apply_scan(canon, orders_count, pending, ones, shelf, shelf_note,
+                                               bins, lock_n, sell_n, avail_n, from_hook))
         except Exception as e:
             msg = str(e)[:200]
             self.q.put(lambda: self._finish_scan("扫码查询失败：%s" % msg))
 
     def _apply_scan(self, code, orders_count, pending, ones, shelf, shelf_note, bins,
-                    lock_n=0, sell_n=0, avail_n=0):
+                    lock_n=0, sell_n=0, avail_n=0, from_hook=False):
         self._scanning = False
         ok = orders_count > 0
-        if ok and pending > shelf:
-            hint = "件数 %d > 在架 %d ⚠ 需补货" % (pending, shelf)
-        elif ok:
-            hint = "有待发货订单 ✔ 可以拣货"
-        else:
-            hint = "没有待发货订单"
+        # 一单一件：整单只有一件的单（每单正好 1 件）；剩下的就是“一单多件”
+        one_piece = min(int(ones or 0), int(pending or 0))
+        multi_piece = max(0, int(pending or 0) - one_piece)
+        short = ok and (int(pending or 0) > int(shelf or 0))
         self.result.config(
-            text="%s\n待发货订单数  %d 单    货架在架数  %d" % (code, orders_count, shelf),
+            text=code,
             bg=self.GREEN_BG if ok else self.RED_BG,
-            fg=self.GREEN if ok else self.RED,
+            fg="#000000",
+            font=("Microsoft YaHei", 26, "bold"),
         )
-        bin_txt = "、".join("%s×%d" % (b[0], b[1]) for b in bins[:5]) if bins else "无在架货位"
+        bin_txt = "、".join("%s×%d" % (b[0], b[1]) for b in bins[:6]) if bins else "无在架货位"
         self.result_detail.config(
-            text="件数 %d；其中“一件订单” %d 单；锁定数 %d（可售 %d / 可用 %d）\n货位来源：%s；货位：%s；%s"
-            % (pending, ones, lock_n, sell_n, avail_n, shelf_note, bin_txt, hint),
-        )
+            text="待发货一单一件：%d\n待发货一单多件：%d\n货位：%s（在架 %d）"
+            % (one_piece, multi_piece, bin_txt, int(shelf or 0)))
+        self.warn_label.config(text="需补货" if short else "")
         self.tree.insert("", 0, values=(now_gmt8(), code, orders_count, shelf, pending,
                                         "绿(有货)" if ok else "红(无待发)"),
                          tags=("ok",) if ok else ("alert",))
-        self.status_text.set("查询完成：%s（待发货 %d 单 / 件数 %d / 在架 %d）" % (
-            code, orders_count, pending, shelf))
-        self.scan_text.set("")
-        self.scan_entry.focus()
+        self.status_text.set("查询完成：%s（一单一件 %d / 一单多件 %d；在架 %d）%s"
+                             % (code, one_piece, multi_piece, int(shelf or 0),
+                                "；需补货" if short else ""))
+        if from_hook:
+            self._show_float(code, one_piece, multi_piece, bin_txt, int(shelf or 0), ok, short)
+        else:
+            self.scan_text.set("")
+            self.scan_entry.focus()
         if self.sound_on.get():
             self._run_bg(play_ok_sound if ok else play_alert_sound)
 
@@ -2158,9 +2724,48 @@ def run_selftest():
     print("[selftest] 增量同步: 处理 %d 单，store 由 %d → %d 单" % (processed, len(store), len(work)))
 
 
+def _single_instance_guard():
+    """单实例保护：同一时间只允许跑一个。
+
+    两个实例会同时抢同一个 SQLite 库（各自全量拉取 + 写库），主线程卡在等锁上时
+    界面就不再处理扫码，表现为“扫码没反应”。返回 False 表示已有实例在跑。
+    """
+    if os.name != "nt":
+        return None
+    global _INSTANCE_MUTEX
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        handle = kernel32.CreateMutexW(None, False, "Local\\KuaimaiScanSingleton")
+        if not handle:
+            return None
+        if ctypes.get_last_error() == 183:      # ERROR_ALREADY_EXISTS
+            return False
+        _INSTANCE_MUTEX = handle                # 持有到进程结束，由系统自动释放
+        return handle
+    except Exception:
+        return None
+
+
 def main():
     if "--selftest" in sys.argv:
         run_selftest()
+        return
+    if _single_instance_guard() is False:
+        try:
+            tip = tk.Tk()
+            tip.withdraw()
+            messagebox.showwarning(
+                "已经在运行",
+                "快麦扫码查询已经在运行了。\n\n"
+                "请直接用屏幕上已经开着的那个窗口；不要开两个，\n"
+                "两个窗口会抢同一个数据库，扫码会没反应。")
+            tip.destroy()
+        except Exception:
+            pass
         return
     try:
         init_db()

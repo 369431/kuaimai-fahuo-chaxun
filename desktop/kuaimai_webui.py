@@ -24,9 +24,9 @@ WEB_INDEX_HTML = r"""<!DOCTYPE html>
   button.ghost { background:#e8eef5; color:#0b5394; }
   button:active { opacity:.75; }
   #result { border-radius:12px; padding:14px; text-align:center; background:#eee; color:#555; margin-bottom:10px; }
-  #rcode { font-size:15px; opacity:.9; word-break:break-all; }
-  #rmain { font-size:26px; font-weight:800; margin-top:6px; line-height:1.35; }
-  #rdetail { font-size:13px; color:#333; line-height:1.7; white-space:pre-wrap; }
+  #rcode { font-size:20px; font-weight:800; color:#000; word-break:break-all; }
+  #rmain { font-size:20px; font-weight:700; margin-top:6px; line-height:1.5; }
+  #rdetail { font-size:14px; color:#333; line-height:1.7; white-space:pre-wrap; }
   .ok { background:#d6f5df; color:#1e9e4a; }
   .bad { background:#fde0e0; color:#c62828; }
   .muted { color:#666; font-size:12px; }
@@ -58,7 +58,7 @@ WEB_INDEX_HTML = r"""<!DOCTYPE html>
   </div>
   <div id="result">
     <div id="rcode">就绪</div>
-    <div id="rmain">待发货订单数 —　货架在架数 —</div>
+    <div id="rmain">扫码后显示</div>
     <div id="rdetail"></div>
   </div>
   <div class="card">
@@ -125,17 +125,21 @@ async function query(code){
   if(d.error){ $('rmain').textContent=d.error; return; }
   const ok=d.orders>0;
   $('result').className = ok?'ok':'bad';
-  $('rmain').textContent = `待发货订单数 ${d.orders} 单　　货架在架数 ${d.shelf}`;
+  // 一单一件：整单只有一件的单（每单正好 1 件）；剩下抵成一单多件
+  const onePiece=Math.min(d.ones||0, d.pieces||0), multiPiece=Math.max(0, (d.pieces||0)-onePiece);
   const bins=(d.bins||[]).map(b=>`${b[0]}×${b[1]}`).join('、')||'无在架货位';
-  const hint = d.orders===0 ? '没有待发货订单' : (d.pieces>d.shelf?`件数 ${d.pieces} > 在架 ${d.shelf} ⚠ 需补货`:'有待发货订单 ✔ 可以拣货');
-  $('rdetail').textContent = `件数 ${d.pieces}；其中“一件订单” ${d.ones} 单；锁定数 ${d.lock}（可售 ${d.sellable} / 可用 ${d.avail}）\n货位：${bins}\n提示：${hint}`;
+  const short=d.pieces>d.shelf;          // 在架少于待发货件数 → 需补货
+  $('rcode').textContent = d.code;
+  $('rmain').innerHTML = `待发货一单一件：${onePiece}<br>待发货一单多件：${multiPiece}`;
+  $('rdetail').innerHTML = `货位：${bins}（在架 ${d.shelf}）`
+    + (short ? '<br><span style="color:#c62828;font-weight:800;font-size:22px">需补货</span>' : '');
+  const hint = d.orders===0 ? '没有待发货订单' : (short ? '需补货' : '可以拣货');
   hist.push({t:fmtTime(new Date()), code:d.code, orders:d.orders, shelf:d.shelf, pieces:d.pieces, hint});
   saveHist(); renderHistory(); beep(ok);
   $('code').value=''; $('code').focus();
 }
-let timer=null;
-$('code').addEventListener('keydown', e=>{ if(e.key==='Enter'){ clearTimeout(timer); query($('code').value); } });
-$('code').addEventListener('input', ()=>{ clearTimeout(timer); if($('code').value.trim().length>=3) timer=setTimeout(()=>query($('code').value),350); });
+// 扫码枪：自带回车 → 直接查询；手动打字时不自动查，点「查询」或按回车才查
+$('code').addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); query($('code').value); } });
 $('btnQuery').onclick=()=>query($('code').value);
 $('btnApply').onclick=()=>{ loadStatus(); if(hist.length) query(hist[hist.length-1].code); };
 $('btnSound').onclick=()=>{ SOUND=!SOUND; $('btnSound').textContent='声音：'+(SOUND?'开':'关'); };
