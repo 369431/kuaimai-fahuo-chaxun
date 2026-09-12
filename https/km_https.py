@@ -43,8 +43,8 @@ STATIC_MAP = {
     "/km/zxing.js": "zxing.js",
     "/km/scan.js": "scan.js",
 }
-INJECT = ('<script src="/km/zxing.js?v=7"></script>\n'
-          '<script src="/km/scan.js?v=7"></script>\n')
+INJECT = ('<script src="/km/zxing.js?v=8"></script>\n'
+          '<script src="/km/scan.js?v=8"></script>\n')
 
 _ctx_lock = threading.Lock()
 _ctx = {"ssl": None, "stamp": 0.0}

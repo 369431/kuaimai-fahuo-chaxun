@@ -31,9 +31,10 @@ import concurrent.futures
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 try:
-    from kuaimai_webui import WEB_INDEX_HTML
+    from kuaimai_webui import WEB_INDEX_HTML, PICK_HTML
 except Exception:
     WEB_INDEX_HTML = "<h1>缺少 kuaimai_webui.py</h1>"
+    PICK_HTML = WEB_INDEX_HTML
 import kuaimai_db              # 订单缓存 SQLite 存储层（kuaimai_db.py）
 import traceback
 import collections
@@ -44,7 +45,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timezone, timedelta
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 
 try:
     import winsound  # Windows 声光提示
@@ -109,6 +110,7 @@ SHELF_PAGE_SIZE = 500                # asso.goods.section.sku.query 实际单页
 MAX_SHELF_PAGES = 200
 LOCK_PAGE_SIZE = 100                 # stock.api.status.query 单页最大 100
 LOCK_REFRESH_MIN = 10                # 锁定数自动刷新间隔（分钟）
+SHELF_REFRESH_MIN = 5                # 货位在架数自动刷新间隔（分钟）
 
 # 待发货口径（用户定义）：待发货 + 待审核 + 待打印快递单 三个系统状态合并统计。
 # 注：合并后结果集很大，普通分页会报 20027“数量过多”，必须用 useCursor 游标翻页。
@@ -396,6 +398,16 @@ def init_db():
             goods_name TEXT,
             status TEXT)"""
     )
+    # 拣货会话（手机端拣货进度持久化：退出页面/关浏览器也能接着拣）
+    cur.execute(
+        """CREATE TABLE IF NOT EXISTS pick_batch
+           (batch TEXT PRIMARY KEY,
+            created_at TEXT,
+            ended_at TEXT,
+            status TEXT,
+            days INTEGER,
+            groups_json TEXT)"""
+    )
     # 兼容旧库：补齐增强字段
     cols = [d[1] for d in cur.execute("PRAGMA table_info(scan_record)")]
     for name, ddl in (
@@ -408,6 +420,83 @@ def init_db():
             cur.execute("ALTER TABLE scan_record ADD COLUMN %s %s" % (name, ddl))
     conn.commit()
     conn.close()
+
+
+# ============================ 拣货会话（持久化） ============================
+def pick_save(batch, groups, status="running", days=3, created_at=None):
+    conn = get_conn()
+    conn.execute(
+        "INSERT OR REPLACE INTO pick_batch(batch,created_at,ended_at,status,days,groups_json)"
+        " VALUES (?,?,?,?,?,?)",
+        (str(batch), created_at or now_gmt8(), "" if status == "running" else now_gmt8(),
+         status, int(days or 3), json.dumps(groups or [], ensure_ascii=False)))
+    conn.commit()
+    conn.close()
+
+
+def pick_get(batch):
+    conn = get_conn()
+    row = conn.execute("SELECT batch,created_at,ended_at,status,days,groups_json"
+                       " FROM pick_batch WHERE batch=?", (str(batch),)).fetchone()
+    conn.close()
+    if not row:
+        return None
+    try:
+        groups = json.loads(row[5] or "[]")
+    except Exception:
+        groups = []
+    return {"batch": row[0], "created_at": row[1], "ended_at": row[2], "status": row[3],
+            "days": row[4], "groups": groups}
+
+
+def pick_running():
+    conn = get_conn()
+    row = conn.execute("SELECT batch,created_at,ended_at,status,days,groups_json FROM pick_batch"
+                       " WHERE status='running' ORDER BY created_at DESC LIMIT 1").fetchone()
+    conn.close()
+    if not row:
+        return None
+    try:
+        groups = json.loads(row[5] or "[]")
+    except Exception:
+        groups = []
+    return {"batch": row[0], "created_at": row[1], "ended_at": row[2], "status": row[3],
+            "days": row[4], "groups": groups}
+
+
+def pick_end(batch):
+    d = pick_get(batch)
+    if not d:
+        return None
+    pick_save(d["batch"], d["groups"], "ended", d["days"], d["created_at"])
+    return pick_get(batch)
+
+
+def build_pick_groups(orders, shelf_lookup):
+    """把订单明细合并成「相邻同编码同货位」的拣货组（按打印序号排列）。
+
+    shelf_lookup(code) -> (货位文本, 在架数)
+    """
+    groups = []
+    for o in orders:
+        items = o.get("items") or []
+        if not items:
+            items = [("", 0)]
+        for code, num in items:
+            bins, qty = shelf_lookup(code)
+            seq = o.get("seq") or 0
+            if groups and groups[-1]["code"] == code and groups[-1]["bins"] == bins:
+                g = groups[-1]
+                g["seq_b"] = seq
+                g["qty"] += int(num or 0)
+                g["rows"] += 1
+                if len(g.get("sids") or []) < 400:
+                    g.setdefault("sids", []).append(o.get("sid"))
+            else:
+                groups.append({"seq_a": seq, "seq_b": seq, "code": code, "qty": int(num or 0),
+                               "bins": bins, "shelf": qty, "rows": 1, "state": "pending",
+                               "sids": [o.get("sid")]})
+    return groups
 
 
 def insert_scan(barcode, pending_qty, shelf_qty, orders_count, light):
@@ -1406,10 +1495,30 @@ class _WebHandler(BaseHTTPRequestHandler):
                 return self._send(body, "text/html; charset=utf-8", code=401)
             if parsed.path in ("/", "/index.html"):
                 return self._send(WEB_INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
+            if parsed.path in ("/pick", "/pick.html"):
+                return self._send(PICK_HTML.encode("utf-8"), "text/html; charset=utf-8")
             if parsed.path == "/api/status":
                 return self._json(app.web_status())
             if parsed.path == "/api/index":
                 return self._json(app.web_index_payload())
+            if parsed.path == "/api/pick/list":
+                try:
+                    pdays = int((qs.get("days") or ["3"])[0] or 3)
+                except Exception:
+                    pdays = 3
+                return self._json(app.web_pick_list((qs.get("batch") or [""])[0], pdays,
+                                                    (qs.get("refresh") or ["0"])[0] in ("1", "true")))
+            if parsed.path == "/api/pick/current":
+                return self._json(app.web_pick_current())
+            if parsed.path == "/api/pick/mark":
+                try:
+                    gidx = int((qs.get("g") or ["-1"])[0])
+                except Exception:
+                    gidx = -1
+                return self._json(app.web_pick_mark((qs.get("batch") or [""])[0], gidx,
+                                                    (qs.get("state") or ["pending"])[0]))
+            if parsed.path == "/api/pick/end":
+                return self._json(app.web_pick_end((qs.get("batch") or [""])[0]))
             if parsed.path == "/api/lookup":
                 code = (qs.get("code") or [""])[0].strip()
                 rel = (qs.get("rel") or ["any"])[0] or "any"
@@ -1606,6 +1715,178 @@ class ScanKeyHook:
             self.ok = False
 
 
+# ============================ 批次查询（按打印批次号反查） ============================
+# 快麦开放平台没有「打印批次」接口，但订单操作日志（erp.trade.trace.list）里
+# 「打印快递单」动作的 content 自带：打印批次号 / 打印序号 / 第几次打印 / 快递单号。
+_B_RE_SEQ = re.compile(r"打印序号[：:]\s*(\d+)")
+_B_RE_TIMES = re.compile(r"第(\d+)次打印")
+_B_RE_EXP = re.compile(r"快递单号[：:]\s*([A-Za-z0-9]+)")
+_B_RE_CO = re.compile(r"快递公司[：:]\s*([^；;]+)")
+
+
+def fetch_print_batch(batch, days=3, progress=None, max_pages=30):
+    """按打印批次号反查：先查订单操作日志拿 sid，再批量取订单明细（商品编码/件数）。
+
+    返回 (orders, err)。orders = [{sid, seq, printed, express, carrier, operator,
+                                 items: [(编码, 件数)], sys_status, short_id}]，按打印序号排序。
+    """
+    batch = str(batch or "").strip()
+    if not batch:
+        return [], "请输入打印批次号"
+    end = datetime.now()
+    start = end - timedelta(days=max(1, int(days or 3)))
+    to_ms = lambda d: str(int(d.timestamp() * 1000))
+    seen = {}
+    page = 1
+    while page <= max_pages:
+        biz = {"action": "打印快递单", "content": batch,
+               "operateTimeStart": to_ms(start), "operateTimeEnd": to_ms(end),
+               "pageNo": str(page), "pageSize": "200"}
+        try:
+            res = api_call_authed("erp.trade.trace.list", biz, timeout=40)
+        except Exception as e:
+            if seen:
+                break
+            return [], "查询打印记录失败：%s" % str(e)[:120]
+        if not isinstance(res, dict) or not res.get("success"):
+            if seen:
+                break
+            code = res.get("code") if isinstance(res, dict) else "?"
+            msg = res.get("msg") if isinstance(res, dict) else str(res)[:80]
+            return [], "查询打印记录失败 code=%s msg=%s" % (code, msg)
+        lst = res.get("list") or []
+        for x in lst:
+            content = str(x.get("content") or "")
+            if batch not in content:
+                continue
+            sid = str(x.get("sid") or "")
+            if not sid:
+                continue
+            m_seq, m_t, m_e, m_c = (_B_RE_SEQ.search(content), _B_RE_TIMES.search(content),
+                                    _B_RE_EXP.search(content), _B_RE_CO.search(content))
+            cur = {"sid": sid,
+                   "seq": int(m_seq.group(1)) if m_seq else 0,
+                   "printed": int(m_t.group(1)) if m_t else 1,
+                   "express": m_e.group(1) if m_e else "",
+                   "carrier": m_c.group(1).strip() if m_c else "",
+                   "operator": str(x.get("operator") or ""),
+                   "op_time": x.get("operateTime")}
+            old = seen.get(sid)
+            if old is None or (cur["printed"] or 0) >= (old["printed"] or 0):
+                seen[sid] = cur
+        if progress:
+            progress(len(seen), page, len(lst))
+        if len(lst) < 200:
+            break
+        page += 1
+    if not seen:
+        return [], ("最近 %s 天没找到批次 %s 的打印记录；如果更早打印的，把天数改大再试"
+                    % (int(days or 3), batch))
+    orders = sorted(seen.values(), key=lambda r: (r.get("seq") or 0))
+    # 批量取订单明细（实测：sid 逗号拼接、每次 50 个可用）
+    sids = [o["sid"] for o in orders]
+    detail = {}
+    for i in range(0, len(sids), 50):
+        chunk = sids[i:i + 50]
+        try:
+            res = api_call_authed("erp.trade.list.query",
+                                  {"sid": ",".join(chunk), "pageSize": "100"}, timeout=60)
+        except Exception:
+            continue
+        if isinstance(res, dict) and res.get("success"):
+            for t in (res.get("list") or []):
+                detail[str(t.get("sid"))] = t
+        if progress:
+            progress(len(seen), i // 50 + 1, len(chunk))
+    picked = []
+    for o in orders:
+        t = detail.get(o["sid"]) or {}
+        items, ignored = [], 0
+        for it in (t.get("orders") or []):
+            if _is_excluded_item(it):      # 1166 / 买家秀 / 圆虹包 等占位、平台赠品：不算、不拣
+                ignored += 1
+                continue
+            code = item_code(it)
+            if code:
+                items.append((code, item_num(it)))
+        o["items"] = items
+        o["ignored"] = ignored
+        o["sys_status"] = t.get("sysStatus") or ""
+        o["short_id"] = t.get("shortId") or ""
+        o["found"] = bool(t)
+        if items:                          # 只有赠品/占位商品的单，不进拣货清单
+            picked.append(o)
+    return picked, ""
+
+
+# ============================ 读导出的批次文件（CSV / xlsx） ============================
+def _pick_col(headers, keys):
+    for i, h in enumerate(headers):
+        t = str(h or "").strip().lower().replace(" ", "")
+        for k in keys:
+            if k in t:
+                return i
+    return -1
+
+
+def read_table_file(path):
+    """读 CSV / xlsx，返回 (headers, rows)。xlsx 直接解 zip+XML，不依赖第三方库。"""
+    lower = str(path).lower()
+    if lower.endswith(".xlsx"):
+        import zipfile
+        import xml.etree.ElementTree as ET
+        NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+        z = zipfile.ZipFile(path)
+        names = z.namelist()
+        shared = []
+        if "xl/sharedStrings.xml" in names:
+            root = ET.fromstring(z.read("xl/sharedStrings.xml"))
+            for si in root.findall(NS + "si"):
+                shared.append("".join(t.text or "" for t in si.iter(NS + "t")))
+        sheet = sorted(n for n in names if n.startswith("xl/worksheets/sheet"))[0]
+        root = ET.fromstring(z.read(sheet))
+        table = []
+        for row in root.iter(NS + "row"):
+            cells = {}
+            for c in row.findall(NS + "c"):
+                ref = c.get("r") or ""
+                col = "".join(ch for ch in ref if ch.isalpha())
+                t = c.get("t")
+                v = c.find(NS + "v")
+                isel = c.find(NS + "is")
+                if t == "s" and v is not None and v.text is not None:
+                    idx = int(v.text)
+                    txt = shared[idx] if 0 <= idx < len(shared) else ""
+                elif isel is not None:
+                    txt = "".join(x.text or "" for x in isel.iter(NS + "t"))
+                else:
+                    txt = (v.text if v is not None else "") or ""
+                cells[col] = txt
+            table.append(cells)
+        if not table:
+            return [], []
+        cols = sorted({c for r in table for c in r}, key=lambda s: (len(s), s))
+        headers = [table[0].get(c, "") for c in cols]
+        rows = [[r.get(c, "") for c in cols] for r in table[1:]]
+        return headers, rows
+    # CSV / 文本
+    import csv
+    import io
+    for enc in ("utf-8-sig", "gbk", "utf-8"):
+        try:
+            with io.open(path, encoding=enc, newline="") as f:
+                table = list(csv.reader(f))
+            break
+        except Exception:
+            table = None
+    if not table:
+        raise RuntimeError("读不了这个文件（编码/格式不支持）")
+    table = [r for r in table if any(str(x).strip() for x in r)]
+    if not table:
+        return [], []
+    return table[0], table[1:]
+
+
 # ============================ 界面 ============================
 class ScanApp:
     GREEN = "#1e9e4a"
@@ -1630,6 +1911,7 @@ class ScanApp:
         self.lock_map = {}              # 编码 → {"lock","sellable","avail"}
         self.lock_at = "未加载"
         self.lock_at_ts = 0
+        self.shelf_at_ts = 0            # 货位在架数最后刷新时间（批次拣货要看新鲜货位）
         self._scan_after = None         # 输入停顿自动提交定时器
         self._scanning = False
         self._hook = None               # 后台扫码监听
@@ -1656,6 +1938,7 @@ class ScanApp:
         self.auto_refresh_min = int(settings.get("auto_refresh_min") or AUTO_REFRESH_MIN)
         self.full_refresh_min = int(settings.get("full_refresh_min") or FULL_REFRESH_MIN)
         self.lock_refresh_min = int(settings.get("lock_refresh_min") or LOCK_REFRESH_MIN)
+        self.shelf_refresh_min = int(settings.get("shelf_refresh_min") or SHELF_REFRESH_MIN)
         self.auto_min_var = tk.StringVar(value=str(self.auto_refresh_min))
         self.full_min_var = tk.StringVar(value=str(self.full_refresh_min))
         self.lock_min_var = tk.StringVar(value=str(self.lock_refresh_min))
@@ -1805,6 +2088,69 @@ class ScanApp:
         self._web_idx_cache = (ver, payload)
         return payload
 
+    # ---------- 手机端拣货 ----------
+    def _shelf_lookup(self, code):
+        """给拣货组用：返回（货位文本, 在架数）——忽略大小写。"""
+        sh, _k = dict_get_ci(self.shelf_map, code)
+        sh = sh or {}
+        bins = "、".join(b[0] for b in (sh.get("bins") or [])) or "无在架货位"
+        return bins, int(sh.get("shelf", 0) or 0)
+
+    def _pick_payload(self, s):
+        gs = s.get("groups") or []
+        done = sum(1 for g in gs if g.get("state") == "done")
+        short = sum(1 for g in gs if g.get("state") == "short")
+        return {"batch": s.get("batch"), "created_at": s.get("created_at"),
+                "ended_at": s.get("ended_at"), "status": s.get("status"), "days": s.get("days"),
+                "groups": gs,
+                "progress": {"groups": len(gs), "done": done, "short": short,
+                             "pending": len(gs) - done - short,
+                             "qty": sum(int(g.get("qty") or 0) for g in gs),
+                             "qty_done": sum(int(g.get("qty") or 0) for g in gs
+                                             if g.get("state") == "done")}}
+
+    def web_pick_list(self, batch, days=3, refresh=False):
+        """开一个拣货会话：已有存档（未结束）就直接续上，否则现拉。"""
+        batch = str(batch or "").strip()
+        if not batch:
+            return {"error": "缺少批次号"}
+        saved = pick_get(batch)
+        if saved and saved.get("status") == "running" and not refresh:
+            return self._pick_payload(saved)
+        orders, err = fetch_print_batch(batch, days=days)
+        if err:
+            return {"error": err}
+        groups = build_pick_groups(orders, self._shelf_lookup)
+        pick_save(batch, groups, "running", days)
+        return self._pick_payload(pick_get(batch))
+
+    def web_pick_current(self):
+        """有未结束的拣货批次就返回（手机页面一打开就能接着拣）。"""
+        s = pick_running()
+        if not s:
+            return {"running": False}
+        p = self._pick_payload(s)
+        return {"running": True, "batch": p["batch"], "created_at": p["created_at"],
+                "progress": p["progress"], "groups": p["groups"], "days": p["days"]}
+
+    def web_pick_mark(self, batch, idx, state):
+        if state not in ("done", "short", "pending"):
+            return {"error": "state 不合法"}
+        d = pick_get(batch)
+        if not d:
+            return {"error": "找不到该批次的拣货记录"}
+        gs = d.get("groups") or []
+        if not (0 <= idx < len(gs)):
+            return {"error": "序号越界"}
+        gs[idx]["state"] = state
+        gs[idx]["marked_at"] = now_gmt8()
+        pick_save(d["batch"], gs, d.get("status") or "running", d.get("days") or 3, d.get("created_at"))
+        return self._pick_payload(pick_get(batch))
+
+    def web_pick_end(self, batch):
+        pick_end(batch)
+        return {"ok": True}
+
     def web_lookup(self, code, rel, n):
         idx, _stat = self._web_index(rel, n)
         e, canon = dict_get_ci(idx, code)          # 编码不分大小写
@@ -1884,6 +2230,7 @@ class ScanApp:
         ttk.Button(ops, text="刷新锁定数", command=lambda: self.reload_lock(background=True)).pack(side=tk.LEFT, padx=4)
         ttk.Button(ops, text="清空日志", command=self.on_clear_logs).pack(side=tk.LEFT, padx=4)
         ttk.Button(ops, text="API 设置", command=self.on_api_settings).pack(side=tk.LEFT, padx=4)
+        ttk.Button(ops, text="批次查询", command=self.on_batch_dialog).pack(side=tk.LEFT, padx=4)
         ttk.Checkbutton(ops, text="后台扫码监听（最小化也能扫）", variable=self.hook_on,
                         command=self.on_hook_toggle).pack(side=tk.LEFT, padx=8)
         ttk.Checkbutton(ops, text="不回车的扫码枪：停顿时自动查", variable=self.autosubmit_on,
@@ -1980,8 +2327,12 @@ class ScanApp:
         self.shelf_map = db_call(kuaimai_db.load_shelf)
         if not self.shelf_map:
             return
-        meta = load_orders_meta(("shelf_at", "shelf_stat"))
+        meta = load_orders_meta(("shelf_at", "shelf_stat", "shelf_ts"))
         self.shelf_at = meta.get("shelf_at") or "未知"
+        try:
+            self.shelf_at_ts = float(meta.get("shelf_ts") or 0)
+        except Exception:
+            self.shelf_at_ts = 0
         self._shelf_version = getattr(self, "_shelf_version", 0) + 1
         try:
             self.shelf_stat = json.loads(meta.get("shelf_stat") or "{}")
@@ -2011,6 +2362,7 @@ class ScanApp:
         self.shelf_map = shelf_map
         self.shelf_stat = stat
         self.shelf_at = loaded_at
+        self.shelf_at_ts = time.time()
         self._shelf_version = getattr(self, "_shelf_version", 0) + 1
 
     # ---------- 库存锁定数加载 ----------
@@ -2323,6 +2675,256 @@ class ScanApp:
                 pass
             self._float_after = None
 
+    # ---------- 批次查询（按打印批次号） ----------
+    def on_batch_dialog(self):
+        """输入打印批次号 → 列出该批次订单 + 每单商品编码/货位，并按货位汇总。"""
+        old = getattr(self, "_batch_win", None)
+        if old is not None:
+            try:
+                old.destroy()
+            except Exception:
+                pass
+        win = tk.Toplevel(self.root)
+        self._batch_win = win
+        win.title("批次查询（按打印批次号）")
+        win.geometry("1020x640")
+        win.transient(self.root)
+        top = ttk.Frame(win, padding=(10, 8))
+        top.pack(fill=tk.X)
+        ttk.Label(top, text="打印批次号").pack(side=tk.LEFT)
+        var = tk.StringVar()
+        ent = ttk.Entry(top, textvariable=var, width=14, font=("Consolas", 15))
+        ent.pack(side=tk.LEFT, padx=6)
+        ttk.Label(top, text="查最近").pack(side=tk.LEFT, padx=(8, 2))
+        days = tk.StringVar(value="3")
+        ttk.Spinbox(top, from_=1, to=90, width=4, textvariable=days).pack(side=tk.LEFT)
+        ttk.Label(top, text="天").pack(side=tk.LEFT, padx=(2, 8))
+        btn = ttk.Button(top, text="查询")
+        btn.pack(side=tk.LEFT, padx=4)
+        exp = ttk.Button(top, text="导出 Excel", state=tk.DISABLED, command=self._export_batch)
+        exp.pack(side=tk.LEFT, padx=4)
+        ttk.Button(top, text="读导出文件…", command=self.on_pick_file).pack(side=tk.LEFT, padx=4)
+        info = tk.StringVar(value="输入批次号后回车或点「查询」；默认按打印顺序出拣货清单")
+        ttk.Label(win, textvariable=info, foreground="#0b5394").pack(anchor="w", padx=12)
+        cols = ("seq", "sid", "short", "express", "code", "num", "bins", "shelf", "status")
+        heads = (("seq", "打印序号", 60), ("sid", "系统单号", 150), ("short", "内部单号", 90),
+                 ("express", "快递单号", 130), ("code", "商品编码", 140), ("num", "件数", 50),
+                 ("bins", "货位", 130), ("shelf", "在架", 50), ("status", "系统状态", 150))
+        nb = ttk.Notebook(win)
+        nb.pack(fill=tk.BOTH, expand=True, padx=12, pady=6)
+        f1 = ttk.Frame(nb)
+        nb.add(f1, text="按打印顺序（拣货）")
+        picktxt = tk.Text(f1, font=("Microsoft YaHei", 13), wrap="none")
+        picktxt.pack(fill=tk.BOTH, expand=True)
+        f2 = ttk.Frame(nb)
+        nb.add(f2, text="明细表")
+        tree = ttk.Treeview(f2, columns=cols, show="headings", height=14)
+        for c, t, w in heads:
+            tree.heading(c, text=t)
+            tree.column(c, width=w, anchor="center")
+        tree.pack(fill=tk.BOTH, expand=True)
+        f3 = ttk.Frame(nb)
+        nb.add(f3, text="按货位汇总")
+        sumtxt = tk.Text(f3, font=("Microsoft YaHei", 12), wrap="none")
+        sumtxt.pack(fill=tk.BOTH, expand=True)
+        self._batch_no, self._batch_rows = "", []
+        self._batch_ui = {"win": win, "tree": tree, "sum": sumtxt, "pick": picktxt, "nb": nb,
+                          "info": info, "btn": btn, "exp": exp, "var": var, "days": days}
+
+        def do_query():
+            b = var.get().strip()
+            if not b:
+                info.set("请先输入打印批次号")
+                return
+            btn.config(state=tk.DISABLED)
+            exp.config(state=tk.DISABLED)
+            info.set("查询中…")
+            tree.delete(*tree.get_children())
+            sumtxt.delete("1.0", tk.END)
+            self._run_bg(self._worker_batch, b, days.get(), btn, exp, info, tree, sumtxt)
+
+        btn.config(command=do_query)
+        ent.bind("<Return>", lambda e: do_query())
+        try:
+            win.grab_set()
+        except Exception:
+            pass
+        ent.focus_set()
+
+    def _worker_batch(self, batch, days, btn, exp, info, tree, sumtxt):
+        try:
+            def prog(n, page, got):
+                self.q.put(lambda: info.set("查询中…已找到 %d 单（第 %d 页，本页 %d 条）" % (n, page, got)))
+
+            orders, err = fetch_print_batch(batch, days, progress=prog)
+            if err:
+                self.q.put(lambda: (info.set(err), btn.config(state=tk.NORMAL)))
+                return
+            rows = []
+            for o in orders:
+                items = o.get("items") or []
+                if not items:
+                    rows.append([o, "", 0, 0, "（未取到明细）"])
+                    continue
+                for code, num in items:
+                    sh, _k = dict_get_ci(self.shelf_map, code)
+                    sh = sh or {}
+                    bins = "、".join(b[0] for b in (sh.get("bins") or [])) or "无在架货位"
+                    rows.append([o, code, num, int(sh.get("shelf", 0) or 0), bins])
+            self.q.put(lambda: self._apply_batch(batch, orders, rows, btn, exp, info, tree, sumtxt,
+                                                getattr(self, "_batch_ui", {}).get("pick")))
+        except Exception as e:
+            msg = str(e)[:160]
+            self.q.put(lambda: (info.set("查询失败：%s" % msg), btn.config(state=tk.NORMAL)))
+
+    def _apply_batch(self, batch, orders, rows, btn, exp, info, tree, sumtxt, picktxt=None):
+        try:
+            agg = {}
+            pick = []
+            miss = 0
+            for o, code, num, shelf_qty, bins in rows:
+                seq = o.get("seq") or 0
+                if pick and pick[-1][2] == code and pick[-1][4] == bins:
+                    p = pick[-1]
+                    p[1] = seq
+                    p[3] += int(num or 0)
+                    p[7] += 1
+                else:
+                    pick.append([seq, seq, code, int(num or 0), bins, shelf_qty, 0, 1])
+                if bins and bins != "无在架货位":
+                    keys = bins.split("、")
+                else:
+                    miss += 1
+                    keys = ["（无在架货位）"]
+                for one_b in keys:
+                    a = agg.setdefault((one_b, code), [0, 0])   # [件数, 行数]
+                    a[0] += int(num or 0)
+                    a[1] += 1
+                tree.insert("", tk.END, values=(seq, o.get("sid"), o.get("short_id"),
+                                                o.get("express"), code, num, bins, shelf_qty,
+                                                STATUS_LABEL.get(o.get("sys_status"), o.get("sys_status"))))
+            # ① 按打印顺序的拣货清单（相邻同编码同货位合并成一段）
+            if picktxt is not None:
+                plines = ["批次 %s：%d 单 / %d 行商品" % (batch, len(orders), len(rows)), ""]
+                for seq_a, seq_b, code, tot, bins, sq, _x, cnt in pick:
+                    rng = ("第 %s 张" % seq_a) if seq_a == seq_b else ("第 %s-%s 张" % (seq_a, seq_b))
+                    plines.append("%-14s %-18s ×%-3d  货位：%s（在架 %s）"
+                                  % (rng, code, tot, bins, sq))
+                if miss:
+                    plines.append("")
+                    plines.append("注：%d 行显示「无在架货位」，说明当前不在常规货位上。" % miss)
+                picktxt.delete("1.0", tk.END)
+                picktxt.insert("1.0", "\n".join(plines))
+            lines = ["批次 %s：%d 单，%d 行商品" % (batch, len(orders), len(rows))]
+            cur = None
+            for (one_b, code) in sorted(agg):
+                if one_b != cur:
+                    lines.append("%s：" % one_b)
+                    cur = one_b
+                n, c = agg[(one_b, code)]
+                lines.append("    %s ×%d（%d 行）" % (code, n, c))
+            if miss:
+                lines.append("提示：有 %d 行当前不在常规货位上（无在架货位）。" % miss)
+            sumtxt.delete("1.0", tk.END)
+            sumtxt.insert("1.0", "\n".join(lines))
+            self._batch_no, self._batch_rows = batch, rows
+            exp.config(state=tk.NORMAL)
+            info.set("完成：批次 %s 共 %d 单 / %d 行商品" % (batch, len(orders), len(rows)))
+            # 货位数据旧了就顺手刷一次，下次查批次/扫码就是新的
+            if time.time() - getattr(self, "shelf_at_ts", 0) > 120:
+                self.reload_shelf(background=True)
+        except Exception as e:
+            info.set("渲染失败：%s" % str(e)[:120])
+        finally:
+            btn.config(state=tk.NORMAL)
+
+    def on_pick_file(self):
+        """从 ERP 导出的「批次打印记录」Excel/CSV 出拣货清单（不依赖接口）。"""
+        path = filedialog.askopenfilename(
+            title="选择 ERP 导出的批次文件",
+            filetypes=[("Excel / CSV", "*.xlsx *.xls *.csv *.txt"), ("所有文件", "*.*")])
+        if not path:
+            return
+        try:
+            headers, data = read_table_file(path)
+        except Exception as e:
+            messagebox.showerror("读取失败", "%s\n\n%s" % (path, e))
+            return
+        if not data:
+            messagebox.showerror("读取失败", "文件里没有数据行：\n%s" % path)
+            return
+        i_seq = _pick_col(headers, ("打印序号", "序号", "sequenc", "seq"))
+        i_code = _pick_col(headers, ("商品编码", "商家编码", "规格编码", "编码", "sku", "outerid"))
+        i_num = _pick_col(headers, ("件数", "数量", "num", "qty"))
+        i_sid = _pick_col(headers, ("系统单号", "sid", "订单号", "内部单号"))
+        i_exp = _pick_col(headers, ("快递单号", "物流单号", "运单号", "outsid"))
+        i_batch = _pick_col(headers, ("打印批次号", "批次号", "batch"))
+        if i_code < 0:
+            messagebox.showerror("读取失败",
+                                 "没找到「商品编码 / 商家编码」列。\n表头：%s"
+                                 % " | ".join(str(h) for h in headers)[:300])
+            return
+        orders, rows, seen = [], [], set()
+        batch_no = ""
+        for n, r in enumerate(data):
+            def cell(i):
+                return str(r[i]).strip() if (0 <= i < len(r) and r[i] is not None) else ""
+            code = cell(i_code)
+            if not code:
+                continue
+            try:
+                num = int(float(cell(i_num) or 1))
+            except Exception:
+                num = 1
+            try:
+                seq = int(float(cell(i_seq))) if i_seq >= 0 and cell(i_seq) else (n + 1)
+            except Exception:
+                seq = n + 1
+            sid = cell(i_sid)
+            key = (seq, code, sid)
+            if key in seen:
+                continue
+            seen.add(key)
+            if i_batch >= 0 and not batch_no:
+                batch_no = cell(i_batch)
+            orders.append({"seq": seq, "sid": sid, "short_id": "", "express": cell(i_exp),
+                           "sys_status": "", "items": [(code, num)]})
+            bins, shelf = self._shelf_lookup(code)
+            rows.append([orders[-1], code, num, shelf, bins])
+        if not rows:
+            messagebox.showerror("读取失败", "没能从文件里解析出编码/件数。")
+            return
+        orders.sort(key=lambda o: o.get("seq") or 0)
+        self.on_batch_dialog()
+        ui = self._batch_ui
+        label = batch_no or os.path.basename(path)
+        ttk.Style()  # 占位（不影响）
+        ui["var"].set(str(batch_no or ""))
+        self._apply_batch(label, orders, rows, ui["btn"], ui["exp"], ui["info"],
+                          ui["tree"], ui["sum"], ui["pick"])
+        try:
+            ui["nb"].select(0)
+        except Exception:
+            pass
+        self.status_text.set("已从文件出拣货清单：%s（%d 行）" % (os.path.basename(path), len(rows)))
+
+    def _export_batch(self):
+        rows = getattr(self, "_batch_rows", None) or []
+        if not rows:
+            return
+        batch = getattr(self, "_batch_no", "")
+        headers = ["打印序号", "系统单号", "内部单号", "快递单号", "商品编码", "件数", "货位", "在架", "系统状态"]
+        data = [[o.get("seq"), o.get("sid"), o.get("short_id"), o.get("express"), code, num,
+                 bins, shelf_qty, STATUS_LABEL.get(o.get("sys_status"), o.get("sys_status"))]
+                for o, code, num, shelf_qty, bins in rows]
+        path = os.path.join(BASE_DIR, "批次%s_%s.xlsx" % (batch, datetime.now().strftime("%Y%m%d_%H%M%S")))
+        try:
+            write_xlsx(path, headers, data)
+            self.status_text.set("已导出批次 %s：%s" % (batch, path))
+            messagebox.showinfo("导出成功", "已导出 %d 行到：\n%s" % (len(data), path))
+        except Exception as e:
+            messagebox.showerror("导出失败", str(e))
+
     # ---------- API 设置 ----------
     def on_api_settings(self):
         """改 appKey/appSecret/refreshToken/session/网关/版本 —— 换账号不用重新打包。"""
@@ -2549,7 +3151,7 @@ class ScanApp:
             self.status_text.set(status)
 
     def _auto_tick(self):
-        """定时：到点跑全量（每 full_refresh_min 分钟），其余时候跑增量；并定期刷新锁定数。"""
+        """定时：到点跑全量（每 full_refresh_min 分钟），其余时候跑增量；并定期刷新锁定数、货位。"""
         if not self._syncing:
             if (time.time() - self.last_full_ts) >= self.full_refresh_min * 60:
                 self.full_reload(background=True)
@@ -2557,6 +3159,8 @@ class ScanApp:
                 self.sync_pending(background=True)
         if time.time() - self.lock_at_ts > self.lock_refresh_min * 60:
             self.reload_lock(background=True)
+        if time.time() - self.shelf_at_ts > self.shelf_refresh_min * 60:
+            self.reload_shelf(background=True)
         self.root.after(1000 * 60 * self.auto_refresh_min, self._auto_tick)
 
     # ---------- 扫码 ----------
