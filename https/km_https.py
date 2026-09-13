@@ -188,6 +188,7 @@ def maybe_serve_local(tls, method, target, backend):
         except OSError as e:
             log("静态文件读取失败 %s：%s" % (fp, e))
             return False
+        log("%s %s  =>  本地静态 %s" % (method, target, os.path.basename(fp)))
         send_response(tls, 200, "application/javascript; charset=utf-8", data,
                       method == "HEAD", cache="no-store")
         return True
@@ -199,14 +200,44 @@ def maybe_serve_local(tls, method, target, backend):
         except Exception as e:
             log("页面注入失败，回退原文转发：%s" % e)
             return False
+        log("%s %s  =>  本地注入页面 %s（%d 字节）" % (method, target, status, len(body)))
         send_response(tls, status, ctype, body, method == "HEAD")
         return True
 
     return False
 
 
+_DROP_HEADERS = (b"x-forwarded-for", b"x-real-ip", b"x-forwarded-host", b"forwarded")
+
+
+def with_forwarded(head, client_ip):
+    """转发给后端前标上真实来源 IP，并且剥掉客户端自带的转发头。
+
+    后端用"有没有 X-Forwarded-For"来判断请求是不是本机（见 kuaimai_scan.py 的 _client_is_local）：
+    经过本中转的一律不算本机 —— 否则外网的人就能从中转进来设置管理员密码。
+    """
+    try:
+        sep = head.find(b"\r\n\r\n")
+        if sep < 0 or b"\r\n" not in head[:sep]:
+            return head                      # 不是标准请求头，原样转发（后端按来源 IP 判定）
+        lines = head[:sep].split(b"\r\n")
+        kept = [ln for ln in lines[1:] if ln.split(b":", 1)[0].strip().lower() not in _DROP_HEADERS]
+        if client_ip:
+            kept.append(("X-Forwarded-For: %s" % client_ip).encode("latin-1", "replace"))
+            kept.append(("X-Real-IP: %s" % client_ip).encode("latin-1", "replace"))
+        return b"\r\n".join([lines[0]] + kept) + head[sep:]
+    except Exception:
+        return head
+
+
 def handle(raw, backend):
     tls = None
+    # 来源 IP 必须在 wrap_socket 之前取：wrap 会把原 socket 的 fd 摘走（detach），之后再取就报 WinError 10038
+    try:
+        client_ip = raw.getpeername()[0]
+    except Exception as e:
+        client_ip = ""
+        log("取来源 IP 失败（按非本机处理）：%s" % e)
     try:
         try:
             tls = current_context().wrap_socket(raw, server_side=True)
@@ -232,6 +263,7 @@ def handle(raw, backend):
         first = head.split(b"\r\n", 1)[0].decode("latin-1", "replace").split(" ")
         method = first[0].upper() if first else ""
         target = first[1] if len(first) > 1 else ""
+        head = with_forwarded(head, client_ip)
         if target and maybe_serve_local(tls, method, target, backend):
             try:
                 tls.close()
@@ -247,7 +279,18 @@ def handle(raw, backend):
             return
         up.settimeout(None)
         up.sendall(head)
+        # 先起“客户端 → 后端”的转发线程：POST 的请求体可能在头部之后才到，
+        # 否则后端一直等请求体、我们一直等响应头，双方卡死
         threading.Thread(target=pump, args=(tls, up), daemon=True).start()
+        # 再把后端的响应头读回来记一行日志（排查手机端问题时能看清状态码）
+        try:
+            up_head = read_head(up)
+        except OSError:
+            up_head = b""
+        first_line = up_head.split(b"\r\n", 1)[0].decode("latin-1", "replace") if up_head else "无响应"
+        log("%s %s  <- %s  =>  %s" % (method, target, client_ip or "-", first_line))
+        if up_head:
+            tls.sendall(up_head)
         pump(up, tls)
     except Exception as e:
         log("连接处理异常：%s" % e)

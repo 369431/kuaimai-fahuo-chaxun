@@ -99,6 +99,11 @@ node  https/_zxing_selftest.js   # ZXing 1D 解码往返
 - **别用 `blur()` 收输入法**：`blur()` 会让页面滚动/重排，手机浏览器会把滚出视口的 `<video>` 停止送帧，ZXing 拿不到新帧就永远识别不到。用 `inputmode="none"` 代替。
 - **解码回调可能早于 `decodeFromConstraints` 的 Promise 返回**，那时 `controls` 还是 `null`，`controls.stop()` 停不掉扫描循环 → 会每帧重复查询。要先同步置位一个 `handled` 标记丢弃后续帧，Promise 晚到时就地 `stop()`。
 - **`.ps1` 必须带 UTF-8 BOM**，否则中文会被按 ANSI 解析导致语法错；`.cmd` 要么纯 ASCII 只做启动器，要么存成 GBK。
+- **打包成 exe 后 `__file__` 指向 PyInstaller 的临时解包目录**（`%TEMP%\_MEIxxxx`，每次启动都是新的、退出即删）：数据文件（账号、缓存、日志）必须用 `sys.executable` 所在目录定位，否则会「每次打开都像第一次用」。账号文件 `kuaimai_users.json` 现在跟 exe 同目录。
+- **`ssl.SSLContext.wrap_socket()` 会 detach 原 socket 的 fd**：之后对原 socket 调 `getpeername()` 会报 `WinError 10038`。中转要取客户端来源 IP（用来判断"是不是本机"）必须在 wrap **之前**取。
+- **中转要给后端请求头加日志时，要先起「客户端 → 后端」的转发线程再读响应头**：否则 POST 的请求体还没送到后端、后端在等请求体、中转在等响应头，两边死等（GET 看不出来，只有登录这类 POST 会卡住）。
+- **传了 `.spec` 就不能再传 `--onefile`**（报 `makespec options not valid when a .spec file is given`）：`python -m PyInstaller --noconfirm --distpath "%TEMP%\km_dist" --workpath "%TEMP%\km_build" 快麦扫码查询.spec`。
+- **网页改完别只检查 HTML 里有没有那串字**：JS 的 `ReferenceError` 会被 try/catch 吞掉（表现成"一直重试/一直载入中"）。用 node 起真 JS 引擎跑一遍页面脚本（存根 `document`/`localStorage`/`fetch`）才能发现。
 
 ## 拣货（手机端）
 
@@ -123,6 +128,29 @@ GET /api/pick/end?batch=<>                             结束批次
 > **打印批次号来自订单操作日志**：`erp.trade.trace.list` 的「打印快递单」动作，`content` 里带 `打印批次号 / 打印序号 / 第几次打印` —— 快麦开放平台**没有独立的“打印批次”接口**，而且这份日志**覆盖不完整**（实测有的批次连序号都会有缺行）。**要精确对齐请用 ERP 页面导出的文件**：电脑版「批次查询」→「读导出文件…」（支持 xlsx / csv，自动认表头）。
 
 > 占位 / 补偿类商品（编码首段 `1166`、名称含「买家秀」「圆虹包」等）不计件数、不进拣货清单；编码比较一律忽略大小写。
+
+## 登录（网页版账号）
+
+网页版（`http://127.0.0.1:8790/` 或 `https://<域名>:9443/`）要账号密码才能进查询页：
+
+- **首次设置只能在跑程序的这台电脑上做**（本机直连回环地址、且请求没经过 HTTPS 中转）。外网/手机打开而没有管理员时，只显示一句提示、**不给表单**——否则谁先打开谁就能当管理员。
+- 中转（`https/km_https.py`）转发前会剥掉客户端自带的 `X-Forwarded-For` / `X-Real-IP`，再打上真实来源 IP；后端就是用"有没有这个头"区分"本机"与"外面"。
+- 账号存 `kuaimai_users.json`（exe 同目录，加盐 SHA-256，不提交）。管理员可加/删账号、改密码、**踢下线**。
+- **踢下线 / 管理员改密码**：那台设备 10 分钟内不能再登录（设备标识是登录页 localStorage 里的随机 `km_dev`，随登录请求上报）；改自己的密码不锁自己。
+- 同一账号同一时间只能一处登录，新登录会把旧设备顶下线。
+- 账号列表显示「登录设备：机型 · 系统 · 浏览器」：机型优先用 `navigator.userAgentData.getHighEntropyValues(['model'])`（Chrome/Edge），拿不到就从 User-Agent 里抠。
+- 页面拿不到 `/api/auth/state` 会自动重试 8 次（1.5s 间隔），再失败给「重试」按钮——不再卡在"载入中"。
+
+相关接口：
+
+```
+GET  /login                 登录页（首次设置 / 登录 / 账号管理）
+GET  /api/auth/state        {need_setup, local, user, role, users}
+POST /api/auth/setup        首次设置（仅本机）/ 本机重置管理员密码
+POST /api/auth/login        登录（body: name, pw, dev_id, model）
+POST /api/auth/logout       退出
+POST /api/users             {action: list|add|del|passwd|kick}（仅管理员）
+```
 
 ## 隐私
 

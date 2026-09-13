@@ -32,9 +32,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 try:
     from kuaimai_webui import WEB_INDEX_HTML, PICK_HTML
+    from kuaimai_login_ui import LOGIN_HTML
 except Exception:
     WEB_INDEX_HTML = "<h1>缺少 kuaimai_webui.py</h1>"
     PICK_HTML = WEB_INDEX_HTML
+    LOGIN_HTML = WEB_INDEX_HTML
+try:
+    import kuaimai_auth as auth
+except Exception:
+    auth = None
 import kuaimai_db              # 订单缓存 SQLite 存储层（kuaimai_db.py）
 import traceback
 import collections
@@ -99,6 +105,13 @@ PULL_PROGRESS_FILE = os.path.join(BASE_DIR, "kuaimai_pull_progress.json")
 DB_FILE = os.path.join(BASE_DIR, "scan_log.db")
 ORDERS_DB_FILE = os.path.join(BASE_DIR, "kuaimai_data.db")   # 订单缓存（SQLite，替代 kuaimai_pending_cache.json）
 API_FILE = os.path.join(BASE_DIR, "kuaimai_api.json")         # API 参数（界面可改；没有它就用写死的默认值）
+# 账号文件必须和数据文件同目录：打包后如果用模块自身的路径，会写进临时解包目录（每次启动被清掉）
+if auth is not None:
+    try:
+        auth.BASE_DIR = BASE_DIR
+        auth.USERS_FILE = os.path.join(BASE_DIR, "kuaimai_users.json")
+    except Exception:
+        pass
 _INSTANCE_MUTEX = None       # 单实例互斥体句柄（进程退出自动释放）
 
 PENDING_CACHE_MAX_AGE = 30 * 60      # 待发货缓存视为“新鲜”的秒数
@@ -1569,12 +1582,12 @@ UI_CARD = "#ffffff"        # 卡片
 UI_LINE = "#e3e6ea"        # 分隔线
 UI_INK = "#1d1d1f"         # 主文字
 UI_SUB = "#6e6e73"         # 次文字
-UI_FILL = "#eceef1"        # 次级按钮底
-UI_FILL_HOVER = "#e3e6ea"
-UI_FILL_PRESS = "#d9dde2"
-UI_BLUE = "#007AFF"
-UI_GREEN = "#34C759"
-UI_RED = "#FF3B30"
+UI_FILL = "#f4f4f5"        # 次级按钮底
+UI_FILL_HOVER = "#e9e9eb"
+UI_FILL_PRESS = "#dedfe0"
+UI_BLUE = "#409EFF"
+UI_GREEN = "#67C23A"
+UI_RED = "#F56C6C"
 
 
 def lan_ips():
@@ -1612,6 +1625,10 @@ class _WebHandler(BaseHTTPRequestHandler):
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Cache-Control", "no-store")
+            ck = getattr(self, "_cookie_out", "")
+            if ck:
+                self.send_header("Set-Cookie", ck)
+                self._cookie_out = ""
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -1624,24 +1641,95 @@ class _WebHandler(BaseHTTPRequestHandler):
             self.send_response(code)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
+            ck = getattr(self, "_cookie_out", "")
+            if ck:
+                self.send_header("Set-Cookie", ck)
+                self._cookie_out = ""
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
         except Exception:
             pass
 
+    # ---------- 登录 / 会话 ----------
+    def _cookie_token(self):
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            p = part.strip()
+            if p.startswith("kmsid="):
+                return p[6:]
+        return ""
+
+    def _token(self, qs):
+        return ((qs.get("sid") or [""])[0] or "").strip() or self._cookie_token()
+
+    def _auth(self, qs):
+        """返回 {'name','role'} 或 None；带旧访问口令 k 视为管理员（兼容老书签）。"""
+        key = (qs.get("k") or [""])[0] if qs else ""
+        required = (getattr(self.app, "web_key", "") or "") if getattr(self.app, "require_key", True) else ""
+        if required and key == required:
+            return {"name": "口令登录", "role": "admin"}
+        if auth:
+            u = auth.check(self._token(qs))
+            if u:
+                return u
+        return None
+
+    def _redirect(self, loc):
+        try:
+            self.send_response(302)
+            self.send_header("Location", loc)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        except Exception:
+            pass
+
+    def _set_cookie(self, tok):
+        self._cookie_out = (("kmsid=%s; Path=/; Max-Age=%d; SameSite=Lax" % (tok, 30 * 86400))
+                            if tok else "kmsid=; Path=/; Max-Age=0; SameSite=Lax")
+
+    def _client_is_local(self):
+        """是不是"就坐在电脑前"的请求：直连回环地址，并且没经过 HTTPS 中转。
+
+        中转（km_https.py）会给转发的请求加上 X-Forwarded-For，所以带这个头的一律不算本机，
+        否则 9443 上任何人都能被当成"本机用户"去设置管理员。
+        """
+        try:
+            peer = (self.client_address or [""])[0]
+        except Exception:
+            return False
+        try:
+            hdrs = {str(k).lower(): (v or "") for k, v in self.headers.items()}
+        except Exception:
+            hdrs = {}
+        if hdrs.get("x-forwarded-for") or hdrs.get("x-real-ip") or hdrs.get("x-forwarded-host"):
+            return False
+        return peer in ("127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost")
+
+    def _auth_state(self, qs):
+        u = self._auth(qs)
+        return {"need_setup": bool(auth and auth.need_setup()),
+                "local": self._client_is_local(),
+                "user": (u or {}).get("name"), "role": (u or {}).get("role"),
+                "users": (auth.list_users() if (auth and u and u.get("role") == "admin") else []),
+                "open": (u is not None)}
+
     def do_GET(self):
         app = self.app
         try:
             parsed = urllib.parse.urlparse(self.path)
             qs = urllib.parse.parse_qs(parsed.query)
-            key = (qs.get("k") or [""])[0]
-            required = (getattr(app, "web_key", "") or "") if getattr(app, "require_key", True) else ""
-            if required and key != required:
-                body = ("<!doctype html><meta charset='utf-8'><meta name='viewport' content='width=device-width'>"
-                        "<h3 style='font-family:sans-serif'>需要访问口令</h3>"
-                        "<p style='font-family:sans-serif'>请用带 ?k=口令 的完整地址打开本页。</p>").encode("utf-8")
-                return self._send(body, "text/html; charset=utf-8", code=401)
+            path = parsed.path
+            if path in ("/login", "/login.html"):
+                return self._send(LOGIN_HTML.encode("utf-8"), "text/html; charset=utf-8")
+            if path == "/api/auth/state":
+                return self._json(self._auth_state(qs))
+            me = self._auth(qs)
+            if not me:
+                if path.startswith("/api/"):
+                    return self._json({"error": "请先登录", "login": True}, 401)
+                # 没登录时直接返回登录页（不靠 302，中转/任何客户端都能看到）
+                return self._send(LOGIN_HTML.encode("utf-8"), "text/html; charset=utf-8")
             if parsed.path in ("/", "/index.html"):
                 return self._send(WEB_INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
             if parsed.path in ("/pick", "/pick.html"):
@@ -1683,6 +1771,84 @@ class _WebHandler(BaseHTTPRequestHandler):
                 if not code:
                     return self._json({"error": "缺少 code"}, 400)
                 return self._json(app.web_lookup(code, rel, n))
+            return self._json({"error": "not found"}, 404)
+        except Exception as e:
+            return self._json({"error": str(e)[:200]}, 500)
+
+
+    def do_POST(self):
+        try:
+            parsed = urllib.parse.urlparse(self.path)
+            qs = urllib.parse.parse_qs(parsed.query)
+            n = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(n) if n else b""
+            try:
+                body = json.loads(raw.decode("utf-8") or "{}")
+            except Exception:
+                body = {k: v[0] for k, v in urllib.parse.parse_qs(raw.decode("utf-8", "replace")).items()}
+            path = parsed.path
+            dev = (self.headers.get("User-Agent") or "")[:300]   # 给设备名识别留够长度（浏览器名在 UA 后段）
+            if path == "/api/auth/setup":
+                if not auth:
+                    return self._json({"error": "账号模块不可用"}, 400)
+                local = self._client_is_local()
+                if not local:
+                    # 远端（手机 / 外网）一律不许设置或重置管理员，否则谁先打开谁就能当管理员
+                    if auth.need_setup():
+                        return self._json({"error": "首次设置只能在这台电脑上做：请在本机打开 http://127.0.0.1:8790/login"}, 403)
+                    return self._json({"error": "已经设置过管理员了，请直接登录"}, 403)
+                name = str(body.get("name") or "").strip()
+                us = auth.users()
+                if name in us:
+                    if (us[name].get("role") or "user") != "admin":
+                        return self._json({"error": "本机设置只能重置管理员账号的密码"}, 403)
+                    err = auth.set_password(name, body.get("pw"), 0)
+                else:
+                    err = auth.add_user(name, body.get("pw"), "admin")
+                if err:
+                    return self._json({"error": err}, 400)
+                tok, err = auth.login(name, body.get("pw"), dev, body.get("dev_id"), body.get("model"))
+                if err:
+                    return self._json({"error": err}, 400)
+                self._set_cookie(tok)
+                return self._json({"ok": True, "token": tok, "name": name, "role": "admin"})
+            if path == "/api/auth/login":
+                if not auth:
+                    return self._json({"error": "账号模块不可用"}, 400)
+                tok, err = auth.login(body.get("name"), body.get("pw"), dev, body.get("dev_id"), body.get("model"))
+                if err:
+                    return self._json({"error": err}, 400)
+                self._set_cookie(tok)
+                role = (auth.users().get(str(body.get("name")).strip()) or {}).get("role") or "user"
+                return self._json({"ok": True, "token": tok, "name": body.get("name"), "role": role})
+            me = self._auth(qs)
+            if not me:
+                return self._json({"error": "请先登录", "login": True}, 401)
+            if path == "/api/auth/logout":
+                if auth:
+                    auth.logout(self._token(qs))
+                self._set_cookie("")
+                return self._json({"ok": True})
+            if path == "/api/users":
+                if not auth:
+                    return self._json({"error": "账号模块不可用"}, 400)
+                if me.get("role") != "admin":
+                    return self._json({"error": "只有管理员能管理账号"}, 403)
+                act = str(body.get("action") or "list")
+                err = ""
+                if act == "add":
+                    err = auth.add_user(body.get("name"), body.get("pw"), body.get("role") or "user")
+                elif act == "del":
+                    err = auth.del_user(body.get("name"))
+                elif act == "passwd":
+                    # 改自己的密码：不踢自己、不锁自己；改别人的：旧会话失效 + 那台设备 10 分钟不能再登录
+                    mine = (str(body.get("name") or "").strip() == str(me.get("name") or ""))
+                    err = auth.set_password(body.get("name"), body.get("pw"), 0 if mine else 10)
+                elif act == "kick":
+                    err = auth.kick(body.get("name"))
+                if err:
+                    return self._json({"error": err}, 400)
+                return self._json({"ok": True, "users": auth.list_users()})
             return self._json({"error": "not found"}, 404)
         except Exception as e:
             return self._json({"error": str(e)[:200]}, 500)
@@ -2449,10 +2615,10 @@ class ScanApp:
         # 结果面板：第一行=编码（黑色加粗），下面三行=一单一件/一单多件/货位
         self.result = tk.Label(
             main, text="扫码后显示编码",
-            font=("Microsoft YaHei", 26, "bold"),
-            bg=self.GREY_BG, fg="#000000", height=2, anchor="center",
+            font=("Microsoft YaHei", 16, "bold"),
+            bg=self.GREY_BG, fg="#000000", height=1, anchor="center",
         )
-        self.result.grid(row=1, column=0, sticky="ew", pady=8)
+        self.result.grid(row=1, column=0, sticky="ew", pady=4)
         det = ttk.Frame(main)
         det.grid(row=2, column=0, sticky="ew")
         self.result_detail = tk.Label(det, text="", font=("Microsoft YaHei", 12), fg=UI_INK,

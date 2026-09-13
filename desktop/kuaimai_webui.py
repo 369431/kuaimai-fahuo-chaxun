@@ -241,7 +241,9 @@ function stopCam(){ clearInterval(scanTimer); if(stream){ stream.getTracks().for
 $('btnCam').onclick=startCam; $('btnCamStop').onclick=stopCam;
 /* ---------------- 拣货：独立页面 /pick ---------------- */
 $('btnPick').onclick = () => {
-  location.href = '/pick?' + new URLSearchParams({k:K}).toString();
+  const sid = (function(){ try { return localStorage.getItem('km_sid') || ''; } catch(e){ return ''; } })();
+  const q = {k:K}; if(sid) q.sid = sid;
+  location.href = '/pick?' + new URLSearchParams(q).toString();
 };
 /* 有未结束的批次时，按钮上直接显示可以继续 */
 fetch('/api/pick/current?' + new URLSearchParams({k:K}).toString())
@@ -253,6 +255,18 @@ fetch('/api/pick/current?' + new URLSearchParams({k:K}).toString())
       b.classList.remove('ghost');
     }
   }).catch(() => {});
+
+/* 会话：登录后从 URL 取一次 token，之后自动附加到所有请求；失效则回登录页 */
+(function(){
+  try { var q = new URLSearchParams(location.search).get('sid'); if(q) localStorage.setItem('km_sid', q); } catch(e){}
+  var _f = window.fetch;
+  window.fetch = function(u, o){
+    try { var t = localStorage.getItem('km_sid');
+      if(t && typeof u === 'string' && u.indexOf('sid=') < 0){ u += (u.indexOf('?') >= 0 ? '&' : '?') + 'sid=' + encodeURIComponent(t); }
+    } catch(e){}
+    return _f(u, o).then(function(r){ if(r.status === 401){ location.href = '/login'; } return r; });
+  };
+})();
 
 renderHistory(); loadStatus(); setInterval(loadStatus,60000);
 </script>
@@ -706,6 +720,18 @@ $('btnZone').onclick = function(){
   render();
   speakCurrent();
 };
+/* 会话：登录后从 URL 取一次 token，之后自动附加到所有请求；失效则回登录页 */
+(function(){
+  try { var q = new URLSearchParams(location.search).get('sid'); if(q) localStorage.setItem('km_sid', q); } catch(e){}
+  var _f = window.fetch;
+  window.fetch = function(u, o){
+    try { var t = localStorage.getItem('km_sid');
+      if(t && typeof u === 'string' && u.indexOf('sid=') < 0){ u += (u.indexOf('?') >= 0 ? '&' : '?') + 'sid=' + encodeURIComponent(t); }
+    } catch(e){}
+    return _f(u, o).then(function(r){ if(r.status === 401){ location.href = '/login'; } return r; });
+  };
+})();
+
 loadCurrent();
 speakBtn();
 zoneBtn();
