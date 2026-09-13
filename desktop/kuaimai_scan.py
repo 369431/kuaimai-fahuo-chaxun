@@ -423,15 +423,48 @@ def init_db():
 
 
 # ============================ 拣货会话（持久化） ============================
-def pick_save(batch, groups, status="running", days=3, created_at=None):
+def pick_save(batch, orders, status="running", days=3, created_at=None):
     conn = get_conn()
+    payload = json.dumps({"v": 2, "orders": orders or []}, ensure_ascii=False)
     conn.execute(
         "INSERT OR REPLACE INTO pick_batch(batch,created_at,ended_at,status,days,groups_json)"
         " VALUES (?,?,?,?,?,?)",
         (str(batch), created_at or now_gmt8(), "" if status == "running" else now_gmt8(),
-         status, int(days or 3), json.dumps(groups or [], ensure_ascii=False)))
+         status, int(days or 3), payload))
     conn.commit()
     conn.close()
+
+
+def _norm_orders(data):
+    """兼容旧存档：旧结构是「按编码合并的组」，这里并成「一单（快递单号）一卡、卡内多行商品」。"""
+    if isinstance(data, dict):
+        return data.get("orders") or []
+    out, index = [], {}
+    for g in (data or []):
+        sids = g.get("sids") or []
+        exp = g.get("exp_a") or ""
+        # 旧组里同一单的多个商品：同 seq + 同快递单号 → 并到同一张卡
+        key = "%s|%s" % (g.get("seq_a"), exp if len(sids) <= 1 else (sids[0] if sids else exp))
+        o = index.get(key)
+        if o is None:
+            o = {"seq": g.get("seq_a"), "seq_b": g.get("seq_b"),
+                 "express": exp, "sid": (sids[0] if sids else ""), "lines": []}
+            index[key] = o
+            out.append(o)
+        o["lines"].append({"code": g.get("code"), "qty": g.get("qty"),
+                            "bins": g.get("bins"), "shelf": g.get("shelf"),
+                            "state": g.get("state") or "pending"})
+    return out
+
+
+def _pick_row(batch, row):
+    try:
+        data = json.loads(row[5] or "{}")
+    except Exception:
+        data = {}
+    return {"batch": batch if batch is not None else row[0], "created_at": row[1],
+            "ended_at": row[2], "status": row[3], "days": row[4],
+            "orders": _norm_orders(data)}
 
 
 def pick_get(batch):
@@ -439,14 +472,7 @@ def pick_get(batch):
     row = conn.execute("SELECT batch,created_at,ended_at,status,days,groups_json"
                        " FROM pick_batch WHERE batch=?", (str(batch),)).fetchone()
     conn.close()
-    if not row:
-        return None
-    try:
-        groups = json.loads(row[5] or "[]")
-    except Exception:
-        groups = []
-    return {"batch": row[0], "created_at": row[1], "ended_at": row[2], "status": row[3],
-            "days": row[4], "groups": groups}
+    return _pick_row(None, row) if row else None
 
 
 def pick_running():
@@ -454,22 +480,128 @@ def pick_running():
     row = conn.execute("SELECT batch,created_at,ended_at,status,days,groups_json FROM pick_batch"
                        " WHERE status='running' ORDER BY created_at DESC LIMIT 1").fetchone()
     conn.close()
-    if not row:
-        return None
-    try:
-        groups = json.loads(row[5] or "[]")
-    except Exception:
-        groups = []
-    return {"batch": row[0], "created_at": row[1], "ended_at": row[2], "status": row[3],
-            "days": row[4], "groups": groups}
+    return _pick_row(None, row) if row else None
 
 
 def pick_end(batch):
     d = pick_get(batch)
     if not d:
         return None
-    pick_save(d["batch"], d["groups"], "ended", d["days"], d["created_at"])
+    pick_save(d["batch"], d.get("orders") or [], "ended", d["days"], d["created_at"])
     return pick_get(batch)
+
+
+def pick_end_others(keep_batch=None):
+    """同时只留一个进行中的批次：把其它 running 的标为已结束。
+
+    keep_batch=None 表示全部结束（清理历史遗留的多个 running）。
+    """
+    conn = get_conn()
+    try:
+        if keep_batch:
+            rows = conn.execute("SELECT batch FROM pick_batch WHERE status='running' AND batch<>?",
+                                (str(keep_batch),)).fetchall()
+        else:
+            rows = conn.execute("SELECT batch FROM pick_batch WHERE status='running'").fetchall()
+    finally:
+        conn.close()
+    ended = []
+    for (b,) in rows:
+        pick_end(b)
+        ended.append(b)
+    return ended
+
+
+def zone_of(bins):
+    """从货位取分区字母（A-3-1-2 → A）。"""
+    m = re.match(r"\s*([A-Za-z])", str(bins or ""))
+    return m.group(1).upper() if m else ""
+
+
+def zone_rank(z):
+    """A/B/C/D 依次，其它排最后。"""
+    return "ABCD".index(z) if z in ("A", "B", "C", "D") else 9
+
+
+def bin_label(bins):
+    """清单里显示用的货位文案：无货位统一写「无货位」。"""
+    b = str(bins or "").strip()
+    return b if b and b != "无在架货位" else "无货位"
+
+
+def fmt_order_line(seq, items, express=""):
+    """按单显示的一行：第 N 张 [快递单号] 共 X 件  编码×件数→货位；…"""
+    parts = []
+    for code, num, bins in items:
+        parts.append("%s×%s→%s" % (code, num, bins))
+    head = "第 %-4s张" % seq
+    if express:
+        head += "（%s）" % express
+    return "%s %d件  %s" % (head, len(items), "；".join(parts))
+
+
+def _pick_group_excluded(code):
+    """拣货组是否应排除（占位/补偿类商品：1166、买家秀、圆虹包…）。"""
+    code = str(code or "").strip()
+    if not code:
+        return False
+    head = re.split(r"[-\s（()）/,]", code)[0]
+    if head in EXCLUDE_CODE_HEADS:
+        return True
+    return any(k and k in code for k in EXCLUDE_NAME_KEYWORDS)
+
+
+def series_matches(idx, code):
+    """主编码/前缀查询：输入 9687 → 所有 9687-* 规格（返回 (keys, 是否系列)）。
+
+    精确命中且没有其它以它开头的编码 → 就查这一个（返回单元素列表）。
+    """
+    code = str(code or "").strip()
+    if not code:
+        return [], False
+    up = code.upper()
+    exact_entry, canon = dict_get_ci(idx, code)
+    pref = sorted([k for k in idx if k.upper().startswith(up)])
+    if len(pref) > 1:
+        return pref, True
+    if exact_entry:
+        return [canon], False
+    return pref, False
+
+
+def build_pick_orders(orders, shelf_lookup):
+    """按单建清单：一单一张卡；lines = 该单每个商品（同 SKU 多行合并成一行，只点一次）。"""
+    out = []
+    for o in orders:
+        merged, order_lines = {}, []
+        for code, num in (o.get("items") or []):
+            key = str(code)
+            if key in merged:
+                merged[key]["qty"] += int(num or 0)      # 同一 SKU 多行 → 件数累加，只算一行
+                continue
+            bins, qty = shelf_lookup(code)
+            line = {"code": code, "qty": int(num or 0), "bins": bins, "shelf": qty,
+                    "state": "pending"}
+            merged[key] = line
+            order_lines.append(line)
+        if not order_lines:
+            continue
+        seq = o.get("seq") or 0
+        out.append({"seq": seq, "seq_b": seq, "express": o.get("express") or "",
+                    "sid": o.get("sid") or "", "lines": order_lines})
+    return out
+
+
+def order_state(o):
+    """整单状态：还有待拣→pending；无待拣且有缺货→short；全部完成→done。"""
+    ls = o.get("lines") or []
+    if not ls:
+        return "done"
+    if any((l.get("state") or "pending") == "pending" for l in ls):
+        return "pending"
+    if any(l.get("state") == "short" for l in ls):
+        return "short"
+    return "done"
 
 
 def build_pick_groups(orders, shelf_lookup):
@@ -490,11 +622,16 @@ def build_pick_groups(orders, shelf_lookup):
                 g["seq_b"] = seq
                 g["qty"] += int(num or 0)
                 g["rows"] += 1
+                if o.get("express"):
+                    g["exp_b"] = o.get("express")
+                    if not g.get("exp_a"):
+                        g["exp_a"] = o.get("express")
                 if len(g.get("sids") or []) < 400:
                     g.setdefault("sids", []).append(o.get("sid"))
             else:
                 groups.append({"seq_a": seq, "seq_b": seq, "code": code, "qty": int(num or 0),
                                "bins": bins, "shelf": qty, "rows": 1, "state": "pending",
+                               "exp_a": o.get("express") or "", "exp_b": o.get("express") or "",
                                "sids": [o.get("sid")]})
     return groups
 
@@ -1426,6 +1563,18 @@ def play_alert_sound():
 
 # ============================ 内置手机网页服务 ============================
 WEB_PORT = 8790
+# ---- 界面配色（macOS 风格扁平浅色）----
+UI_BG = "#f5f5f7"          # 窗口底
+UI_CARD = "#ffffff"        # 卡片
+UI_LINE = "#e3e6ea"        # 分隔线
+UI_INK = "#1d1d1f"         # 主文字
+UI_SUB = "#6e6e73"         # 次文字
+UI_FILL = "#eceef1"        # 次级按钮底
+UI_FILL_HOVER = "#e3e6ea"
+UI_FILL_PRESS = "#d9dde2"
+UI_BLUE = "#007AFF"
+UI_GREEN = "#34C759"
+UI_RED = "#FF3B30"
 
 
 def lan_ips():
@@ -1515,8 +1664,13 @@ class _WebHandler(BaseHTTPRequestHandler):
                     gidx = int((qs.get("g") or ["-1"])[0])
                 except Exception:
                     gidx = -1
+                raw_line = (qs.get("line") or [""])[0]
+                try:
+                    lidx = int(raw_line) if raw_line != "" else None
+                except Exception:
+                    lidx = None
                 return self._json(app.web_pick_mark((qs.get("batch") or [""])[0], gidx,
-                                                    (qs.get("state") or ["pending"])[0]))
+                                                    (qs.get("state") or ["pending"])[0], lidx))
             if parsed.path == "/api/pick/end":
                 return self._json(app.web_pick_end((qs.get("batch") or [""])[0]))
             if parsed.path == "/api/lookup":
@@ -1890,16 +2044,21 @@ def read_table_file(path):
 # ============================ 界面 ============================
 class ScanApp:
     GREEN = "#1e9e4a"
-    GREEN_BG = "#d6f5df"
-    RED = "#c62828"
-    RED_BG = "#fde0e0"
+    GREEN_BG = "#d7f5e0"
+    RED = "#d70015"
+    RED_BG = "#ffe5e5"
     GREY = "#555555"
-    GREY_BG = "#eeeeee"
+    GREY_BG = "#f2f2f7"
 
     def __init__(self, root):
         self.root = root
-        self.root.title("快麦扫码查待发货 + 货架在架数")
-        self.root.geometry("980x680")
+        self.root.title("快麦扫码查询")
+        self.root.geometry("1080x760")
+        self.root.minsize(920, 620)
+        try:
+            self.root.configure(bg=UI_BG)
+        except Exception:
+            pass
 
         self.session = None
         self.index = {}                 # 编码 → {"qty","orders","main"}
@@ -2097,17 +2256,41 @@ class ScanApp:
         return bins, int(sh.get("shelf", 0) or 0)
 
     def _pick_payload(self, s):
-        gs = s.get("groups") or []
-        done = sum(1 for g in gs if g.get("state") == "done")
-        short = sum(1 for g in gs if g.get("state") == "short")
+        os_ = s.get("orders") or []
+        lines = [l for o in os_ for l in (o.get("lines") or [])]
+        done = sum(1 for l in lines if l.get("state") == "done")
+        short = sum(1 for l in lines if l.get("state") == "short")
+        st = {"pending": 0, "done": 0, "short": 0}
+        for o in os_:
+            k = order_state(o)
+            st[k] = st.get(k, 0) + 1
         return {"batch": s.get("batch"), "created_at": s.get("created_at"),
                 "ended_at": s.get("ended_at"), "status": s.get("status"), "days": s.get("days"),
-                "groups": gs,
-                "progress": {"groups": len(gs), "done": done, "short": short,
-                             "pending": len(gs) - done - short,
-                             "qty": sum(int(g.get("qty") or 0) for g in gs),
-                             "qty_done": sum(int(g.get("qty") or 0) for g in gs
-                                             if g.get("state") == "done")}}
+                "orders": os_,
+                "progress": {"orders": len(os_), "orders_done": st["done"],
+                             "orders_short": st["short"], "orders_pending": st["pending"],
+                             "lines": len(lines), "done": done, "short": short,
+                             "pending": len(lines) - done - short,
+                             "qty": sum(int(l.get("qty") or 0) for l in lines),
+                             "qty_done": sum(int(l.get("qty") or 0) for l in lines
+                                             if l.get("state") == "done")}}
+
+    def _pick_clean(self, s):
+        """续上的旧存档里清掉应排除的商品行（历史遗留的 1166/赠品），其他进度保留。"""
+        out, changed = [], False
+        for o in (s.get("orders") or []):
+            ls = [l for l in (o.get("lines") or []) if not _pick_group_excluded(l.get("code"))]
+            if not ls:
+                changed = True
+                continue
+            if len(ls) != len(o.get("lines") or []):
+                changed = True
+                o = dict(o, lines=ls)
+            out.append(o)
+        if changed:
+            pick_save(s["batch"], out, s.get("status") or "running",
+                      s.get("days") or 3, s.get("created_at"))
+        return dict(s, orders=out)
 
     def web_pick_list(self, batch, days=3, refresh=False):
         """开一个拣货会话：已有存档（未结束）就直接续上，否则现拉。"""
@@ -2116,12 +2299,14 @@ class ScanApp:
             return {"error": "缺少批次号"}
         saved = pick_get(batch)
         if saved and saved.get("status") == "running" and not refresh:
-            return self._pick_payload(saved)
+            pick_end_others(batch)      # 同时只保留一个进行中批次
+            return self._pick_payload(self._pick_clean(saved))
         orders, err = fetch_print_batch(batch, days=days)
         if err:
             return {"error": err}
-        groups = build_pick_groups(orders, self._shelf_lookup)
-        pick_save(batch, groups, "running", days)
+        built = build_pick_orders(orders, self._shelf_lookup)
+        pick_save(batch, built, "running", days)
+        pick_end_others(batch)          # 开了新批次，旧的自动结束
         return self._pick_payload(pick_get(batch))
 
     def web_pick_current(self):
@@ -2129,22 +2314,31 @@ class ScanApp:
         s = pick_running()
         if not s:
             return {"running": False}
-        p = self._pick_payload(s)
+        p = self._pick_payload(self._pick_clean(s))
         return {"running": True, "batch": p["batch"], "created_at": p["created_at"],
-                "progress": p["progress"], "groups": p["groups"], "days": p["days"]}
+                "progress": p["progress"], "orders": p["orders"], "days": p["days"]}
 
-    def web_pick_mark(self, batch, idx, state):
+    def web_pick_mark(self, batch, idx, state, line=None):
+        """标记：g=第几单（0 起），line=单内第几个商品（不传=整单）。"""
         if state not in ("done", "short", "pending"):
             return {"error": "state 不合法"}
         d = pick_get(batch)
         if not d:
             return {"error": "找不到该批次的拣货记录"}
-        gs = d.get("groups") or []
-        if not (0 <= idx < len(gs)):
+        os_ = d.get("orders") or []
+        if not (0 <= idx < len(os_)):
             return {"error": "序号越界"}
-        gs[idx]["state"] = state
-        gs[idx]["marked_at"] = now_gmt8()
-        pick_save(d["batch"], gs, d.get("status") or "running", d.get("days") or 3, d.get("created_at"))
+        ls = os_[idx].get("lines") or []
+        if line is None:
+            targets = list(range(len(ls)))
+        elif 0 <= line < len(ls):
+            targets = [line]
+        else:
+            return {"error": "行号越界"}
+        for i in targets:
+            ls[i]["state"] = state
+            ls[i]["marked_at"] = now_gmt8()
+        pick_save(d["batch"], os_, d.get("status") or "running", d.get("days") or 3, d.get("created_at"))
         return self._pick_payload(pick_get(batch))
 
     def web_pick_end(self, batch):
@@ -2153,6 +2347,24 @@ class ScanApp:
 
     def web_lookup(self, code, rel, n):
         idx, _stat = self._web_index(rel, n)
+        keys, is_series = series_matches(idx, code)
+        if is_series:
+            items = []
+            for k in keys[:150]:
+                e, _c = dict_get_ci(idx, k)
+                e = e or {}
+                sh, _k2 = dict_get_ci(self.shelf_map, k)
+                sh = sh or {}
+                lk, _k3 = dict_get_ci(self.lock_map, k)
+                lk = lk or {}
+                items.append({"code": k,
+                              "bins": "、".join(b[0] for b in (sh.get("bins") or [])) or "无货位",
+                              "shelf": int(sh.get("shelf", 0) or 0),
+                              "qty": int(e.get("qty", 0) or 0),
+                              "orders": int(e.get("orders", 0) or 0),
+                              "lock": int((lk or {}).get("lock", 0) or 0)})
+            return {"series": True, "code": code, "items": items, "total": len(keys),
+                    "shelf_at": self.shelf_at}
         e, canon = dict_get_ci(idx, code)          # 编码不分大小写
         e = e or {}
         sh, _k = dict_get_ci(self.shelf_map, canon)
@@ -2174,8 +2386,47 @@ class ScanApp:
         }
 
     # ---------- UI ----------
+    def _setup_style(self):
+        """macOS 风格扁平主题（clam 起底 + 自定义样式）。"""
+        st = ttk.Style()
+        try:
+            st.theme_use("clam")
+        except Exception:
+            pass
+        f = ("Microsoft YaHei UI", 10)
+        fb = ("Microsoft YaHei UI", 10, "bold")
+        st.configure(".", font=f, background=UI_BG, foreground=UI_INK)
+        st.configure("TFrame", background=UI_BG)
+        st.configure("Card.TFrame", background=UI_CARD)
+        st.configure("TLabel", background=UI_BG, foreground=UI_INK)
+        st.configure("Muted.TLabel", background=UI_BG, foreground=UI_SUB)
+        st.configure("Title.TLabel", background=UI_BG, foreground=UI_INK,
+                     font=("Microsoft YaHei UI", 16, "bold"))
+        st.configure("TButton", padding=(10, 7), font=f, borderwidth=0, relief="flat",
+                     background=UI_FILL, foreground=UI_INK, focusthickness=0)
+        st.map("TButton", background=[("pressed", UI_FILL_PRESS), ("active", UI_FILL_HOVER)],
+               foreground=[("disabled", "#b0b3b8")])
+        st.configure("Accent.TButton", background=UI_BLUE, foreground="#ffffff", font=fb)
+        st.map("Accent.TButton", background=[("pressed", "#0060d0"), ("active", "#1a88ff")])
+        st.configure("TLabelframe", background=UI_BG, bordercolor=UI_LINE, relief="solid",
+                     borderwidth=1, padding=8)
+        st.configure("TLabelframe.Label", background=UI_BG, foreground=UI_SUB, font=fb)
+        st.configure("TCheckbutton", background=UI_BG, foreground=UI_INK, font=f, focusthickness=0)
+        st.map("TCheckbutton", background=[("active", UI_BG)])
+        st.configure("Treeview", background=UI_CARD, fieldbackground=UI_CARD, foreground=UI_INK,
+                     rowheight=27, font=f, borderwidth=0)
+        st.configure("Treeview.Heading", background="#f0f1f4", foreground=UI_SUB, font=fb,
+                     relief="flat", padding=6)
+        st.map("Treeview", background=[("selected", "#d6e7ff")], foreground=[("selected", UI_INK)])
+        st.configure("TEntry", fieldbackground="#ffffff", bordercolor=UI_LINE, padding=6)
+        st.map("TEntry", bordercolor=[("focus", UI_BLUE)])
+        st.configure("TCombobox", fieldbackground="#ffffff", padding=4)
+        st.configure("TSpinbox", fieldbackground="#ffffff", padding=4)
+        st.configure("TProgressbar", background=UI_BLUE, troughcolor=UI_FILL, borderwidth=0)
+
     def _build_ui(self):
-        main = ttk.Frame(self.root, padding=10)
+        self._setup_style()
+        main = ttk.Frame(self.root, padding=12)
         main.pack(fill=tk.BOTH, expand=True)
         main.columnconfigure(0, weight=1)
 
@@ -2204,10 +2455,11 @@ class ScanApp:
         self.result.grid(row=1, column=0, sticky="ew", pady=8)
         det = ttk.Frame(main)
         det.grid(row=2, column=0, sticky="ew")
-        self.result_detail = tk.Label(det, text="", font=("Microsoft YaHei", 12), fg="#222",
-                                      justify="left", anchor="w")
+        self.result_detail = tk.Label(det, text="", font=("Microsoft YaHei", 12), fg=UI_INK,
+                                      bg=UI_BG, justify="left", anchor="w")
         self.result_detail.pack(anchor="w")
-        self.warn_label = tk.Label(det, text="", font=("Microsoft YaHei", 18, "bold"), fg=self.RED)
+        self.warn_label = tk.Label(det, text="", font=("Microsoft YaHei", 18, "bold"),
+                                   fg=self.RED, bg=UI_BG)
         self.warn_label.pack(anchor="w", pady=(4, 0))
 
         # 商品数量筛选
@@ -2220,21 +2472,28 @@ class ScanApp:
         ttk.Label(flt, text="件").grid(row=0, column=3)
         ttk.Button(flt, text="按条件筛选(本地)", command=self.apply_filter).grid(row=0, column=4, padx=10)
 
-        # 操作按钮
-        ops = ttk.Frame(main)
-        ops.grid(row=4, column=0, sticky="ew", pady=4)
-        ttk.Button(ops, text="一键导出全部扫码日志 Excel", command=self.on_export).pack(side=tk.LEFT, padx=4)
-        ttk.Button(ops, text="增量刷新", command=lambda: self.sync_pending(background=True)).pack(side=tk.LEFT, padx=4)
-        ttk.Button(ops, text="全量重拉", command=lambda: self.full_reload(background=True)).pack(side=tk.LEFT, padx=4)
-        ttk.Button(ops, text="刷新货位库存", command=lambda: self.reload_shelf(background=True)).pack(side=tk.LEFT, padx=4)
-        ttk.Button(ops, text="刷新锁定数", command=lambda: self.reload_lock(background=True)).pack(side=tk.LEFT, padx=4)
-        ttk.Button(ops, text="清空日志", command=self.on_clear_logs).pack(side=tk.LEFT, padx=4)
-        ttk.Button(ops, text="API 设置", command=self.on_api_settings).pack(side=tk.LEFT, padx=4)
-        ttk.Button(ops, text="批次查询", command=self.on_batch_dialog).pack(side=tk.LEFT, padx=4)
-        ttk.Checkbutton(ops, text="后台扫码监听（最小化也能扫）", variable=self.hook_on,
-                        command=self.on_hook_toggle).pack(side=tk.LEFT, padx=8)
-        ttk.Checkbutton(ops, text="不回车的扫码枪：停顿时自动查", variable=self.autosubmit_on,
-                        command=self.on_autosubmit_toggle).pack(side=tk.LEFT, padx=8)
+        # 操作按钮（网格排布：窄窗口/小屏也不会被切掉）
+        ops = ttk.LabelFrame(main, text="操作")
+        ops.grid(row=4, column=0, sticky="ew", pady=6)
+        for c in range(4):
+            ops.columnconfigure(c, weight=1)
+        for i, (txt, cmd, sty) in enumerate((
+                ("批次查询", self.on_batch_dialog, "Accent.TButton"),
+                ("增量刷新", lambda: self.sync_pending(background=True), "TButton"),
+                ("全量重拉", lambda: self.full_reload(background=True), "TButton"),
+                ("刷新货位库存", lambda: self.reload_shelf(background=True), "TButton"),
+                ("刷新锁定数", lambda: self.reload_lock(background=True), "TButton"),
+                ("导出扫码日志 Excel", self.on_export, "TButton"),
+                ("清空日志", self.on_clear_logs, "TButton"),
+                ("API 设置", self.on_api_settings, "TButton"))):
+            ttk.Button(ops, text=txt, command=cmd, style=sty).grid(
+                row=i // 4, column=i % 4, sticky="ew", padx=5, pady=5)
+        chk = ttk.Frame(ops)
+        chk.grid(row=2, column=0, columnspan=4, sticky="w", padx=5, pady=(2, 4))
+        ttk.Checkbutton(chk, text="后台扫码监听（最小化也能扫）", variable=self.hook_on,
+                        command=self.on_hook_toggle).pack(side=tk.LEFT, padx=(0, 14))
+        ttk.Checkbutton(chk, text="不回车的扫码枪：停顿时自动查", variable=self.autosubmit_on,
+                        command=self.on_autosubmit_toggle).pack(side=tk.LEFT)
 
         # 刷新周期
         itv = ttk.LabelFrame(main, text="刷新周期（分钟）")
@@ -2727,8 +2986,13 @@ class ScanApp:
         nb.add(f3, text="按货位汇总")
         sumtxt = tk.Text(f3, font=("Microsoft YaHei", 12), wrap="none")
         sumtxt.pack(fill=tk.BOTH, expand=True)
+        f4 = ttk.Frame(nb)
+        nb.add(f4, text="按分区")
+        zonetxt = tk.Text(f4, font=("Microsoft YaHei", 12), wrap="none")
+        zonetxt.pack(fill=tk.BOTH, expand=True)
         self._batch_no, self._batch_rows = "", []
         self._batch_ui = {"win": win, "tree": tree, "sum": sumtxt, "pick": picktxt, "nb": nb,
+                          "zone": zonetxt,
                           "info": info, "btn": btn, "exp": exp, "var": var, "days": days}
 
         def do_query():
@@ -2772,12 +3036,14 @@ class ScanApp:
                     bins = "、".join(b[0] for b in (sh.get("bins") or [])) or "无在架货位"
                     rows.append([o, code, num, int(sh.get("shelf", 0) or 0), bins])
             self.q.put(lambda: self._apply_batch(batch, orders, rows, btn, exp, info, tree, sumtxt,
-                                                getattr(self, "_batch_ui", {}).get("pick")))
+                                                getattr(self, "_batch_ui", {}).get("pick"),
+                                                getattr(self, "_batch_ui", {}).get("zone")))
         except Exception as e:
             msg = str(e)[:160]
             self.q.put(lambda: (info.set("查询失败：%s" % msg), btn.config(state=tk.NORMAL)))
 
-    def _apply_batch(self, batch, orders, rows, btn, exp, info, tree, sumtxt, picktxt=None):
+    def _apply_batch(self, batch, orders, rows, btn, exp, info, tree, sumtxt, picktxt=None,
+                     zonetxt=None):
         try:
             agg = {}
             pick = []
@@ -2809,12 +3075,33 @@ class ScanApp:
                 for seq_a, seq_b, code, tot, bins, sq, _x, cnt in pick:
                     rng = ("第 %s 张" % seq_a) if seq_a == seq_b else ("第 %s-%s 张" % (seq_a, seq_b))
                     plines.append("%-14s %-18s ×%-3d  货位：%s（在架 %s）"
-                                  % (rng, code, tot, bins, sq))
+                                  % (rng, code, tot, bin_label(bins), sq))
                 if miss:
                     plines.append("")
                     plines.append("注：%d 行显示「无在架货位」，说明当前不在常规货位上。" % miss)
                 picktxt.delete("1.0", tk.END)
                 picktxt.insert("1.0", "\n".join(plines))
+            # ② 按分区（A/B/C/D 分开列，可分别发给不同的人去拣）
+            if zonetxt is not None:
+                byzone = {}
+                for g in pick:
+                    z = zone_of(g[4]) or "无货位"
+                    byzone.setdefault(z, []).append(g)
+                zlines = ["批次 %s：%d 单 / %d 行商品（按分区）" % (batch, len(orders), len(rows)), ""]
+                for z in sorted(byzone, key=lambda x: (zone_rank(x if x != "无货位" else ""), x)):
+                    zl = byzone[z]
+                    tot = sum(g[3] for g in zl)
+                    zlines.append(("【%s】%d 组 / %d 件" if z == "无货位" else "【%s区】%d 组 / %d 件")
+                                  % (z, len(zl), tot))
+                    for g in sorted(zl, key=lambda g: g[0]):
+                        rng = ("第 %s 张" % g[0]) if g[0] == g[1] else ("第 %s-%s 张" % (g[0], g[1]))
+                        zlines.append("    %-14s %-18s ×%-4d 货位 %s（在架 %s）"
+                                      % (rng, g[2], g[3], bin_label(g[4]), g[5]))
+                    zlines.append("")
+                if miss:
+                    zlines.append("注：%d 行显示「无在架货位」。" % miss)
+                zonetxt.delete("1.0", tk.END)
+                zonetxt.insert("1.0", "\n".join(zlines))
             lines = ["批次 %s：%d 单，%d 行商品" % (batch, len(orders), len(rows))]
             cur = None
             for (one_b, code) in sorted(agg):
@@ -2901,7 +3188,7 @@ class ScanApp:
         ttk.Style()  # 占位（不影响）
         ui["var"].set(str(batch_no or ""))
         self._apply_batch(label, orders, rows, ui["btn"], ui["exp"], ui["info"],
-                          ui["tree"], ui["sum"], ui["pick"])
+                          ui["tree"], ui["sum"], ui["pick"], ui["zone"])
         try:
             ui["nb"].select(0)
         except Exception:
@@ -2913,9 +3200,10 @@ class ScanApp:
         if not rows:
             return
         batch = getattr(self, "_batch_no", "")
-        headers = ["打印序号", "系统单号", "内部单号", "快递单号", "商品编码", "件数", "货位", "在架", "系统状态"]
+        headers = ["打印序号", "系统单号", "内部单号", "快递单号", "商品编码", "件数", "分区", "货位", "在架", "系统状态"]
         data = [[o.get("seq"), o.get("sid"), o.get("short_id"), o.get("express"), code, num,
-                 bins, shelf_qty, STATUS_LABEL.get(o.get("sys_status"), o.get("sys_status"))]
+                 zone_of(bins), bins, shelf_qty,
+                 STATUS_LABEL.get(o.get("sys_status"), o.get("sys_status"))]
                 for o, code, num, shelf_qty, bins in rows]
         path = os.path.join(BASE_DIR, "批次%s_%s.xlsx" % (batch, datetime.now().strftime("%Y%m%d_%H%M%S")))
         try:
@@ -3212,6 +3500,11 @@ class ScanApp:
 
     def _worker_scan(self, code, from_hook=False):
         try:
+            # 主编码/系列查询：输入 9687 就列全部 9687-* 规格的货位
+            keys, is_series = series_matches(self.index, code)
+            if is_series:
+                self._worker_series(code, keys)
+                return
             # 编码不分大小写：先精确、再忽略大小写；命中后用库里那个写法
             entry, canon = dict_get_ci(self.index, code)
             entry = entry or {"qty": 0, "orders": 0, "ones": 0, "main": False}
@@ -3240,6 +3533,31 @@ class ScanApp:
         except Exception as e:
             msg = str(e)[:200]
             self.q.put(lambda: self._finish_scan("扫码查询失败：%s" % msg))
+
+    def _worker_series(self, code, keys):
+        """主编码查询：列出该主编码下所有规格的货位/在架/待发货/锁定。"""
+        lines = []
+        for k in keys[:120]:
+            e, _c = dict_get_ci(self.index, k)
+            e = e or {}
+            sh, _k2 = dict_get_ci(self.shelf_map, k)
+            sh = sh or {}
+            lk, _k3 = dict_get_ci(self.lock_map, k)
+            lk = lk or {}
+            bins = "、".join(b[0] for b in (sh.get("bins") or [])) or "无货位"
+            lines.append("%-22s 货位 %-16s 在架 %-6s 待发货 %-5s 锁定 %s"
+                         % (k, bins, sh.get("shelf", 0),
+                            "%s件/%s单" % (e.get("qty", 0), e.get("orders", 0)), lk.get("lock", 0)))
+        more = max(0, len(keys) - 120)
+        self.q.put(lambda: self._apply_series(code, lines, len(keys), more))
+
+    def _apply_series(self, code, lines, total, more=0):
+        txt = "\n".join(lines) + (("\n……还有 %d 个规格未列出" % more) if more else "")
+        self.result.config(text="%s（主编码，共 %d 个规格）" % (code, total), bg=self.GREY_BG, fg="#000000")
+        self.result_detail.config(text=txt or "没找到该主编码下的规格")
+        self.warn_label.config(text="")
+        self.status_text.set("主编码查询 %s：%d 个规格" % (code, total))
+        self._scanning = False
 
     def _apply_scan(self, code, orders_count, pending, ones, shelf, shelf_note, bins,
                     lock_n=0, sell_n=0, avail_n=0, from_hook=False):

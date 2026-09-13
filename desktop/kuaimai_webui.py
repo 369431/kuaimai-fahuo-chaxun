@@ -48,6 +48,60 @@ WEB_INDEX_HTML = r"""<!DOCTYPE html>
   button.pdone { background:#1e9e4a; }
   button.pshort { background:#c62828; }
   .pstate { font-size:12px; color:#666; margin-top:5px; }
+  /* ================= macOS 风格（覆盖上面的基础样式） ================= */
+  :root { --mac-blue:#007AFF; --mac-green:#34C759; --mac-red:#FF3B30; --mac-ink:#1d1d1f; --mac-sub:#6e6e73;
+          --mac-line:rgba(60,60,67,.12); --mac-fill:rgba(120,120,128,.12); --mac-glass:rgba(255,255,255,.72); }
+  html { -webkit-text-size-adjust:100%; }
+  body { font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+         letter-spacing:-.01em; -webkit-font-smoothing:antialiased; color:var(--mac-ink);
+         background:linear-gradient(170deg,#eef3fa 0%,#e6edf8 45%,#e1e8f4 100%) fixed; min-height:100vh; }
+  header { background:var(--mac-glass); color:var(--mac-ink); backdrop-filter:saturate(180%) blur(20px);
+           -webkit-backdrop-filter:saturate(180%) blur(20px); border-bottom:1px solid var(--mac-line);
+           font-size:17px; font-weight:600; position:sticky; top:0; z-index:20; }
+  header small { color:var(--mac-sub); }
+  .card, #result, .pitem { background:var(--mac-glass); backdrop-filter:saturate(180%) blur(20px);
+           -webkit-backdrop-filter:saturate(180%) blur(20px); border:1px solid rgba(255,255,255,.62);
+           border-radius:18px; box-shadow:0 10px 30px rgba(24,39,75,.08), 0 1px 2px rgba(24,39,75,.05); }
+  input[type=text], input, select, input[type=number] { background:rgba(255,255,255,.86);
+           border:1px solid var(--mac-line); border-radius:12px; color:var(--mac-ink); }
+  input[type=text]:focus, input:focus { outline:none; border-color:var(--mac-blue);
+           box-shadow:0 0 0 3.5px rgba(0,122,255,.16); }
+  button { font-family:inherit; font-weight:600; border-radius:12px; background:var(--mac-blue); color:#fff;
+           box-shadow:0 1px 2px rgba(0,0,0,.10); transition:transform .08s ease, opacity .12s ease; }
+  button.ghost { background:var(--mac-fill); color:var(--mac-blue); box-shadow:none; }
+  button:active { transform:scale(.97); opacity:.9; }
+  #rcode, .pcode { color:#000; letter-spacing:-.02em; }
+  #rmain { letter-spacing:-.02em; }
+  #rdetail { color:#3a3a3c; }
+  .ok { background:rgba(52,199,89,.15); color:#1B7F35; }
+  .bad { background:rgba(255,59,48,.12); color:#C7362E; }
+  .muted { color:var(--mac-sub); }
+  th,td { border-bottom:1px solid rgba(60,60,67,.08); }
+  th { color:var(--mac-sub); }
+  .pitem.done { background:rgba(52,199,89,.14); border-color:rgba(52,199,89,.35); }
+  .pitem.short { background:rgba(255,59,48,.12); border-color:rgba(255,59,48,.32); }
+  .pqty { color:var(--mac-red); letter-spacing:-.02em; }
+  .pqty.done { color:var(--mac-green); }
+  button.pdone { background:var(--mac-green); }
+  button.pshort { background:var(--mac-red); }
+  .pzone { background:var(--mac-blue); border-radius:7px; font-weight:600; }
+  .zones, .filters { background:var(--mac-fill); border-radius:12px; padding:3px; gap:3px; border:0; }
+  .zones button, .filters button { background:transparent; color:#3c3c43; box-shadow:none; border-radius:9px; font-weight:600; }
+  .zones button:not(.ghost), .filters button:not(.ghost) { background:#fff; color:#000;
+           box-shadow:0 1px 3px rgba(0,0,0,.14); }
+  .bar { background:var(--mac-glass); backdrop-filter:saturate(180%) blur(20px);
+         -webkit-backdrop-filter:saturate(180%) blur(20px); border-top:1px solid var(--mac-line); }
+  .row4 button { border-radius:10px; }
+  @media (prefers-color-scheme: dark) {
+    body { background:linear-gradient(170deg,#1c1c1e,#151517 60%,#1a1a1c) fixed; color:#f2f2f7; }
+    header { background:rgba(28,28,30,.72); color:#f2f2f7; border-bottom-color:rgba(255,255,255,.08); }
+    .card, #result, .pitem, .bar { background:rgba(28,28,30,.72); border-color:rgba(255,255,255,.08); }
+    #rcode, .pcode { color:#fff; }
+    input, select, input[type=number] { background:rgba(118,118,128,.24); border-color:rgba(255,255,255,.12); color:#f2f2f7; }
+    .zones button, .filters button { color:#ebebf5; }
+    .zones button:not(.ghost), .filters button:not(.ghost) { background:rgba(255,255,255,.18); color:#fff; }
+    #rdetail { color:#d1d1d6; }
+  }
 </style>
 </head>
 <body>
@@ -135,6 +189,18 @@ async function query(code){
   try { d=await (await fetch(`/api/lookup?code=${encodeURIComponent(code)}&rel=${rel}&n=${n}${KQ}`)).json(); }
   catch(e){ $('rmain').textContent='网络错误：'+e.message; return; }
   if(d.error){ $('rmain').textContent=d.error; return; }
+  if(d.series){
+    $('result').className='';
+    $('rcode').textContent = d.code + '（主编码）';
+    $('rmain').textContent = '共 ' + d.items.length + ' 个规格';
+    $('rdetail').innerHTML = d.items.map(function(it){
+      return '<div>' + it.code + '　<b>' + it.bins + '</b>　在架 ' + it.shelf
+           + '　待发 ' + it.qty + ' 件' + (it.lock ? ('　锁定 ' + it.lock) : '') + '</div>';
+    }).join('');
+    beep(true);
+    $('code').value=''; $('code').focus();
+    return;
+  }
   const ok=d.orders>0;
   $('result').className = ok?'ok':'bad';
   // 一单一件：整单只有一件的单（每单正好 1 件）；剩下抵成一单多件
@@ -237,8 +303,73 @@ PICK_HTML = r"""<!doctype html>
   .row4 button { flex:1; padding:8px 2px; font-size:13px; white-space:nowrap; }
   .pzone { display:inline-block; background:#0b5394; color:#fff; border-radius:6px; padding:1px 8px;
            font-size:14px; margin-left:8px; vertical-align:middle; }
+  .zones { display:flex; gap:6px; margin:8px 0; flex-wrap:wrap; }
+  .zones button { flex:1; padding:11px 6px; font-size:15px; white-space:nowrap; }
   .hidden { display:none; }
   pre { white-space:pre-wrap; font-family:ui-monospace,Consolas,"Microsoft YaHei",monospace; font-size:14px; margin:0; }
+  /* ================= macOS 风格（覆盖上面的基础样式） ================= */
+  :root { --mac-blue:#007AFF; --mac-green:#34C759; --mac-red:#FF3B30; --mac-ink:#1d1d1f; --mac-sub:#6e6e73;
+          --mac-line:rgba(60,60,67,.12); --mac-fill:rgba(120,120,128,.12); --mac-glass:rgba(255,255,255,.72); }
+  html { -webkit-text-size-adjust:100%; }
+  body { font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+         letter-spacing:-.01em; -webkit-font-smoothing:antialiased; color:var(--mac-ink);
+         background:linear-gradient(170deg,#eef3fa 0%,#e6edf8 45%,#e1e8f4 100%) fixed; min-height:100vh; }
+  h1 { font-size:24px; font-weight:700; color:var(--mac-ink); letter-spacing:-.02em; margin:2px 2px 12px; }
+  .card { background:var(--mac-glass); backdrop-filter:saturate(180%) blur(20px);
+          -webkit-backdrop-filter:saturate(180%) blur(20px); border:1px solid rgba(255,255,255,.62);
+          border-radius:18px; padding:14px; box-shadow:0 10px 30px rgba(24,39,75,.08), 0 1px 2px rgba(24,39,75,.05); }
+  input { background:rgba(255,255,255,.86); border:1px solid var(--mac-line); border-radius:12px;
+          color:var(--mac-ink); padding:13px 14px; font-size:19px; }
+  input:focus { outline:none; border-color:var(--mac-blue); box-shadow:0 0 0 3.5px rgba(0,122,255,.16); }
+  button { font-family:inherit; font-weight:600; border-radius:12px; background:var(--mac-blue); color:#fff;
+           box-shadow:0 1px 2px rgba(0,0,0,.10); transition:transform .08s ease, opacity .12s ease; }
+  button.ghost { background:var(--mac-fill); color:var(--mac-blue); box-shadow:none; }
+  button:active { transform:scale(.97); opacity:.9; }
+  .muted { color:var(--mac-sub); }
+  .pitem { background:var(--mac-glass); backdrop-filter:saturate(180%) blur(20px);
+           -webkit-backdrop-filter:saturate(180%) blur(20px); border:1px solid rgba(255,255,255,.62);
+           border-radius:18px; padding:14px; box-shadow:0 10px 30px rgba(24,39,75,.08), 0 1px 2px rgba(24,39,75,.05); }
+  .pitem.done { background:rgba(52,199,89,.14); border-color:rgba(52,199,89,.35); }
+  .pitem.short { background:rgba(255,59,48,.12); border-color:rgba(255,59,48,.32); }
+  .pitem.one { border-width:1px; padding:20px; box-shadow:0 14px 40px rgba(24,39,75,.12), 0 1px 2px rgba(24,39,75,.05); }
+  .pitem.one .pcode { font-size:34px; }
+  .pline { display:flex; align-items:center; gap:8px; padding:9px 10px; border-radius:11px;
+           background:rgba(120,120,128,.10); margin:6px 0; font-size:15px; flex-wrap:wrap; }
+  .pline.cur { background:rgba(0,122,255,.14); box-shadow:0 0 0 2px rgba(0,122,255,.35) inset; }
+  .pline.done { background:rgba(52,199,89,.18); }
+  .pline.short { background:rgba(255,59,48,.16); }
+  .pno { min-width:18px; text-align:center; color:#6e6e73; font-size:13px; }
+  .pcode2 { font-weight:800; font-size:17px; letter-spacing:-.01em; }
+  .pqty2 { font-weight:800; color:#FF3B30; white-space:nowrap; }
+  .pbin2 { color:#1d1d1f; white-space:nowrap; }
+  .pst { color:#6e6e73; font-size:12.5px; white-space:nowrap; margin-left:auto; }
+  .pprog { font-size:15px; color:#6e6e73; font-weight:600; }
+  .pmeta2 { font-size:13.5px; color:#3a3a3c; margin-top:4px; line-height:1.6; }
+  .pitem.one .pqty { font-size:33px; }
+  .pitem.one .pbin { font-size:23px; }
+  .pitem.one .pbtns button { padding:20px 8px; font-size:20px; border-radius:14px; }
+  .pcode { color:#000; letter-spacing:-.02em; }
+  .pqty { color:var(--mac-red); letter-spacing:-.02em; }
+  .pqty.done { color:var(--mac-green); }
+  button.pdone { background:var(--mac-green); }
+  button.pshort { background:var(--mac-red); }
+  .pzone { background:var(--mac-blue); border-radius:7px; font-weight:600; }
+  .zones, .filters { background:var(--mac-fill); border-radius:12px; padding:3px; gap:3px; border:0; }
+  .zones button, .filters button { background:transparent; color:#3c3c43; box-shadow:none; border-radius:9px; font-weight:600; }
+  .zones button:not(.ghost), .filters button:not(.ghost) { background:#fff; color:#000;
+           box-shadow:0 1px 3px rgba(0,0,0,.14); }
+  .bar { background:var(--mac-glass); backdrop-filter:saturate(180%) blur(20px);
+         -webkit-backdrop-filter:saturate(180%) blur(20px); border-top:1px solid var(--mac-line); }
+  .row4 button { border-radius:10px; }
+  @media (prefers-color-scheme: dark) {
+    body { background:linear-gradient(170deg,#1c1c1e,#151517 60%,#1a1a1c) fixed; color:#f2f2f7; }
+    h1 { color:#f2f2f7; }
+    .card, .pitem, .bar { background:rgba(28,28,30,.72); border-color:rgba(255,255,255,.08); }
+    .pcode { color:#fff; }
+    input { background:rgba(118,118,128,.24); border-color:rgba(255,255,255,.12); color:#f2f2f7; }
+    .zones button, .filters button { color:#ebebf5; }
+    .zones button:not(.ghost), .filters button:not(.ghost) { background:rgba(255,255,255,.18); color:#fff; }
+  }
 </style></head><body>
 <h1>拣货</h1>
 <div class="card">
@@ -254,6 +385,7 @@ PICK_HTML = r"""<!doctype html>
   </div>
   <div id="pinfo" class="muted" style="margin-top:8px">—</div>
 </div>
+<div class="zones" id="zones"></div>
 <div class="filters" id="filters">
   <button data-f="one">单条</button>
   <button id="btnZone">按分区拣货</button>
@@ -283,13 +415,71 @@ function zoneRank(z){
   const i = 'ABCD'.indexOf(z);
   return i >= 0 ? i : 9;          // A/B/C/D 依次，其他分区排最后
 }
-/* 按分区排序后的 [ {g,i} ]（分区内保持打印顺序） */
-function orderedGroups(){
-  const gs = (PICK && PICK.groups ? PICK.groups : []).map(function(g, i){ return { g: g, i: i }; });
-  if(!ZONE) return gs;
-  return gs.sort(function(a, b){
-    return (zoneRank(zoneOf(a.g.bins)) - zoneRank(zoneOf(b.g.bins)))
-        || ((a.g.seq_a || 0) - (b.g.seq_a || 0));
+/* 手动选一个分区先拣（''=全部）；记在手机上 */
+let ZPICK = localStorage.getItem('pick_zone_only') || '';
+function lineState(l){ return (l && l.state) || 'pending'; }
+function orderState(o){
+  const ls = (o && o.lines) || [];
+  if(!ls.length) return 'done';
+  if(ls.some(function(l){ return lineState(l) === 'pending'; })) return 'pending';
+  if(ls.some(function(l){ return l.state === 'short'; })) return 'short';
+  return 'done';
+}
+function nextLine(o){
+  const ls = (o && o.lines) || [];
+  for(let i = 0; i < ls.length; i++){ if(lineState(ls[i]) === 'pending') return { l: ls[i], i: i }; }
+  return null;
+}
+function orderZone(o){
+  const it = nextLine(o) || ((o && o.lines && o.lines.length) ? { l: o.lines[0] } : null);
+  return it ? zoneOf(it.l.bins) : '';
+}
+/* 每个区还剩多少个待拣商品 */
+function zoneCounts(){
+  const out = {};
+  (PICK && PICK.orders ? PICK.orders : []).forEach(function(o){
+    (o.lines || []).forEach(function(l){
+      if(lineState(l) !== 'pending') return;
+      const z = zoneOf(l.bins) || '无货位';
+      out[z] = (out[z] || 0) + 1;
+    });
+  });
+  return out;
+}
+function renderZones(){
+  const box = $('zones');
+  if(!box) return;
+  if(!PICK){ box.innerHTML = ''; return; }
+  const cnt = zoneCounts();
+  const zs = Object.keys(cnt).sort(function(a, b){ return zoneRank(a) - zoneRank(b); });
+  let html = '<button data-z=""' + (ZPICK === '' ? '' : ' class="ghost"') + '>全部</button>';
+  zs.forEach(function(z){
+    const p = cnt[z];
+    const label = (z === '无货位') ? '无货位' : (z + '区');
+    html += '<button data-z="' + z + '"' + (ZPICK === z ? '' : ' class="ghost"')
+         + (p === 0 ? ' style="opacity:.45"' : '') + '>' + label + (p ? (' ' + p) : ' ✓') + '</button>';
+  });
+  box.innerHTML = html;
+  box.querySelectorAll('button').forEach(function(b){
+    b.onclick = function(){
+      ZPICK = b.dataset.z || '';
+      localStorage.setItem('pick_zone_only', ZPICK);
+      renderZones(); render(); speakCurrent();
+    };
+  });
+}
+/* 按分区排序的「单」列表（[{o:单,i:下标}]），分区内按打印序号 */
+function orderedOrders(){
+  let os = (PICK && PICK.orders ? PICK.orders : []).map(function(o, i){ return { o: o, i: i }; });
+  if(ZPICK){
+    os = os.filter(function(it){
+      return (it.o.lines || []).some(function(l){ return (zoneOf(l.bins) || '无货位') === ZPICK; });
+    });
+  }
+  if(!ZONE) return os;
+  return os.sort(function(a, b){
+    return (zoneRank(orderZone(a.o)) - zoneRank(orderZone(b.o)))
+        || ((a.o.seq || 0) - (b.o.seq || 0));
   });
 }
 function url(p, obj){ return p + '?' + new URLSearchParams(Object.assign({k:K}, obj||{})).toString(); }
@@ -323,20 +513,29 @@ function speakCode(code){
     .replace(/\s+/g, ' ')
     .trim();
 }
-function currentItem(){
-  if(!PICK) return null;
-  const gs = orderedGroups();
-  for(let i = 0; i < gs.length; i++){
-    if((gs[i].g.state || 'pending') === 'pending') return gs[i];
-  }
+function currentOrder(){
+  const os = orderedOrders();
+  for(let i = 0; i < os.length; i++){ if(orderState(os[i].o) === 'pending') return os[i]; }
   return null;
 }
-/* 播报当前要拣的那一条：分区 + 商家编码-颜色-尺码 多少件 */
+/* 播报当前要拣的那一个商品：分区 + （第 k/L 个）+ 编码 数量 */
 function speakCurrent(){
-  const it = currentItem();
-  if(!it){ speak('全部拣完'); return; }
-  const z = ZONE ? zoneOf(it.g.bins) : '';
-  speak((z ? (z + '区 ') : '') + speakCode(it.g.code) + ' ' + it.g.qty + ' 件');
+  const it = currentOrder();
+  const nl = it ? nextLine(it.o) : null;
+  if(!nl){
+    if(ZPICK){
+      const cnt = zoneCounts();
+      const rest = Object.keys(cnt).filter(function(z){ return z !== ZPICK && cnt[z] > 0; });
+      speak(rest.length ? (ZPICK + '拣完，还剩 ' + rest.join(' ')) : (ZPICK + '拣完'));
+    } else {
+      speak('全部拣完');
+    }
+    return;
+  }
+  const z = zoneOf(nl.l.bins);
+  const total = (it.o.lines || []).length;
+  const pre = (total > 1) ? ('第 ' + (nl.i + 1) + '/' + total + ' 个 ') : '';
+  speak((z ? (z + '区 ') : '') + pre + speakCode(nl.l.code) + ' ' + nl.l.qty + ' 件');
 }
 /* 浏览器要求先点一下才允许发声：加载时的播报被拦了就在第一次点按时补播 */
 function armFirstTapSpeak(){
@@ -368,76 +567,105 @@ function render(){
   if(!PICK) return;
   const pr = PICK.progress || {};
   $('pinfo').innerHTML = '批次 <b>' + (PICK.batch||'') + '</b>（' + (PICK.status==='ended'?'已结束':'进行中') + '）'
-    + ' · 已拣 <b>' + (pr.done||0) + '</b>/' + (pr.groups||0) + ' 组'
-    + ((pr.short||0) ? (' · 无货 <b>' + pr.short + '</b> 组') : '')
-    + ' · 待拣 ' + (pr.pending||0) + ' 组 · 共 ' + (pr.qty||0) + ' 件（已拣 ' + (pr.qty_done||0) + '）';
+    + ' · 待拣货 <b>' + (pr.orders_pending||0) + '</b> 单'
+    + ' · 共 <b>' + (pr.lines||0) + '</b> 个商品'
+    + ' · 已拣 <b>' + (pr.done||0) + '</b> 个商品'
+    + ((pr.short||0) ? (' · 无货 ' + pr.short + ' 个') : '');
+  renderZones();
   const box = $('plist'); box.innerHTML = '';
   let list = [];
   if(MODE === 'one'){
-    const it = currentItem();
+    const it = currentOrder();
     if(it) list.push(it);
   } else {
-    orderedGroups().forEach(function(it){
-      const g = it.g;
-      if(FILTER === 'all' || (g.state || 'pending') === FILTER) list.push(it);
+    orderedOrders().forEach(function(it){
+      if(FILTER === 'all' || orderState(it.o) === FILTER) list.push(it);
     });
   }
   if(!list.length){
-    box.innerHTML = '<div class="card muted">'
-      + (MODE === 'one' ? '本批次已全部拣完（含无货）' : '这个筛选下没有条目。') + '</div>';
+    let msg = (MODE === 'one' ? '本批次已全部拣完（含无货）' : '这个筛选下没有条目。');
+    if(MODE === 'one' && ZPICK){
+      const cnt = zoneCounts();
+      const rest = Object.keys(cnt).filter(function(z){ return z !== ZPICK && cnt[z] > 0; });
+      msg = rest.length
+        ? (ZPICK + '已拣完；还有 ' + rest.map(function(z){ return z + ' ' + cnt[z]; }).join('、') + ' 个商品待拣')
+        : (ZPICK + '已拣完，全批次也没了');
+    }
+    box.innerHTML = '<div class="card muted">' + msg + '</div>';
   }
   list.forEach(function(it){
-    const g = it.g, i = it.i;
+    const o = it.o, oi = it.i;
+    const st = orderState(o);
+    const ls = o.lines || [];
+    const pending = ls.filter(function(l){ return lineState(l) === 'pending'; }).length;
+    const nl = nextLine(o);
     const div = document.createElement('div');
     div.className = 'pitem' + (MODE === 'one' ? ' one' : '')
-      + (g.state === 'done' ? ' done' : (g.state === 'short' ? ' short' : ''));
-    const rng = (g.seq_a===g.seq_b) ? ('第 ' + g.seq_a + ' 张') : ('第 ' + g.seq_a + '-' + g.seq_b + ' 张');
-    const ex = (g.sids && g.sids.length) ? (' · 首单 ' + g.sids[0]) : '';
-    div.innerHTML = '<div class="pseq">' + rng + ' · ' + g.rows + ' 行' + ex + '</div>'
-      + '<div class="pcode">' + (g.code||'（无明细）') + ((ZONE && zoneOf(g.bins)) ? ('<span class="pzone">' + zoneOf(g.bins) + '区</span>') : '') + '</div>'
-      + '<div class="pqty' + (g.state==='done'?' done':'') + '">需拣 ' + g.qty + ' 件</div>'
-      + '<div class="pbin">货位：<b>' + g.bins + '</b>（在架 ' + g.shelf + '）</div>'
-      + '<div class="pmeta">状态：' + (g.state==='done'?'已完成':(g.state==='short'?'无货':'待拣'))
-        + (g.marked_at ? (' · ' + g.marked_at) : '') + '</div>'
-      + '<div class="pbtns">'
-      + '<button class="pdone" data-i="' + i + '" data-s="done">' + (g.state==='done'?'已拣·撤销':'拣货完成') + '</button>'
-      + '<button class="pshort" data-i="' + i + '" data-s="short">' + (g.state==='short'?'无货·撤销':'无货') + '</button>'
-      + '</div>';
+      + (st === 'done' ? ' done' : (st === 'short' ? ' short' : ''));
+    const rng = (o.seq_b && o.seq_b !== o.seq) ? ('第 ' + o.seq + '-' + o.seq_b + ' 张') : ('第 ' + o.seq + ' 张');
+    let linesHtml = '';
+    if(MODE === 'one'){
+      ls.forEach(function(l, li){
+        const lst = lineState(l);
+        const cur = nl && nl.i === li;
+        const nb = (!l.bins || l.bins === '无在架货位');
+        linesHtml += '<div class="pline' + (lst==='done'?' done':(lst==='short'?' short':'')) + (cur?' cur':'') + '">'
+          + '<span class="pno">' + (li+1) + '</span>'
+          + '<span class="pcode2">' + (l.code||'（无明细）') + '</span>'
+          + '<span class="pqty2">需 ' + l.qty + ' 件</span>'
+          + '<span class="pbin2">' + (nb ? '<b style="color:#FF9500">无货位</b>' : ('货位 ' + l.bins)) + '</span>'
+          + '<span class="pst">' + (lst==='done'?'✓ 已拣':(lst==='short'?(nb?'无货位':'无货'):'待拣')) + '</span>'
+          + '</div>';
+      });
+    } else {
+      linesHtml = '<div class="pmeta2">共 ' + ls.length + ' 个商品 · ' + ls.reduce(function(a, l){ return a + (l.qty||0); }, 0) + ' 件 · 已拣 ' + (ls.length - pending) + ' 个'
+        + (nl ? ('　下一个：' + nl.l.code + ' ×' + nl.l.qty + ' → '
+                + ((!nl.l.bins || nl.l.bins === '无在架货位') ? '无货位' : nl.l.bins)) : '')
+        + '</div>';
+    }
+    const pieces = ls.reduce(function(a, l){ return a + (l.qty || 0); }, 0);
+    div.innerHTML = '<div class="pseq">' + rng + (o.express ? (' · 快递单号 ' + o.express) : '') + '</div>'
+      + '<div class="pqty' + (st==='done'?' done':'') + '">需拣 ' + pieces + ' 件'
+      + '　<span class="pprog">共 ' + ls.length + ' 个商品 · 已拣 ' + (ls.length - pending) + '/' + ls.length + '</span></div>'
+      + linesHtml
+      + ((MODE === 'one' && nl)
+          ? ('<div class="pbtns">'
+             + '<button class="pdone" data-o="' + oi + '" data-l="' + nl.i + '" data-s="done">拣货完成</button>'
+             + '<button class="pshort" data-o="' + oi + '" data-l="' + nl.i + '" data-s="short">'
+             + ((!nl.l.bins || nl.l.bins === '无在架货位') ? '无货位' : '无货') + '</button>'
+             + '</div>')
+          : '');
     box.appendChild(div);
   });
-  if(!box.children.length) box.innerHTML = '<div class="card muted">这个筛选下没有条目。</div>';
-  box.querySelectorAll('button[data-i]').forEach(function(b){
-    b.onclick = function(){ mark(parseInt(b.dataset.i, 10), b.dataset.s); };
+  box.querySelectorAll('button[data-o]').forEach(function(b){
+    b.onclick = function(){ mark(parseInt(b.dataset.o, 10), parseInt(b.dataset.l, 10), b.dataset.s); };
   });
+  // 按货位汇总（只算待拣的）
   const sum = {};
-  orderedGroups().forEach(function(it){
-    const g = it.g;
-    const bs = (g.bins && g.bins !== '无在架货位') ? g.bins.split('、') : ['（无在架货位）'];
-    bs.forEach(function(b){ const k2 = b + '|' + g.code; const a = sum[k2] || [0,0]; a[0] += (g.qty||0); a[1] += 1; sum[k2] = a; });
+  (PICK.orders||[]).forEach(function(o){
+    (o.lines||[]).forEach(function(l){
+      if(lineState(l) !== 'pending') return;
+      const bs = (!l.bins || l.bins === '无在架货位') ? ['（无货位）'] : l.bins.split('、');
+      bs.forEach(function(b){ const k2 = b + '|' + l.code; const a = sum[k2] || [0,0]; a[0] += (l.qty||0); a[1] += 1; sum[k2] = a; });
+    });
   });
-  const lines = ['批次 ' + PICK.batch + '：' + (pr.groups||0) + ' 组 / ' + (pr.qty||0) + ' 件'];
+  const slines = ['批次 ' + PICK.batch + '：待拣 ' + (pr.pending||0) + ' 个商品 / ' + (pr.qty||0) + ' 件'];
   let cur = null;
   Object.keys(sum).sort().forEach(function(k2){
     const parts = k2.split('|');
-    if(parts[0] !== cur){ lines.push(''); lines.push(parts[0] + '：'); cur = parts[0]; }
-    lines.push('    ' + parts[1] + ' ×' + sum[k2][0] + '（' + sum[k2][1] + ' 组）');
+    if(parts[0] !== cur){ slines.push(''); slines.push(parts[0] + '：'); cur = parts[0]; }
+    slines.push('    ' + parts[1] + ' ×' + sum[k2][0] + '（' + sum[k2][1] + ' 个）');
   });
-  $('psum').textContent = lines.join('\n');
+  $('psum').textContent = slines.join('\n');
 }
-async function mark(i, state){
+async function mark(oi, li, state){
   if(!PICK) return;
-  const g = PICK.groups[i];
-  const target = (g && g.state === state) ? 'pending' : state;
-  const qty = (g && g.qty) || 0;
   try {
-    const d = await (await fetch(url('/api/pick/mark', {batch:PICK.batch, g:i, state:target}))).json();
+    const d = await (await fetch(url('/api/pick/mark', {batch:PICK.batch, g:oi, line:li, state:state}))).json();
     if(d.error){ alert(d.error); return; }
     PICK = d; render();
-    if(target === 'done'){ beep(true); }
-    else if(target === 'short'){ beep(false); }
-    if(MODE === 'one'){ speakCurrent(); }        // 单条模式：直接播报下一条
-    else if(target === 'done'){ speak('完成 ' + qty + ' 件'); }
-    else if(target === 'short'){ speak('无货 ' + qty + ' 件'); }
+    if(state === 'done'){ beep(true); } else if(state === 'short'){ beep(false); }
+    speakCurrent();
   } catch(e){ alert('网络错误：' + e.message); }
 }
 $('btnGo').onclick = function(){ const b = ($('pbatch').value||'').trim(); if(!b){ alert('请输入打印批次号'); return; } go(b, 3, false); };
