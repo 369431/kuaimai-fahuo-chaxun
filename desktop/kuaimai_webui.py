@@ -35,16 +35,21 @@ WEB_INDEX_HTML = r"""<!DOCTYPE html>
   th,td { padding:6px 4px; border-bottom:1px solid #eee; text-align:left; white-space:nowrap; }
   th { color:#666; font-weight:500; }
   .toolbar { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+  /* 首页四个功能按钮挤在一行：摄像头扫码 / 拣货 / 订单查询 / 声音 */
+  .toolbar.nav4 { flex-wrap:nowrap; gap:6px; }
+  .toolbar.nav4 button { flex:1 1 0; min-width:0; padding:9px 2px; font-size:12px;
+                         white-space:nowrap; letter-spacing:-.03em; }
   video { width:100%; border-radius:10px; background:#000; }
   .hidden { display:none; }
   .pitem { border:1px solid #e3e6ea; border-radius:10px; padding:10px; margin-bottom:8px; background:#fff; }
   .pitem.done { background:#eefaf1; border-color:#bfe8cd; }
   .pitem.short { background:#fdecec; border-color:#f3c3c3; }
   .pseq { font-size:13px; color:#666; }
+  .pexp { font-weight:800; font-size:16.5px; color:#111; letter-spacing:.02em; }
   .pcode { font-size:21px; font-weight:800; color:#000; margin:2px 0; }
   .pbin { font-size:16px; }
   .pbtns { display:flex; gap:8px; margin-top:8px; }
-  .pbtns button { flex:1; padding:11px 8px; font-size:15px; }
+  .pbtns button { flex:1; padding:9px 8px; font-size:14px; }
   button.pdone { background:#1e9e4a; }
   button.pshort { background:#c62828; }
   .pstate { font-size:12px; color:#666; margin-top:5px; }
@@ -112,9 +117,11 @@ WEB_INDEX_HTML = r"""<!DOCTYPE html>
       <input id="code" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="扫商家编码…" autofocus>
       <button id="btnQuery" class="ghost">查询</button>
     </div>
-    <div class="toolbar">
+    <div class="toolbar nav4">
       <button id="btnCam" class="ghost">摄像头扫码</button>
       <button id="btnPick" class="ghost">拣货</button>
+      <button id="btnOrder" class="ghost">订单查询</button>
+      <button id="btnStock" class="ghost">现货可发</button>
       <button id="btnSound" class="ghost">声音：开</button>
     </div>
     <div id="camBox" class="hidden" style="margin-top:8px">
@@ -151,7 +158,7 @@ const $ = (id) => document.getElementById(id);
 const K = new URLSearchParams(location.search).get('k') || localStorage.getItem('km_key') || '';
 if (K) localStorage.setItem('km_key', K);
 const KQ = '&k=' + encodeURIComponent(K);
-let SOUND = true, hist = [];
+let SOUND = true, hist = [], CUR = '';
 try { hist = JSON.parse(localStorage.getItem('km_hist') || '[]'); } catch (e) { hist = []; }
 function saveHist(){ try { localStorage.setItem('km_hist', JSON.stringify(hist.slice(-500))); } catch(e){} }
 function fmtTime(d){ const p=x=>String(x).padStart(2,'0'); return `${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`; }
@@ -183,6 +190,7 @@ async function loadStatus(){
 }
 async function query(code){
   code=(code||'').trim(); if(!code) return;
+  CUR = code;
   const rel=$('rel').value, n=Number($('num').value||0);
   $('rcode').textContent=code; $('rmain').textContent='查询中…';
   let d;
@@ -191,6 +199,7 @@ async function query(code){
   if(d.error){ $('rmain').textContent=d.error; return; }
   if(d.series){
     $('result').className='';
+    CUR = d.code;
     $('rcode').textContent = d.code + '（主编码）';
     $('rmain').textContent = '共 ' + d.items.length + ' 个规格';
     $('rdetail').innerHTML = d.items.map(function(it){
@@ -207,6 +216,7 @@ async function query(code){
   const onePiece=Math.min(d.ones||0, d.pieces||0), multiPiece=Math.max(0, (d.pieces||0)-onePiece);
   const bins=(d.bins||[]).map(b=>`${b[0]}×${b[1]}`).join('、')||'无在架货位';
   const short=d.pieces>d.shelf;          // 在架少于待发货件数 → 需补货
+  CUR = d.code;
   $('rcode').textContent = d.code;
   $('rmain').innerHTML = `待发货一单一件：${onePiece}<br>待发货一单多件：${multiPiece}`;
   $('rdetail').innerHTML = `货位：${bins}（在架 ${d.shelf}）`
@@ -219,7 +229,14 @@ async function query(code){
 // 扫码枪：自带回车 → 直接查询；手动打字时不自动查，点「查询」或按回车才查
 $('code').addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); query($('code').value); } });
 $('btnQuery').onclick=()=>query($('code').value);
-$('btnApply').onclick=()=>{ loadStatus(); if(hist.length) query(hist[hist.length-1].code); };
+$('btnApply').onclick=()=>{
+  // 只做筛选：保存条件 + 刷新数据时间；当前显示了哪个编码就按新条件重查它，
+  // 不去历史里挑最后一条（那条可能是别的东西，看着像“乱查一个数字”）
+  try { localStorage.setItem('km_rel', $('rel').value); localStorage.setItem('km_num', $('num').value||'1'); } catch(e){}
+  loadStatus();
+  if(CUR){ query(CUR); }
+  else { $('rmain').textContent='筛选条件已保存，下次扫码按此条件统计'; }
+};
 $('btnSound').onclick=()=>{ SOUND=!SOUND; $('btnSound').textContent='声音：'+(SOUND?'开':'关'); };
 $('btnClear').onclick=()=>{ if(confirm('清空本机扫码记录？')){ hist=[]; saveHist(); renderHistory(); } };
 $('btnCsv').onclick=()=>{
@@ -245,6 +262,16 @@ $('btnPick').onclick = () => {
   const q = {k:K}; if(sid) q.sid = sid;
   location.href = '/pick?' + new URLSearchParams(q).toString();
 };
+/* ---------------- 订单查询：独立页面 /order（订单号/快递单号都能查） ---------------- */
+$('btnOrder').onclick = () => {
+  const sid = (function(){ try { return localStorage.getItem('km_sid') || ''; } catch(e){ return ''; } })();
+  location.href = '/order' + (sid ? ('?sid=' + encodeURIComponent(sid)) : '');
+};
+/* ---------------- 现货可发：独立页面 /stock ---------------- */
+$('btnStock').onclick = () => {
+  const sid = (function(){ try { return localStorage.getItem('km_sid') || ''; } catch(e){ return ''; } })();
+  location.href = '/stock' + (sid ? ('?sid=' + encodeURIComponent(sid)) : '');
+};
 /* 有未结束的批次时，按钮上直接显示可以继续 */
 fetch('/api/pick/current?' + new URLSearchParams({k:K}).toString())
   .then(r => r.json())
@@ -268,7 +295,12 @@ fetch('/api/pick/current?' + new URLSearchParams({k:K}).toString())
   };
 })();
 
-renderHistory(); loadStatus(); setInterval(loadStatus,60000);
+renderHistory();
+try {
+  var _r0 = localStorage.getItem('km_rel'); if(_r0) $('rel').value = _r0;
+  var _n0 = localStorage.getItem('km_num'); if(_n0) $('num').value = _n0;
+} catch(e){}
+loadStatus(); setInterval(loadStatus,60000);
 </script>
 </body>
 </html>
@@ -293,7 +325,12 @@ PICK_HTML = r"""<!doctype html>
   .pitem { border:1px solid #e3e6ea; border-radius:12px; padding:12px; margin-bottom:10px; background:#fff; }
   .pitem.done { background:#eefaf1; border-color:#bfe8cd; }
   .pitem.short { background:#fdecec; border-color:#f3c3c3; }
+  .pitem.urgent { border:2px solid #FF3B30; background:#fff5f5; }
+  .pitem.urgent::before { content:"加急"; display:inline-block; background:#FF3B30; color:#fff;
+                          font-weight:800; font-size:13px; border-radius:8px; padding:2px 10px; margin-bottom:6px; }
+  .pitem.urgent .pexp, .pitem.urgent .pseq { color:#FF3B30; }
   .pseq { font-size:13px; color:#666; }
+  .pexp { font-weight:800; font-size:16.5px; color:#111; letter-spacing:.02em; }
   .pcode { font-size:25px; font-weight:800; color:#000; margin:3px 0; }
   .pbin { font-size:19px; }
   .pmeta { font-size:13px; color:#555; margin-top:5px; line-height:1.7; }
@@ -304,9 +341,9 @@ PICK_HTML = r"""<!doctype html>
   .pitem.one .pqty { font-size:31px; }
   .pitem.one .pbin { font-size:22px; }
   .pitem.one .pseq { font-size:14px; }
-  .pitem.one .pbtns button { padding:19px 8px; font-size:20px; }
+  .pitem.one .pbtns button { padding:12px 8px; font-size:16px; }
   .pbtns { display:flex; gap:8px; margin-top:9px; }
-  .pbtns button { flex:1; padding:15px 8px; font-size:17px; }
+  .pbtns button { flex:1; padding:11px 8px; font-size:15px; }
   button.pdone { background:#1e9e4a; }
   button.pshort { background:#c62828; }
   .filters { display:flex; gap:6px; margin:8px 0; position:sticky; top:0; background:#f5f6f8; padding:6px 0; z-index:5; }
@@ -361,7 +398,7 @@ PICK_HTML = r"""<!doctype html>
   .pmeta2 { font-size:13.5px; color:#3a3a3c; margin-top:4px; line-height:1.6; }
   .pitem.one .pqty { font-size:33px; }
   .pitem.one .pbin { font-size:23px; }
-  .pitem.one .pbtns button { padding:20px 8px; font-size:20px; border-radius:14px; }
+  .pitem.one .pbtns button { padding:13px 8px; font-size:16px; border-radius:12px; }
   .pcode { color:#000; letter-spacing:-.02em; }
   .pqty { color:var(--mac-red); letter-spacing:-.02em; }
   .pqty.done { color:var(--mac-green); }
@@ -614,7 +651,7 @@ function render(){
     const pending = ls.filter(function(l){ return lineState(l) === 'pending'; }).length;
     const nl = nextLine(o);
     const div = document.createElement('div');
-    div.className = 'pitem' + (MODE === 'one' ? ' one' : '')
+    div.className = 'pitem' + (MODE === 'one' ? ' one' : '') + (o.urgent ? ' urgent' : '')
       + (st === 'done' ? ' done' : (st === 'short' ? ' short' : ''));
     const rng = (o.seq_b && o.seq_b !== o.seq) ? ('第 ' + o.seq + '-' + o.seq_b + ' 张') : ('第 ' + o.seq + ' 张');
     let linesHtml = '';
@@ -627,18 +664,19 @@ function render(){
           + '<span class="pno">' + (li+1) + '</span>'
           + '<span class="pcode2">' + (l.code||'（无明细）') + '</span>'
           + '<span class="pqty2">需 ' + l.qty + ' 件</span>'
-          + '<span class="pbin2">' + (nb ? '<b style="color:#FF9500">无货位</b>' : ('货位 ' + l.bins)) + '</span>'
+          + '<span class="pbin2">' + (nb ? '<b style="color:#FF9500">无货位</b>'
+              : ('货位 ' + l.bins + '　在架 ' + (l.shelf == null ? '-' : l.shelf))) + '</span>'
           + '<span class="pst">' + (lst==='done'?'✓ 已拣':(lst==='short'?(nb?'无货位':'无货'):'待拣')) + '</span>'
           + '</div>';
       });
     } else {
       linesHtml = '<div class="pmeta2">共 ' + ls.length + ' 个商品 · ' + ls.reduce(function(a, l){ return a + (l.qty||0); }, 0) + ' 件 · 已拣 ' + (ls.length - pending) + ' 个'
         + (nl ? ('　下一个：' + nl.l.code + ' ×' + nl.l.qty + ' → '
-                + ((!nl.l.bins || nl.l.bins === '无在架货位') ? '无货位' : nl.l.bins)) : '')
+                + ((!nl.l.bins || nl.l.bins === '无在架货位') ? '无货位' : (nl.l.bins + '（在架 ' + (nl.l.shelf == null ? '-' : nl.l.shelf) + '）'))) : '')
         + '</div>';
     }
     const pieces = ls.reduce(function(a, l){ return a + (l.qty || 0); }, 0);
-    div.innerHTML = '<div class="pseq">' + rng + (o.express ? (' · 快递单号 ' + o.express) : '') + '</div>'
+    div.innerHTML = '<div class="pseq">' + rng + (o.express ? (' · <b class="pexp">快递单号 ' + o.express + '</b>') : '') + '</div>'
       + '<div class="pqty' + (st==='done'?' done':'') + '">需拣 ' + pieces + ' 件'
       + '　<span class="pprog">共 ' + ls.length + ' 个商品 · 已拣 ' + (ls.length - pending) + '/' + ls.length + '</span></div>'
       + linesHtml
@@ -736,4 +774,363 @@ loadCurrent();
 speakBtn();
 zoneBtn();
 </script></body></html>
+"""
+
+
+# ====================== 网页端：订单查询（图文 + 退款状态） ======================
+ORDER_HTML = r"""<!doctype html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>订单查询 · 快麦</title>
+<style>
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  :root { --blue:#007AFF; --green:#34C759; --red:#FF3B30; --ink:#1d1d1f; --sub:#6e6e73;
+          --line:rgba(60,60,67,.12); --fill:rgba(120,120,128,.12); --glass:rgba(255,255,255,.80); }
+  body { margin:0; padding:12px; min-height:100vh; color:var(--ink);
+         font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+         letter-spacing:-.01em; -webkit-font-smoothing:antialiased;
+         background:linear-gradient(170deg,#eef3fa 0%,#e6edf8 45%,#e1e8f4 100%) fixed; }
+  .card { background:var(--glass); backdrop-filter:saturate(180%) blur(20px);
+          -webkit-backdrop-filter:saturate(180%) blur(20px); border:1px solid rgba(255,255,255,.62);
+          border-radius:14px; padding:12px; margin-bottom:10px; box-shadow:0 8px 24px rgba(24,39,75,.10); }
+  .bar { display:flex; gap:8px; }
+  .bar input { flex:1; min-width:0; padding:13px 14px; font-size:19px; color:var(--ink);
+               background:rgba(255,255,255,.92); border:1px solid var(--line); border-radius:12px; }
+  .bar input:focus { outline:none; border-color:var(--blue); box-shadow:0 0 0 3.5px rgba(0,122,255,.16); }
+  .bar button { padding:13px 18px; font-size:16px; font-weight:600; border:0; border-radius:12px;
+                background:var(--blue); color:#fff; }
+  .bar button:active { transform:scale(.98); }
+  h2 { font-size:15px; margin:0 0 8px; font-weight:700; color:var(--ink);
+       border-left:3px solid var(--blue); padding-left:8px; }
+  .kv { font-size:14px; line-height:2; }
+  .kv div { display:flex; gap:6px; }
+  .kv b { color:var(--sub); font-weight:400; flex:0 0 72px; }
+  .kv span { flex:1; word-break:break-all; }
+  .item { display:flex; gap:10px; padding:10px 0; border-top:1px solid rgba(60,60,67,.10); }
+  .item:first-of-type { border-top:0; }
+  .item img { width:92px; height:92px; object-fit:cover; border-radius:10px; background:#ececf0; flex:0 0 auto; }
+  .t { font-size:14.5px; font-weight:600; line-height:1.4; }
+  .s { font-size:12.5px; color:var(--sub); line-height:1.75; margin-top:2px; word-break:break-all; }
+  .amt { font-size:14px; font-weight:700; color:#c62828; margin-top:4px; }
+  .total { font-size:13px; color:var(--sub); border-top:1px solid rgba(60,60,67,.10); padding-top:8px; margin-top:2px; }
+  .tag { display:inline-block; font-size:12px; padding:2px 9px; border-radius:8px; background:var(--fill);
+         color:var(--sub); margin:0 6px 4px 0; }
+  .tag.warn { background:rgba(255,59,48,.15); color:#c62828; }
+  .tag.ok { background:rgba(52,199,89,.18); color:#1B7F35; }
+  .tag.big { font-size:13.5px; font-weight:700; padding:3px 12px; }
+  .tag.red { background:#FF3B30; color:#fff; font-weight:800; font-size:14px; padding:3px 12px; }
+  .muted { font-size:12.5px; color:var(--sub); line-height:1.7; }
+  .sub2 { border-top:1px solid rgba(60,60,67,.10); padding-top:8px; margin-top:8px; }
+  .stline { font-size:13.5px; line-height:1.9; }
+  @media (prefers-color-scheme: dark) {
+    body { background:linear-gradient(170deg,#1c1c1e,#151517 60%,#1a1a1c) fixed; color:#f2f2f7; }
+    .card { background:rgba(28,28,30,.74); border-color:rgba(255,255,255,.08); }
+    .kv b, .s, .muted, .total { color:#a1a1a6; }
+    h2 { color:#f2f2f7; }
+    .bar input { background:rgba(118,118,128,.24); border-color:rgba(255,255,255,.12); color:#f2f2f7; }
+  }
+</style></head>
+<body>
+<div class="card">
+  <div class="bar">
+    <input id="no" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="扫/手动输入订单号或快递单号">
+    <button id="go">查询</button>
+  </div>
+  <div class="muted" id="hint" style="margin-top:8px">快递单号、19 位平台单号、16 位系统单号都能查；扫码枪直接扫，回车即查。</div>
+</div>
+<div id="out"></div>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const SID = (function(){
+  try {
+    const q = new URLSearchParams(location.search).get('sid');
+    if(q) localStorage.setItem('km_sid', q);
+    return localStorage.getItem('km_sid') || '';
+  } catch(e){ return ''; }
+})();
+function withSid(u){ return SID ? (u + (u.indexOf('?') >= 0 ? '&' : '?') + 'sid=' + encodeURIComponent(SID)) : u; }
+function imgUrl(u){ return withSid('/api/order/img?u=' + encodeURIComponent(u)); }
+function kvHtml(kv){
+  return (kv||[]).map(function(x){
+    const v = (x[1] === null || x[1] === undefined || x[1] === '') ? '—' : x[1];
+    return '<div><b>' + esc(x[0]) + '</b><span>' + esc(v) + '</span></div>';
+  }).join('');
+}
+function load(no){
+  no = (no || '').trim();
+  if(!no){ $('hint').textContent = '请先输入订单号或快递单号'; return; }
+  $('out').innerHTML = '<div class="card"><div class="muted">正在查询 ' + esc(no) + ' …</div></div>';
+  fetch(withSid('/api/order?no=' + encodeURIComponent(no)), {cache:'no-store'})
+    .then(function(r){ if(r.status === 401){ location.href = '/login'; throw new Error('请重新登录'); } return r.json(); })
+    .then(function(d){
+      if(d.error){ $('out').innerHTML = '<div class="card"><div class="muted">' + esc(d.error) + '</div></div>'; return; }
+      render(d);
+    })
+    .catch(function(e){
+      $('out').innerHTML = '<div class="card"><div class="muted">查询失败：' + esc(e.message) + '（可再点一次查询）</div></div>';
+    });
+}
+function render(d){
+  var h = '';
+  if(d.order){
+    h += '<div class="card"><div class="stline"><span class="tag">系统状态：' + esc(d.statusText || '—') + '</span>'
+      + '<span class="tag">平台状态：' + esc(d.uniText || '—') + '</span>'
+      + (d.urgent ? '<span class="tag red">加急</span>' : '')
+      + ((d.excs && d.excs.length) ? ('<span class="tag warn">异常：' + esc(d.excs.join('、')) + '</span>') : '')
+      + ((d.tags && d.tags.length) ? ('<span class="tag">标签：' + esc(d.tags.join('、')) + '</span>') : '')
+      + '</div></div>';
+    h += '<div class="card"><h2>订单信息</h2><div class="kv">' + kvHtml(d.head) + '</div></div>';
+    h += '<div class="card"><h2>商品信息</h2>';
+    (d.items || []).forEach(function(it){
+      h += '<div class="item">' + (it.pic ? '<img src="' + imgUrl(it.pic) + '" loading="lazy">' : '<img>')
+        + '<div><div class="t">' + esc(it.title) + '</div>'
+        + '<div class="s">规格别名：' + esc(it.spec || '—') + '</div>'
+        + '<div class="s">编码：' + esc(it.code) + '</div>'
+        + (it.platSpec ? '<div class="s">平台规格：' + esc(it.platSpec) + '</div>' : '')
+        + (it.remark ? '<div class="s">备注：' + esc(it.remark) + '</div>' : '')
+        + '<div class="s">货位：' + esc(it.bin) + '</div>'
+        + '<div class="amt">成交金额 ¥' + esc(it.amount == null ? '' : it.amount)
+        + '<span style="font-weight:400;color:#6e6e73">　× ' + esc(it.qty) + ' 件</span></div>'
+        + ((it.tags && it.tags.length) ? '<div class="s">' + it.tags.map(function(t){ return '<span class="tag warn">' + esc(t) + '</span>'; }).join('') + '</div>' : '')
+        + '</div></div>';
+    });
+    h += '<div class="total">商品总数量：' + esc(d.itemNum) + '（' + esc(d.itemKind) + ' 种）　订单行：' + esc((d.items||[]).length) + '</div>';
+    h += '</div>';
+  } else {
+    h += '<div class="card"><div class="muted">订单接口查不到这张单（多为归档老单），下面显示售后信息。</div></div>';
+  }
+  h += '<div class="card"><h2>退款 / 售后</h2>';
+  if(!(d.after && d.after.length)){
+    h += '<div><span class="tag ok big">未申请退款</span><span class="muted">订单行退款状态：'
+      + esc((d.lineRefund || []).join('；') || '未退款') + '；无售后工单</span></div>';
+  } else {
+    d.after.forEach(function(w){
+      h += '<div class="sub2"><div>'
+        + '<span class="tag ' + (w.status === 9 ? 'ok' : 'warn') + ' big">' + esc(w.statusText) + '</span>'
+        + '<span class="tag warn">' + esc(w.typeText) + '</span>'
+        + '<span class="tag">工单 ' + esc(w.id) + '</span>'
+        + (w.shopName ? '<span class="tag">' + esc(w.shopName) + '</span>' : '')
+        + '</div><div class="kv">' + kvHtml(w.kv) + '</div>';
+      (w.items || []).forEach(function(it){
+        h += '<div class="item">' + (it.pic ? '<img src="' + imgUrl(it.pic) + '" loading="lazy">' : '<img>')
+          + '<div><div class="t">' + esc(it.title) + '</div><div class="s">' + esc(it.spec) + '</div>'
+          + '<div class="s">编码 ' + esc(it.code) + '　申请 ' + esc(it.count) + ' 件　实退 ' + esc(it.realQty) + ' 件　单价 ' + esc(it.price) + '</div></div></div>';
+      });
+      h += '</div>';
+    });
+  }
+  h += '</div>';
+  $('out').innerHTML = h;
+}
+$('go').onclick = function(){ load($('no').value); };
+$('no').addEventListener('keydown', function(e){ if(e.key === 'Enter'){ e.preventDefault(); load($('no').value); } });
+(function(){
+  const q = new URLSearchParams(location.search).get('no');
+  if(q){ $('no').value = q; load(q); }
+  $('no').focus();
+})();
+</script>
+</body></html>
+"""
+
+
+# ====================== 网页端：现货可发（在架 / 待发货 / 可发数量） ======================
+STOCK_HTML = r"""<!doctype html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>现货可发 · 快麦</title>
+<style>
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  :root { --blue:#007AFF; --green:#34C759; --red:#FF3B30; --ink:#1d1d1f; --sub:#6e6e73;
+          --line:rgba(60,60,67,.12); --fill:rgba(120,120,128,.12); --glass:rgba(255,255,255,.80); }
+  body { margin:0; padding:12px; min-height:100vh; color:var(--ink);
+         font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+         letter-spacing:-.01em; -webkit-font-smoothing:antialiased;
+         background:linear-gradient(170deg,#eef3fa 0%,#e6edf8 45%,#e1e8f4 100%) fixed; }
+  .card { background:var(--glass); backdrop-filter:saturate(180%) blur(20px);
+          -webkit-backdrop-filter:saturate(180%) blur(20px); border:1px solid rgba(255,255,255,.62);
+          border-radius:14px; padding:12px; margin-bottom:10px; box-shadow:0 8px 24px rgba(24,39,75,.10); }
+  .bar { display:flex; gap:8px; }
+  .bar input { flex:1; min-width:0; padding:13px 14px; font-size:18px; color:var(--ink);
+               background:rgba(255,255,255,.92); border:1px solid var(--line); border-radius:12px; }
+  .bar input:focus { outline:none; border-color:var(--blue); box-shadow:0 0 0 3.5px rgba(0,122,255,.16); }
+  .bar button { padding:13px 16px; font-size:16px; font-weight:600; border:0; border-radius:12px;
+                background:var(--blue); color:#fff; }
+  .ctl { display:flex; gap:6px; margin-top:8px; align-items:center; flex-wrap:wrap; }
+  .ctl select { flex:1 1 40%; min-width:0; font-size:13.5px; padding:8px; border:1px solid var(--line);
+                border-radius:10px; background:rgba(255,255,255,.92); color:var(--ink); }
+  .ctl button { flex:1 1 100%; padding:11px; font-size:14.5px; font-weight:600; border:0; border-radius:10px;
+                background:var(--green,#34C759); color:#fff; }
+  .muted { font-size:12.5px; color:var(--sub); line-height:1.7; margin-top:8px; }
+  .row { display:flex; align-items:center; gap:8px; padding:9px 0; border-top:1px solid rgba(60,60,67,.10); }
+  .row:first-child { border-top:0; }
+  .code { font-size:15.5px; font-weight:700; flex:1; min-width:0; word-break:break-all; }
+  .num { font-size:12.5px; color:var(--sub); white-space:nowrap; }
+  .num b { font-size:15px; color:var(--ink); }
+  .free { font-size:15px; font-weight:800; min-width:64px; text-align:right; white-space:nowrap; }
+  .free.pos { color:#1B7F35; }
+  .free.neg { color:#c62828; }
+  .sub { display:block; font-size:12px; color:var(--sub); margin-top:2px; line-height:1.6; }
+  .legend { font-size:12px; color:var(--sub); line-height:1.7; }
+  .rec { margin-top:8px; padding:9px 12px; border-radius:12px; background:rgba(52,199,89,.14);
+         color:#1B7F35; font-size:14.5px; font-weight:700; line-height:1.5; }
+  .rec.bad { background:rgba(255,59,48,.13); color:#c62828; }
+  .calc { font-size:12.5px; color:var(--sub); margin-top:3px; line-height:1.7; }
+  .calc b { color:var(--ink); }
+  .sbtn { margin-left:6px; padding:6px 10px; font-size:12.5px; border:0; border-radius:9px;
+          background:#e8eef5; color:#0b5394; font-weight:700; white-space:nowrap; }
+  .sbtn.undo { background:#fdecec; color:#c62828; }
+  .chk { font-size:13px; display:flex; align-items:center; gap:5px; flex:1 1 100%; color:var(--sub); }
+  .row.sent { opacity:.55; }
+  .code.ug { color:#FF3B30; }
+  .flash { font-size:13px; color:#1B7F35; font-weight:700; margin-top:6px; min-height:18px; }
+  @media (prefers-color-scheme: dark) {
+    body { background:linear-gradient(170deg,#1c1c1e,#151517 60%,#1a1a1c) fixed; color:#f2f2f7; }
+    .card { background:rgba(28,28,30,.74); border-color:rgba(255,255,255,.08); }
+    .muted, .num, .sub, .legend { color:#a1a1a6; }
+    .num b { color:#f2f2f7; }
+    .bar input, .ctl select { background:rgba(118,118,128,.24); border-color:rgba(255,255,255,.12); color:#f2f2f7; }
+  }
+</style></head>
+<body>
+<div class="card">
+  <div class="bar">
+    <input id="kw" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="编码或款号（如 7107 / 7107-黑色S）">
+    <button id="go">查询</button>
+  </div>
+  <div class="ctl">
+    <select id="sort">
+      <option value="urg_free">加急有货优先（可发多 → 少）</option>
+      <option value="free">可发数量（多 → 少）</option>
+      <option value="urgent">加急件数（多 → 少）</option>
+      <option value="shelf">在架数（多 → 少）</option>
+      <option value="pieces">待发货件数（多 → 少）</option>
+      <option value="code">编码 A → Z</option>
+    </select>
+    <select id="only">
+      <option value="free">只看可发（可发 &gt; 0）</option>
+      <option value="all">全部编码（含缺货）</option>
+      <option value="short">只看缺货（可发 &lt; 0）</option>
+      <option value="orders">只看有待发货</option>
+      <option value="urgent">只看有加急</option>
+      <option value="urg_free">只看加急且有货</option>
+    </select>
+    <button id="exp" title="导出 Excel：编码 / 货位 / 一单一件 / 一单多件 / 多件件数 / 加急 / 待发货 / 在架 / 可发 / 加急有货">导出</button>
+    <label class="chk"><input type="checkbox" id="hidesent" checked> 隐藏已发（数据拉新后自动清空标记）</label>
+  </div>
+  <div class="muted" id="sum">正在载入…</div>
+  <div class="flash" id="flash"></div>
+  <div class="rec" id="rec"></div>
+</div>
+<div class="card" id="list" style="max-height:66vh; overflow:auto"></div>
+<div class="card"><div class="legend">
+  <b>可发数量 = 能发出去的件数</b>：订单要的和库存取小的，再扣掉留给一单多件单的部分。<br>
+  例：一单一件 100 件 + 一单多件 20 件 = 订单共要 120 件，库存只有 80 件 → 最多发 80 件，
+  其中 20 件留给多件单 → <b>可发 60 件</b>（就是「只有 60 件货」的意思）。<br>
+  负数 = 连多件单的库存都不够（需补货）。已排除 1166、买家秀、圆虹包 等占位/补偿商品。<br>
+  <b>加急</b> = 平台上标了加急的单（优先发这些）；想先处理加急，用「只看有加急」或按「加急件数」排序。<br>
+  <b>默认排序</b>：带加急且有货可发的（红标「加急·有货」）排最前，同类里再按可发从多到少 —— 这样从上往下顺着发就是先发加急。
+</div></div>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const SID = (function(){
+  try {
+    const q = new URLSearchParams(location.search).get('sid');
+    if(q) localStorage.setItem('km_sid', q);
+    return localStorage.getItem('km_sid') || '';
+  } catch(e){ return ''; }
+})();
+function withSid(u){ return SID ? (u + (u.indexOf('?') >= 0 ? '&' : '?') + 'sid=' + encodeURIComponent(SID)) : u; }
+let ROWS = [];
+let HIDE_SENT = true;
+function flash(msg){
+  const el = $('flash');
+  if(!el) return;
+  el.textContent = msg || '';
+  if(msg){ setTimeout(function(){ if(el.textContent === msg) el.textContent = ''; }, 5000); }
+}
+function params(){ return 'kw=' + encodeURIComponent($('kw').value.trim()) + '&only=' + $('only').value + '&sort=' + $('sort').value; }
+function load(){
+  $('sum').textContent = '正在载入…';
+  fetch(withSid('/api/stock?' + params()), {cache:'no-store'})
+    .then(function(r){ if(r.status === 401){ location.href = '/login'; throw new Error('请重新登录'); } return r.json(); })
+    .then(function(d){
+      if(d.error){ $('sum').textContent = d.error; return; }
+      ROWS = d.rows || [];
+      const t = d.totals || {};
+      $('sum').innerHTML = '共 <b>' + (d.total||0) + '</b> 个　可发合计 <b>' + (t.free||0) + '</b> 件'
+        + ((t.up || t.uo) ? ('　<b style="color:#c62828">加急 ' + (t.up||0) + ' 件</b>') : '')
+        + ((t.prio) ? ('　<b style="color:#FF3B30">加急有货 ' + t.prio + '</b>') : '')
+        + ((t.sent) ? ('　<b style="color:#1B7F35">已发 ' + t.sent + '</b>') : '');
+      const rec = $('rec');
+      if(rec){
+        if((t.free||0) >= 0){
+          rec.className = 'rec';
+          rec.style.display = '';
+          rec.innerHTML = '推荐可发合计：' + (t.free||0) + ' 件';
+        } else {
+          rec.className = 'rec';
+          rec.style.display = 'none';
+          rec.innerHTML = '';
+        }
+      }
+      render();
+    })
+    .catch(function(e){ $('sum').textContent = '载入失败：' + e.message; });
+}
+function render(){
+  const box = $('list');
+  const vis = ROWS.filter(function(r){ return !(HIDE_SENT && r.sent); });
+  if(!vis.length){ box.innerHTML = '<div class="muted">没有匹配的编码</div>'; return; }
+  const head = vis.slice(0, 800);
+  box.innerHTML = head.map(function(r){
+    const cls = r.f >= 0 ? 'pos' : 'neg';
+    return '<div class="row' + (r.sent ? ' sent' : '') + '"><span class="code'
+      + ((r.p1 || r.up || r.uo) ? ' ug' : '') + '">' + esc(r.c)
+      + ((r.p1) ? '<span style="color:#fff;background:#FF3B30;border-radius:6px;padding:1px 6px;font-size:11.5px;font-weight:800">加急·有货</span>' : '')
+      + '<span class="sub"><b style="color:#0b5394">货位 ' + esc(r.b || '无在架货位') + '</b>　在架 '
+      + r.s + ' 件　一单一件 ' + r.n + ' 单（' + r.n + ' 件）　一单多件 '
+      + r.m + ' 单（' + (r.mp == null ? 0 : r.mp) + ' 件）'
+      + ((r.up || r.uo) ? ('　<span style="color:#c62828;font-weight:800">加急 ' + (r.uo || 0) + ' 单/' + (r.up || 0) + ' 件</span>') : '')
+      + (r.l ? ('　锁定 ' + r.l) : '') + '</span>'
+      + '<span class="calc">可发 = min(在架 ' + r.s + '，待发 ' + r.p + ') − 多件 ' + (r.mp == null ? 0 : r.mp)
+      + ' = <b>' + r.f + '</b> 件</span></span>'
+      + '<span class="free ' + cls + '">' + r.f + '</span>'
+      + '<button class="sbtn' + (r.sent ? ' undo' : '') + '" data-c="' + esc(r.c) + '">'
+      + (r.sent ? '撤回' : '已发') + '</button></div>';
+  }).join('') + (vis.length > head.length
+      ? ('<div class="muted">只显示前 ' + head.length + ' 条，其余 ' + (vis.length - head.length) + ' 条请用「导出 Excel」或加关键词。</div>') : '');
+  box.querySelectorAll('.sbtn').forEach(function(b){
+    b.onclick = function(){
+      const code = b.dataset.c, undo = b.classList.contains('undo');
+      // 先本地生效（立刻隐藏/恢复），再同步到服务端
+      ROWS.forEach(function(r){ if(r.c === code) r.sent = undo ? 0 : 1; });
+      render();
+      fetch(withSid('/api/stock/sent'), {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({codes:[code], undo: undo})})
+        .then(function(r2){ return r2.json(); })
+        .then(function(j){
+          if(j && j.ok === false){
+            ROWS.forEach(function(r){ if(r.c === code) r.sent = undo ? 1 : 0; });
+            render();
+          }
+          flash((undo ? '已撤回：' : '已标记已发：') + code + '（本地先隐藏，拉到新数据后自动清空）');
+        })
+        .catch(function(){ load(); flash('同步失败，已刷新列表'); });
+    };
+  });
+}
+$('go').onclick = load;
+$('kw').addEventListener('keydown', function(e){ if(e.key === 'Enter'){ e.preventDefault(); load(); } });
+$('sort').onchange = load;
+$('only').onchange = load;
+$('hidesent').onchange = function(){ HIDE_SENT = this.checked; render(); };
+$('exp').onclick = function(){ location.href = withSid('/api/stock/export?' + params()); };
+load();
+</script>
+</body></html>
 """

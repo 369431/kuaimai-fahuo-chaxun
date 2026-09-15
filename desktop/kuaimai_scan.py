@@ -31,11 +31,13 @@ import concurrent.futures
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 try:
-    from kuaimai_webui import WEB_INDEX_HTML, PICK_HTML
+    from kuaimai_webui import WEB_INDEX_HTML, PICK_HTML, ORDER_HTML, STOCK_HTML
     from kuaimai_login_ui import LOGIN_HTML
 except Exception:
     WEB_INDEX_HTML = "<h1>缺少 kuaimai_webui.py</h1>"
     PICK_HTML = WEB_INDEX_HTML
+    ORDER_HTML = WEB_INDEX_HTML
+    STOCK_HTML = WEB_INDEX_HTML
     LOGIN_HTML = WEB_INDEX_HTML
 try:
     import kuaimai_auth as auth
@@ -872,6 +874,7 @@ def _store_record(trade):
     count, pairs = _order_contribution(trade)
     return {"status": trade.get("sysStatus"),
             "us": trade.get("unifiedStatus"),
+            "urgent": bool(trade.get("isUrgent")),
             "count": count, "pairs": pairs}
 
 
@@ -1236,11 +1239,15 @@ def rebuild_index(store, relation="不限", n=0):
                 qty = int(pair[1])
             except Exception:
                 qty = 0
-            e = index.setdefault(code, {"qty": 0, "orders": 0, "ones": 0, "main": False})
+            e = index.setdefault(code, {"qty": 0, "orders": 0, "ones": 0, "main": False,
+                                        "uo": 0, "up": 0})
             e["qty"] += qty
             e["orders"] += 1
             if int(rec.get("count") or 0) == 1:
                 e["ones"] += 1
+            if rec.get("urgent"):
+                e["uo"] += 1        # 加急订单数
+                e["up"] += qty      # 加急件数
     live = len(store) - shipped
     stat = {"total_orders": live, "store_orders": len(store),
             "shipped_excluded": shipped, "included_orders": included,
@@ -1377,8 +1384,15 @@ def fetch_shelf_stock(progress=None):
             e["all"] += qty
             if region == 1:          # 1 = 拣货区（货架）
                 e["shelf"] += qty
-            if qty:
-                e["bins"].append([row.get("goodsSectionCode") or "", qty])
+            sec = str(row.get("goodsSectionCode") or "").strip()
+            if sec:
+                # 在架为 0 也要留下货位：拣货时要看"实际货位"，没在架不等于没货位
+                for b in e["bins"]:
+                    if b[0] == sec:
+                        b[1] += qty
+                        break
+                else:
+                    e["bins"].append([sec, qty])
         total_rows += len(batch)
         if progress:
             progress(total_rows)
@@ -1651,6 +1665,19 @@ class _WebHandler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
+    def _send_file(self, body, ctype, filename):
+        """下载文件（导出 Excel 用）。"""
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Disposition", 'attachment; filename="%s"' % filename)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception:
+            pass
+
     # ---------- 登录 / 会话 ----------
     def _cookie_token(self):
         for part in (self.headers.get("Cookie") or "").split(";"):
@@ -1734,6 +1761,10 @@ class _WebHandler(BaseHTTPRequestHandler):
                 return self._send(WEB_INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
             if parsed.path in ("/pick", "/pick.html"):
                 return self._send(PICK_HTML.encode("utf-8"), "text/html; charset=utf-8")
+            if parsed.path in ("/order", "/order.html"):
+                return self._send(ORDER_HTML.encode("utf-8"), "text/html; charset=utf-8")
+            if parsed.path in ("/stock", "/stock.html"):
+                return self._send(STOCK_HTML.encode("utf-8"), "text/html; charset=utf-8")
             if parsed.path == "/api/status":
                 return self._json(app.web_status())
             if parsed.path == "/api/index":
@@ -1771,6 +1802,26 @@ class _WebHandler(BaseHTTPRequestHandler):
                 if not code:
                     return self._json({"error": "缺少 code"}, 400)
                 return self._json(app.web_lookup(code, rel, n))
+            if parsed.path == "/api/order":
+                return self._json(app.web_order((qs.get("no") or [""])[0]))
+            if parsed.path == "/api/order/img":
+                ctype, data = app.web_order_image((qs.get("u") or [""])[0])
+                if not data:
+                    return self._json({"error": "图片地址不允许或取不到"}, 400)
+                return self._send(data, ctype)
+            if parsed.path == "/api/stock":
+                return self._json(app.web_stock((qs.get("kw") or [""])[0],
+                                                (qs.get("only") or ["all"])[0],
+                                                (qs.get("sort") or ["free"])[0]))
+            if parsed.path == "/api/stock/export":
+                data = app.stock_xlsx((qs.get("kw") or [""])[0],
+                                      (qs.get("only") or ["all"])[0],
+                                      (qs.get("sort") or ["free"])[0])
+                if not data:
+                    return self._json({"error": "没有可导出的数据"}, 400)
+                return self._send_file(data,
+                                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                       "xianhuo_kefa.xlsx")
             return self._json({"error": "not found"}, 404)
         except Exception as e:
             return self._json({"error": str(e)[:200]}, 500)
@@ -1829,6 +1880,15 @@ class _WebHandler(BaseHTTPRequestHandler):
                     auth.logout(self._token(qs))
                 self._set_cookie("")
                 return self._json({"ok": True})
+            if path == "/api/stock/sent":
+                # 现货可发：标记/撤回「已发」（存在程序里，所有账号共用；拉新数据后自动清空）
+                app = self.app
+                if body.get("clear"):
+                    app.clear_sent()
+                    return self._json({"ok": True, "sent": 0})
+                left = app.mark_sent(body.get("codes") or body.get("code") or [],
+                                     undo=bool(body.get("undo")))
+                return self._json({"ok": True, "sent": len(left)})
             if path == "/api/users":
                 if not auth:
                     return self._json({"error": "账号模块不可用"}, 400)
@@ -2132,6 +2192,7 @@ def fetch_print_batch(batch, days=3, progress=None, max_pages=30):
         o["items"] = items
         o["ignored"] = ignored
         o["sys_status"] = t.get("sysStatus") or ""
+        o["urgent"] = bool(t.get("isUrgent"))
         o["short_id"] = t.get("shortId") or ""
         o["found"] = bool(t)
         if items:                          # 只有赠品/占位商品的单，不进拣货清单
@@ -2401,6 +2462,9 @@ class ScanApp:
                 "n": int(e.get("ones", 0) or 0),
                 "s": int(sh.get("shelf", 0) or 0),
                 "l": int(lk.get("lock", 0) or 0),
+                "uo": int(e.get("uo", 0) or 0),
+                "up": int(e.get("up", 0) or 0),
+                "b": "、".join(str(b[0]) for b in (sh.get("bins") or [])[:6]),
             }
         payload = {
             "loaded_at": self.loaded_at,
@@ -2510,6 +2574,331 @@ class ScanApp:
     def web_pick_end(self, batch):
         pick_end(batch)
         return {"ok": True}
+
+    # ---------- 网页端：订单查询（订单号 / 快递单号 → 图文 + 退款状态） ----------
+    ORDER_IMG_HOSTS = ("ecombdimg.com", "ecombd.com", "pstatp.com", "ttcdn.com", "byteimg.com",
+                       "tbcdn.cn", "alicdn.com", "360buyimg.com", "yangkeduo.com", "pddpic.com",
+                       "kwaishop.com", "kuaishou.com", "douyinpic.com")
+    OD_STATUS_CN = {"WAIT_SEND_GOODS": "待发货", "WAIT_AUDIT": "待审核", "WAIT_EXPRESS_PRINT": "待打印快递单",
+                    "FINISHED_AUDIT": "审核完成", "SELLER_SEND_GOODS": "已发货", "CLOSED": "已关闭",
+                    "FINISHED": "交易成功", "TRADE_SUCCESS": "交易成功"}
+    OD_UNI_CN = {"SELLER_SEND_GOODS": "已发货", "WAIT_SELLER_SEND_GOODS": "待发货",
+                 "TRADE_CLOSED": "交易关闭", "FINISHED": "交易成功"}
+    AF_TYPE_CN = {0: "其他", 1: "已发货仅退款", 2: "退货", 3: "补发", 4: "换货", 5: "未发货仅退款",
+                  7: "拒收退货", 8: "档口退货", 9: "维修"}
+    AF_STATUS_CN = {2: "未解决（处理中）", 9: "已解决（退款完成）", 10: "已作废", 11: "已合并", 12: "解决中"}
+    AF_GOOD_CN = {1: "买家未收到货", 2: "买家已收到货", 3: "买家已退货", 4: "卖家已收到退货"}
+    EX_CN = {"EX_INSUFFICIENT": "库存不足", "EX_HALT": "已挂起", "EX_REFUND": "退款中",
+             "EX_PRESELL": "预售", "EX_ADDRESS": "地址异常", "EX_TIMEOUT": "超时"}
+    OD_KEYS = (("tid", "平台单号"), ("sid", "系统单号"), ("outSids", "快递单号"))
+
+    @staticmethod
+    def _od_time(v):
+        try:
+            n = int(v)
+        except Exception:
+            return str(v or "")[:20]
+        if n < 100000000000 or n == 946656000000:
+            return ""
+        return datetime.fromtimestamp(n / 1000.0).strftime("%Y-%m-%d %H:%M")
+
+    def _wo_json(self, w):
+        """一张售后工单 → 页面用的结构（不输出买家姓名/手机）。"""
+        t = self._od_time
+        kv = [
+            ["系统实退金额", ("¥%s" % w.get("refundMoney")) if w.get("refundMoney") is not None else ""],
+            ["平台实退金额", ("¥%s" % w.get("rawRefundMoney")) if w.get("rawRefundMoney") is not None else ""],
+            ["应退运费", w.get("refundPostFee") or ""],
+            ["退款状态", w.get("advanceStatusText") or ""],
+            ["货物状态", self.AF_GOOD_CN.get(w.get("goodStatus"), w.get("goodStatus")) or ""],
+            ["售后原因", w.get("reason") or w.get("textReason") or ""],
+            ["申请时间", t(w.get("applyDate"))],
+            ["完成时间", t(w.get("finished"))],
+            ["平台售后单号", w.get("platformId") or ""],
+            ["退货仓库", w.get("refundWarehouseName") or ""],
+            ["退回快递", w.get("refundExpressCompany") or ""],
+            ["退回单号", w.get("refundExpressId") or ""],
+            ["备注", w.get("remark") or ""],
+        ]
+        items = []
+        for it in (w.get("items") or [])[:6]:
+            items.append({"title": it.get("title") or "", "spec": it.get("propertiesName") or "",
+                          "code": it.get("outerId") or "", "count": it.get("receivableCount"),
+                          "realQty": it.get("itemRealQty"), "price": it.get("price"),
+                          "pic": it.get("picPath") or ""})
+        return {"id": str(w.get("id") or ""), "status": w.get("status"),
+                "statusText": self.AF_STATUS_CN.get(w.get("status"), "工单状态 %s" % w.get("status")),
+                "typeText": self.AF_TYPE_CN.get(w.get("afterSaleType"), "售后 %s" % w.get("afterSaleType")),
+                "shopName": w.get("shopName") or "", "kv": kv, "items": items}
+
+    def web_order(self, no):
+        """输入订单号（19 位平台单号 / 16 位系统单号）或快递单号都能查。
+
+        按单号长度先猜一种，查不到再退其它两种（快递单号长度不固定）。
+        """
+        no = str(no or "").strip()
+        if not no:
+            return {"error": "请输入订单号或快递单号"}
+        n = len(no)
+        if n == 19:
+            order_keys = [("tid", "平台单号"), ("outSids", "快递单号"), ("sid", "系统单号")]
+        elif n == 16:
+            order_keys = [("sid", "系统单号"), ("outSids", "快递单号"), ("tid", "平台单号")]
+        else:
+            order_keys = [("outSids", "快递单号"), ("tid", "平台单号"), ("sid", "系统单号")]
+
+        order, err, matched = None, "", ""
+        for key, label in order_keys:
+            try:
+                res = api_call_authed("erp.trade.list.query",
+                                      {key: no, "pageNo": 1, "pageSize": 20, "useHasNext": "true"}, timeout=40)
+                lst = (res or {}).get("list") or []
+            except Exception as e:
+                err = err or str(e)[:150]
+                continue
+            if lst:
+                order, matched = lst[0], label
+                break
+        tid = str((order or {}).get("tid") or (no if matched == "平台单号" else ""))
+        sid = str((order or {}).get("sid") or (no if matched == "系统单号" else ""))
+
+        after = []
+        if tid or sid:
+            try:
+                q = ({"tid": tid, "pageNo": "1", "pageSize": "20"} if tid
+                     else {"sid": sid, "pageNo": "1", "pageSize": "20"})
+                a = api_call_authed("erp.aftersale.list.query", q, timeout=40)
+                for w in ((a or {}).get("list") or []):
+                    if ((tid and str(w.get("tid") or "") == tid)
+                            or (sid and str(w.get("sid") or "") == sid)):
+                        after.append(self._wo_json(w))
+            except Exception as e:
+                err = err or str(e)[:150]
+
+        head, items, item_num, line_refund = [], [], "", []
+        if order:
+            t = self._od_time
+            # 加急 / 平台标签 / 异常明细
+            tag_names = []
+            for tg in (order.get("tradeTags") or []):
+                if isinstance(tg, dict) and tg.get("tagName"):
+                    tag_names.append(str(tg.get("tagName")))
+            exc_codes = []
+            for ex in (order.get("exceptions") or []):
+                code = str(ex)
+                exc_codes.append(self.EX_CN.get(code, code))
+            if order.get("isExcep") and not exc_codes:
+                exc_codes.append("有异常")
+            if order.get("isHalt"):
+                exc_codes.append("已挂起")
+            memos = order.get("messageMemos")
+            memo_txt = []
+            if isinstance(memos, list):
+                for m in memos:
+                    if isinstance(m, dict):
+                        s = m.get("memo") or m.get("content") or m.get("remark") or m.get("message")
+                        if s:
+                            memo_txt.append(str(s))
+            head = [
+                ["店铺名称", order.get("shopName")],
+                ["平台单号", order.get("tid")],
+                ["系统单号", order.get("sid")],
+                ["付款时间", t(order.get("payTime"))],
+                ["发货仓库", order.get("warehouseName")],
+                ["快递公司", order.get("expressCompanyName") or order.get("logisticsCompanyName")],
+                ["快递模板", order.get("templateName")],
+                ["快递单号", order.get("outSid") or "（还没出单）"],
+                ["异常状态", "；".join(exc_codes) or "无"],
+                ["卖家备注", "；".join(memo_txt[:3])],
+                ["系统备注", ""],
+                ["加急", "是" if order.get("isUrgent") else "否"],
+                ["收货地", " ".join(str(order.get(k) or "") for k in
+                                     ("receiverState", "receiverCity", "receiverDistrict", "receiverStreet"))],
+                ["查询方式", matched or ""],
+            ]
+            item_num = order.get("itemNum")
+            for it in (order.get("orders") or []):
+                code = str(it.get("sysOuterId") or it.get("outerSkuId") or "")
+                sh, _k = dict_get_ci(self.shelf_map, code)
+                bins = "、".join(str(b[0]) for b in ((sh or {}).get("bins") or []) if b) or "无货位"
+                spec = "；".join(x for x in [str(it.get("sysSkuPropertiesName") or ""),
+                                             ("(" + str(it.get("sysSkuRemark")) + ")") if it.get("sysSkuRemark") else ""] if x)
+                tags = []
+                if it.get("stockStatus") == "INSUFFICIENT":
+                    tags.append("库存不足")
+                if it.get("refundStatus") and it.get("refundStatus") != "NO_REFUND":
+                    tags.append(str(it.get("refundStatus")))
+                line_refund.append(str(it.get("refundStatus") or ""))
+                plat = str(it.get("skuPropertiesName") or "")
+                remark = str(it.get("sysSkuRemark") or "")
+                amt = it.get("payment")
+                if amt in (None, ""):
+                    amt = it.get("payAmount")
+                items.append({"code": code, "qty": int(it.get("num") or 0),
+                              "title": it.get("title") or it.get("sysTitle") or "", "spec": spec,
+                              "platSpec": plat, "remark": remark, "amount": amt,
+                              "price": it.get("price"), "bin": bins,
+                              "pic": it.get("picPath") or it.get("sysPicPath") or "", "tags": tags})
+            if order.get("isRefund") not in (0, None, "0"):
+                line_refund.append("订单有退款标记")
+
+        line_refund = sorted({x for x in line_refund if x and x != "NO_REFUND"})
+        out = {"order": bool(order), "head": head, "items": items, "itemNum": item_num,
+               "itemKind": (order or {}).get("itemKindNum"),
+               "urgent": bool((order or {}).get("isUrgent")),
+               "tags": tag_names if order else [],
+               "excs": exc_codes if order else [],
+               "statusText": self.OD_STATUS_CN.get((order or {}).get("sysStatus"), (order or {}).get("sysStatus")),
+               "uniText": self.OD_UNI_CN.get((order or {}).get("unifiedStatus"), (order or {}).get("unifiedStatus")),
+               "lineRefund": line_refund, "after": after, "matched": matched}
+        if not order and not after:
+            out["error"] = err or "没查到：订单号 / 快递单号是否正确？（归档老单只能从售后查到）"
+        return out
+
+    def web_order_image(self, url):
+        """订单/售后图片代理：只允许平台图片域名（避免变成本机任意请求转发）。"""
+        u = str(url or "").strip()
+        try:
+            parts = urllib.parse.urlsplit(u)
+        except Exception:
+            return None, None
+        host = (parts.hostname or "").lower()
+        if parts.scheme != "https" or not any(host == d or host.endswith("." + d)
+                                              for d in self.ORDER_IMG_HOSTS):
+            return None, None
+        try:
+            req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0",
+                                                     "Referer": "https://www.douyin.com/"})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                ctype = (r.headers.get("Content-Type") or "image/jpeg").split(";")[0]
+                data = r.read(4 * 1024 * 1024)
+        except Exception:
+            return None, None
+        if len(data) < 100:
+            return None, None
+        return ctype, data
+
+    # ---------- 网页端：现货可发（在架 / 待发货 / 可发数量） ----------
+    def _sent_set(self):
+        """「已发」标记（本地先隐藏，避免重复拣）；拉了新数据（数据时间变了）才自动清空。
+
+        注意：重拉过程中 loaded_at 会变空/变化，不能拿它当真·新数据，否则刚打的标记会被误清。
+        """
+        cur = self.loaded_at
+        old = getattr(self, "_sent_ver", None)
+        if old is not None and cur and cur != old:
+            self._sent = set()          # 真的拉到新数据了 → 清空标记
+        if not hasattr(self, "_sent"):
+            self._sent = set()
+        if cur:
+            self._sent_ver = cur
+        return self._sent
+
+    def mark_sent(self, codes, undo=False):
+        s = self._sent_set()
+        if isinstance(codes, str):
+            codes = [codes]
+        for c in (codes or []):
+            c = str(c).strip()
+            if not c:
+                continue
+            if undo:
+                s.discard(c)
+            else:
+                s.add(c)
+        return sorted(s)
+
+    def clear_sent(self):
+        self._sent_set().clear()
+        return []
+
+    def stock_rows(self, kw="", only="all", sort="free"):
+        """编码级现货可发列表（数据来自本地索引 + 货位在架，不联网）。"""
+        items = (self.web_index_payload().get("items") or {})
+        try:
+            sent = self._sent_set()
+        except Exception:
+            sent = set()
+        kw = str(kw or "").strip().upper()
+        rows = []
+        for code, v in items.items():
+            shelf = int(v.get("s") or 0)
+            pieces = int(v.get("p") or 0)
+            orders = int(v.get("o") or 0)
+            ones = int(v.get("n") or 0)
+            uo = int(v.get("uo") or 0)
+            up = int(v.get("up") or 0)
+            if kw and kw not in str(code).upper():
+                continue
+            if _pick_group_excluded(code):        # 1166 / 买家秀 / 圆虹包 等占位、补偿商品：不显示
+                continue
+            multi_pieces = max(0, pieces - ones)   # 多件单需要的件数（一单一件每单恰好 1 件）
+            # 可发 = 能发出去的件数：订单要的和库存取小的，再扣掉留给多件单的部分
+            # 等价于 min(在架 − 多件件数, 一单一件件数)
+            free = min(shelf, pieces) - multi_pieces
+            if only == "free" and free <= 0:
+                continue
+            if only == "short" and free >= 0:
+                continue
+            if only == "orders" and pieces <= 0:
+                continue
+            if only == "urgent" and up <= 0 and uo <= 0:
+                continue
+            prio = 1 if ((uo > 0 or up > 0) and free > 0 and shelf > 0) else 0   # 加急且有货可发
+            if only == "urg_free" and not prio:
+                continue
+            rows.append({"c": str(code), "s": shelf, "p": pieces, "o": orders,
+                         "n": ones, "m": max(0, orders - ones), "mp": multi_pieces,
+                         "uo": uo, "up": up, "p1": prio,
+                         "sent": 1 if str(code) in sent else 0,
+                         "b": str(v.get("b") or ""),
+                         "f": free, "l": int(v.get("l") or 0)})
+        key = {"shelf": lambda r: (-r["s"], r["c"]),
+               "pieces": lambda r: (-r["p"], r["c"]),
+               "code": lambda r: r["c"],
+               "urgent": lambda r: (-r["up"], -r["uo"], r["c"]),
+               "free": lambda r: (-r["f"], r["c"]),
+               "urg_free": lambda r: (-r["p1"], -r["f"], r["c"])}.get(
+                   sort, lambda r: (-r["p1"], -r["f"], r["c"]))
+        rows.sort(key=key)
+        return rows
+
+    def web_stock(self, kw="", only="all", sort="free"):
+        rows = self.stock_rows(kw, only, sort)
+        return {"total": len(rows), "rows": rows,
+                "totals": {"shelf": sum(r["s"] for r in rows),
+                           "pieces": sum(r["p"] for r in rows),
+                           "ones": sum(r["n"] for r in rows),
+                           "multi": sum(r["mp"] for r in rows),
+                           "uo": sum(r["uo"] for r in rows),
+                           "up": sum(r["up"] for r in rows),
+                           "prio": sum(r["p1"] for r in rows),
+                           "sent": sum(r["sent"] for r in rows),
+                           "free": sum(r["f"] for r in rows)},
+                "loaded_at": self.loaded_at, "shelf_at": self.shelf_at,
+                "codes": len((self.web_index_payload().get("items") or {}))}
+
+    def stock_xlsx(self, kw="", only="all", sort="free"):
+        """导出 Excel：编码 / 一单一件订单数 / 一单多件订单数 / 多件件数 / 待发货件数 / 在架数 / 可发数量。"""
+        rows = self.stock_rows(kw, only, sort)
+        headers = ["编码", "货位", "一单一件订单数", "一单多件订单数", "多件件数", "加急订单数", "加急件数",
+                   "待发货件数", "在架数", "可发数量", "加急且有货"]
+        data = [[r["c"], r.get("b", ""), r["n"], r["m"], r["mp"], r["uo"], r["up"],
+                 r["p"], r["s"], r["f"], ("是" if r["p1"] else "")] for r in rows]
+        if not data:
+            return b""
+        path = os.path.join(os.environ.get("TEMP", "."),
+                            "现货可发_%s.xlsx" % datetime.now().strftime("%Y%m%d_%H%M%S"))
+        write_xlsx(path, headers, data)
+        try:
+            with open(path, "rb") as fp:
+                out = fp.read()
+        finally:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+        return out
 
     def web_lookup(self, code, rel, n):
         idx, _stat = self._web_index(rel, n)
@@ -2641,10 +3030,11 @@ class ScanApp:
         # 操作按钮（网格排布：窄窗口/小屏也不会被切掉）
         ops = ttk.LabelFrame(main, text="操作")
         ops.grid(row=4, column=0, sticky="ew", pady=6)
-        for c in range(4):
+        for c in range(5):
             ops.columnconfigure(c, weight=1)
         for i, (txt, cmd, sty) in enumerate((
                 ("批次查询", self.on_batch_dialog, "Accent.TButton"),
+                ("现货可发", self.on_stock_dialog, "Accent.TButton"),
                 ("增量刷新", lambda: self.sync_pending(background=True), "TButton"),
                 ("全量重拉", lambda: self.full_reload(background=True), "TButton"),
                 ("刷新货位库存", lambda: self.reload_shelf(background=True), "TButton"),
@@ -2653,9 +3043,9 @@ class ScanApp:
                 ("清空日志", self.on_clear_logs, "TButton"),
                 ("API 设置", self.on_api_settings, "TButton"))):
             ttk.Button(ops, text=txt, command=cmd, style=sty).grid(
-                row=i // 4, column=i % 4, sticky="ew", padx=5, pady=5)
+                row=i // 5, column=i % 5, sticky="ew", padx=5, pady=5)
         chk = ttk.Frame(ops)
-        chk.grid(row=2, column=0, columnspan=4, sticky="w", padx=5, pady=(2, 4))
+        chk.grid(row=3, column=0, columnspan=5, sticky="w", padx=5, pady=(2, 4))
         ttk.Checkbutton(chk, text="后台扫码监听（最小化也能扫）", variable=self.hook_on,
                         command=self.on_hook_toggle).pack(side=tk.LEFT, padx=(0, 14))
         ttk.Checkbutton(chk, text="不回车的扫码枪：停顿时自动查", variable=self.autosubmit_on,
@@ -3100,6 +3490,155 @@ class ScanApp:
                 pass
             self._float_after = None
 
+    # ---------- 现货可发（在架 / 待发货 / 可发件数） ----------
+    def on_stock_dialog(self):
+        """现货可发窗口：可发 = min(在架, 待发货件数) − 一单多件件数。
+
+        只给多件单预留库存；例：一单一件 100 件、一单多件 20 件、在架 80 件 → 可发 60 件。
+        """
+        old = getattr(self, "_stock_win", None)
+        if old is not None:
+            try:
+                old.destroy()
+            except Exception:
+                pass
+        win = tk.Toplevel(self.root)
+        self._stock_win = win
+        win.title("现货可发（在架 / 待发货 / 可发件数）")
+        win.geometry("1060x660")
+        win.transient(self.root)
+        top = ttk.Frame(win, padding=(10, 8))
+        top.pack(fill=tk.X)
+        ttk.Label(top, text="编码/款号").pack(side=tk.LEFT)
+        kw = tk.StringVar()
+        ent = ttk.Entry(top, textvariable=kw, width=18, font=("Consolas", 14))
+        ent.pack(side=tk.LEFT, padx=6)
+        ttk.Label(top, text="排序").pack(side=tk.LEFT, padx=(8, 2))
+        sort = tk.StringVar(value="加急有货优先（可发多→少）")
+        cb_sort = ttk.Combobox(top, textvariable=sort, width=20, state="readonly",
+                               values=("加急有货优先（可发多→少）", "可发数量（多→少）", "加急件数（多→少）",
+                                       "在架数（多→少）", "待发货件数（多→少）", "编码 A→Z"))
+        cb_sort.pack(side=tk.LEFT)
+        ttk.Label(top, text="只看").pack(side=tk.LEFT, padx=(8, 2))
+        only = tk.StringVar(value="全部")
+        cb_only = ttk.Combobox(top, textvariable=only, width=15, state="readonly",
+                               values=("全部", "只看加急且有货", "只看有加急", "只看可发（>0）",
+                                       "只看缺货（<0）", "只看有待发货"))
+        cb_only.pack(side=tk.LEFT)
+        rows = []
+        btn = ttk.Button(top, text="查询")
+        btn.pack(side=tk.LEFT, padx=6)
+        ttk.Button(top, text="导出 Excel",
+                   command=lambda: self._export_stock(rows)).pack(side=tk.LEFT, padx=4)
+        ttk.Button(top, text="标记已发",
+                   command=lambda: mark_sel(True)).pack(side=tk.LEFT, padx=4)
+        ttk.Button(top, text="撤回", command=lambda: mark_sel(False)).pack(side=tk.LEFT, padx=3)
+        ttk.Button(top, text="清空已发", command=lambda: clear_all()).pack(side=tk.LEFT, padx=3)
+        hide_sent = tk.BooleanVar(value=True)
+        ttk.Checkbutton(top, text="隐藏已发", variable=hide_sent,
+                        command=lambda: refresh()).pack(side=tk.LEFT, padx=6)
+        info = tk.StringVar(value="可发 = 能发出去的件数：订单要的和库存取小的，再扣掉留给多件单的部分")
+        ttk.Label(win, textvariable=info, foreground="#0b5394").pack(anchor="w", padx=12)
+        cols = ("code", "bin", "shelf", "ones", "multi", "mp", "urgent", "pieces", "free")
+        heads = (("code", "编码", 190), ("bin", "货位", 130),
+                 ("shelf", "在架数", 75), ("ones", "一单一件（单/件）", 105),
+                 ("multi", "一单多件（单）", 95), ("mp", "多件件数", 75),
+                 ("urgent", "加急（单/件）", 95),
+                 ("pieces", "待发货件数", 85), ("free", "可发数量", 85))
+        tree = ttk.Treeview(win, columns=cols, show="headings", height=18)
+        for c, t, w in heads:
+            tree.heading(c, text=t)
+            tree.column(c, width=w, anchor="center")
+        tree.tag_configure("neg", foreground="#c62828")
+        tree.tag_configure("pos", foreground="#1b7f35")
+        tree.tag_configure("urgent", foreground="#d81b60")
+        tree.tag_configure("prio", foreground="#FF3B30", font=("Microsoft YaHei", 10, "bold"))
+        tree.tag_configure("sent", foreground="#1B7F35")
+        tree.pack(fill=tk.BOTH, expand=True, padx=12, pady=6)
+
+        only_map = {"全部": "all", "只看可发（>0）": "free", "只看缺货（<0）": "short",
+                    "只看有待发货": "orders", "只看有加急": "urgent", "只看加急且有货": "urg_free"}
+        sort_map = {"可发数量（多→少）": "free", "在架数（多→少）": "shelf",
+                    "待发货件数（多→少）": "pieces", "编码 A→Z": "code",
+                    "加急件数（多→少）": "urgent", "加急有货优先（可发多→少）": "urg_free"}
+
+        def mark_sel(mark=True):
+            sel = [tree.item(i, "values")[0] for i in tree.selection()]
+            if not sel:
+                messagebox.showinfo("提示", "先在表格里选中要处理的编码（可多选）")
+                return
+            self.mark_sent([str(x) for x in sel], undo=not mark)
+            refresh()
+
+        def clear_all():
+            if messagebox.askyesno("确认", "清空所有「已发」标记？"):
+                self.clear_sent()
+                refresh()
+
+        def refresh(*_a):
+            try:
+                got = self.stock_rows(kw.get(), only_map.get(only.get(), "all"),
+                                      sort_map.get(sort.get(), "free"))
+            except Exception as e:
+                info.set("读取失败：%s" % str(e)[:80])
+                return
+            rows[:] = got
+            shown = [r for r in got if not (hide_sent.get() and r.get("sent"))]
+            tree.delete(*tree.get_children())
+            for r in shown[:3000]:
+                if r.get("sent"):
+                    tags = ("sent",)
+                elif r["f"] < 0:
+                    tags = ("neg",)
+                elif r.get("p1"):
+                    tags = ("prio",)
+                elif (r.get("up") or r.get("uo")):
+                    tags = ("urgent",)
+                else:
+                    tags = ("pos",)
+                tree.insert("", tk.END, values=(r["c"], r.get("b", ""), r["s"],
+                                                "%d / %d" % (r["n"], r["n"]),
+                                                r["m"], r["mp"],
+                                                "%d / %d" % (r.get("uo", 0), r.get("up", 0)),
+                                                r["p"], r["f"]),
+                            tags=tags)
+            info.set("共 %d 个编码（显示 %d）　已发 %d 个　加急且有货 %d 个（排最前，红字）　"
+                     "在架合计 %d 件　一单一件 %d 件　一单多件 %d 件　加急 %d 单/%d 件　可发合计 %d 件%s"
+                     % (len(rows), len(shown), sum(r.get("sent", 0) for r in rows),
+                        sum(r.get("p1", 0) for r in rows),
+                        sum(r["s"] for r in rows), sum(r["n"] for r in rows),
+                        sum(r["mp"] for r in rows), sum(r.get("uo", 0) for r in rows),
+                        sum(r.get("up", 0) for r in rows), sum(r["f"] for r in rows),
+                        "　（只显示前 3000 行，导出含全部）" if len(shown) > 3000 else ""))
+
+        btn.configure(command=refresh)
+        ent.bind("<Return>", refresh)
+        cb_sort.bind("<<ComboboxSelected>>", refresh)
+        cb_only.bind("<<ComboboxSelected>>", refresh)
+        refresh()
+        ent.focus_set()
+
+    def _export_stock(self, rows):
+        """现货可发 → Excel。"""
+        rows = list(rows or [])
+        if not rows:
+            messagebox.showinfo("提示", "没有数据可导出（先点「查询」）")
+            return
+        path = filedialog.asksaveasfilename(defaultextension=".xlsx", initialfile="现货可发.xlsx",
+                                           filetypes=[("Excel 文件", "*.xlsx")],
+                                           title="导出现货可发")
+        if not path:
+            return
+        try:
+            write_xlsx(path, ["编码", "货位", "一单一件订单数", "一单多件订单数", "多件件数", "加急订单数", "加急件数",
+                              "待发货件数", "在架数", "可发数量", "加急且有货"],
+                       [[r["c"], r.get("b", ""), r["n"], r["m"], r["mp"], r.get("uo", 0), r.get("up", 0),
+                         r["p"], r["s"], r["f"], ("是" if r.get("p1") else "")] for r in rows])
+        except Exception as e:
+            messagebox.showerror("导出失败", str(e)[:200])
+            return
+        messagebox.showinfo("已导出", "%s\n共 %d 行" % (path, len(rows)))
+
     # ---------- 批次查询（按打印批次号） ----------
     def on_batch_dialog(self):
         """输入打印批次号 → 列出该批次订单 + 每单商品编码/货位，并按货位汇总。"""
@@ -3232,7 +3771,9 @@ class ScanApp:
                     a = agg.setdefault((one_b, code), [0, 0])   # [件数, 行数]
                     a[0] += int(num or 0)
                     a[1] += 1
-                tree.insert("", tk.END, values=(seq, o.get("sid"), o.get("short_id"),
+                tree.insert("", tk.END, values=(
+                    ("★%s" % seq) if o.get("urgent") else seq,
+                    o.get("sid"), o.get("short_id"),
                                                 o.get("express"), code, num, bins, shelf_qty,
                                                 STATUS_LABEL.get(o.get("sys_status"), o.get("sys_status"))))
             # ① 按打印顺序的拣货清单（相邻同编码同货位合并成一段）

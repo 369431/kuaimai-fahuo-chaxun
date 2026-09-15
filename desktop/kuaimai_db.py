@@ -22,7 +22,8 @@ SHIPPED_SQL = ",".join("'%s'" % s for s in SHIPPED)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS orders(
-  sid TEXT PRIMARY KEY, sys_status TEXT, us TEXT, item_count INTEGER, upd_ts REAL);
+  sid TEXT PRIMARY KEY, sys_status TEXT, us TEXT, item_count INTEGER, upd_ts REAL,
+  urgent INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS order_items(
   sid TEXT, code TEXT, qty INTEGER, is_main INTEGER);
 CREATE INDEX IF NOT EXISTS idx_items_code ON order_items(code);
@@ -39,6 +40,10 @@ def connect(path, check_same_thread=True):
     conn.executescript(SCHEMA)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
+    try:                                  # 老库补 urgent 列（加急标记）
+        conn.execute("ALTER TABLE orders ADD COLUMN urgent INTEGER DEFAULT 0")
+    except Exception:
+        pass
     return conn
 
 
@@ -85,7 +90,7 @@ def _chunks(seq, size=400):
 def _record_rows(sid, rec):
     """一条 store 记录 → (orders 行, order_items 行列表)。"""
     out = (str(sid), rec.get("status"), rec.get("us"),
-           int(rec.get("count") or 0), time.time())
+           int(rec.get("count") or 0), time.time(), 1 if rec.get("urgent") else 0)
     items = []
     for pair in (rec.get("pairs") or []):
         try:
@@ -113,7 +118,8 @@ def import_store(conn, store, loaded_at="", replace=True):
         if replace:
             cur.execute("DELETE FROM orders")
             cur.execute("DELETE FROM order_items")
-        cur.executemany("INSERT OR REPLACE INTO orders VALUES(?,?,?,?,?)", rows)
+        cur.executemany("INSERT OR REPLACE INTO orders(sid,sys_status,us,item_count,upd_ts,urgent)"
+                         " VALUES(?,?,?,?,?,?)", rows)
         cur.executemany("INSERT INTO order_items VALUES(?,?,?,?)", items)
         if loaded_at:
             cur.execute("INSERT OR REPLACE INTO meta VALUES('loaded_at',?)", (loaded_at,))
@@ -143,7 +149,8 @@ def upsert_records(conn, records, delete_sids=(), commit=True):
         for chunk in _chunks([r[0] for r in rows]):
             ph = ",".join("?" * len(chunk))
             cur.execute("DELETE FROM order_items WHERE sid IN (%s)" % ph, chunk)
-        cur.executemany("INSERT OR REPLACE INTO orders VALUES(?,?,?,?,?)", rows)
+        cur.executemany("INSERT OR REPLACE INTO orders(sid,sys_status,us,item_count,upd_ts,urgent)"
+                         " VALUES(?,?,?,?,?,?)", rows)
         cur.executemany("INSERT INTO order_items VALUES(?,?,?,?)", items)
         if commit:
             conn.commit()
@@ -222,13 +229,16 @@ def index_counts(conn, relation="不限", n=0):
     """SQL 聚合：编码 -> [订单数, 件数, 一件订单数]（已发货不计，可加件数条件）。"""
     filt, args = _count_filter(relation, n)
     q = ("SELECT i.code, COUNT(*), COALESCE(SUM(i.qty),0),"
-         " SUM(CASE WHEN o.item_count = 1 THEN 1 ELSE 0 END)"
+         " SUM(CASE WHEN o.item_count = 1 THEN 1 ELSE 0 END),"
+         " SUM(CASE WHEN o.urgent = 1 THEN 1 ELSE 0 END),"
+         " COALESCE(SUM(CASE WHEN o.urgent = 1 THEN i.qty ELSE 0 END),0)"
          " FROM order_items i JOIN orders o ON o.sid = i.sid"
          " WHERE " + live_where("o") + filt +
          " GROUP BY i.code")
     out = {}
-    for code, orders, pieces, ones in conn.execute(q, args):
-        out[code] = [int(orders or 0), int(pieces or 0), int(ones or 0)]
+    for code, orders, pieces, ones, uo, up in conn.execute(q, args):
+        out[code] = [int(orders or 0), int(pieces or 0), int(ones or 0),
+                     int(uo or 0), int(up or 0)]
     return out
 
 
@@ -252,7 +262,8 @@ def orders_stat(conn, relation="不限", n=0):
 def rebuild_index_db(conn, relation="不限", n=0):
     """SQL 版 rebuild_index：返回 (index, stat)，index 结构与 JSON 版一致。"""
     raw = index_counts(conn, relation, n)
-    index = {code: {"qty": v[1], "orders": v[0], "ones": v[2], "main": False}
+    index = {code: {"qty": v[1], "orders": v[0], "ones": v[2], "main": False,
+                    "uo": (v[3] if len(v) > 3 else 0), "up": (v[4] if len(v) > 4 else 0)}
              for code, v in raw.items()}
     return index, orders_stat(conn, relation, n)
 
