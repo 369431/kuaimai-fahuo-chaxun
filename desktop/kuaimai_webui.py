@@ -1261,14 +1261,31 @@ function render(){
       + (r.l ? (' · 锁定 ' + r.l) : '') + '</div></div>'
       + '<div class="btns">'
       + '<button class="sbtn' + (r.sent ? ' undo' : '') + '" data-c="' + esc(r.c) + '">'
-      + (r.sent ? '撤回' : '已发') + '</button>'
+      + (r.sent ? '撤回' : '可发') + '</button>'
       + '<button class="sbtn adj" data-c="' + esc(r.c) + '">改库存</button>'
       + '<button class="sbtn zero" data-c="' + esc(r.c) + '">盘0</button></div></div>';
   }).join('') + (vis.length > head.length
       ? ('<div class="muted">只显示前 ' + head.length + ' 条，其余 ' + (vis.length - head.length) + ' 条请用「导出 Excel」或加关键词。</div>') : '');
-  box.querySelectorAll('.sbtn:not(.adj)').forEach(function(b){
+  box.querySelectorAll('.sbtn:not(.adj):not(.zero)').forEach(function(b){
     b.onclick = function(){
       const code = b.dataset.c, undo = b.classList.contains('undo');
+      const row = ROWS.filter(function(r){ return r.c === code; })[0] || {};
+      if(!undo){   // 点「可发」→ 输入可打单数量，写一条扫码日志到电脑端
+        const v = prompt('可发 ' + code + '\n可打单数量填多少？', row.f == null ? '' : String(row.f));
+        if(v !== null){
+          const q = parseInt(v, 10);
+          if(isNaN(q) || q < 0){ alert('数量要填 0 或正整数'); return; }
+          fetch(withSid('/api/stock/canprint'), {method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({code: code, qty: q, bins: row.b || '',
+                                  pending: row.p || 0, shelf: row.s || 0})})
+            .then(function(r2){ return r2.json(); })
+            .then(function(j){
+              if(j && j.ok){ flash('已记可打单：' + code + ' ' + q + '（电脑端扫码记录已更新）'); }
+              else { flash('记录失败：' + ((j && j.msg) || '未知')); alert('没能写入扫码记录：' + ((j && j.msg) || '未知')); }
+            })
+            .catch(function(){ flash('网络错误，扫码记录未写入'); });
+        }
+      }
       // 先本地生效（立刻隐藏/恢复），再同步到服务端
       ROWS.forEach(function(r){ if(r.c === code) r.sent = undo ? 0 : 1; });
       render();

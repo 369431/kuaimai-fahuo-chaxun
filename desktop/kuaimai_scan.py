@@ -652,19 +652,56 @@ def build_pick_groups(orders, shelf_lookup):
     return groups
 
 
-def insert_scan(barcode, pending_qty, shelf_qty, orders_count, light, who=""):
+def insert_scan(barcode, pending_qty, shelf_qty, orders_count, light, who="", print_num=""):
     conn = get_conn()
     cur = conn.cursor()
-    try:                                  # 老库补 who 列（哪个账号扫的）
-        cur.execute("ALTER TABLE scan_record ADD COLUMN who TEXT")
+    for stmt in ("ALTER TABLE scan_record ADD COLUMN who TEXT",
+                 "ALTER TABLE scan_record ADD COLUMN print_num TEXT",
+                 "ALTER TABLE scan_record ADD COLUMN printed INTEGER DEFAULT 0"):
+        try:
+            cur.execute(stmt)
+        except Exception:
+            pass
+    cur.execute(
+        "INSERT INTO scan_record(scan_time,barcode,order_no,goods_name,status,pending_qty,shelf_qty,orders_count,who,print_num,printed)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,0)",
+        (now_gmt8(), barcode, "", "", light, int(pending_qty), int(shelf_qty), int(orders_count),
+         str(who or ""), str(print_num or "")),
+    )
+    conn.commit()
+    conn.close()
+
+
+def insert_canprint(code, qty, who="", bins="", pending_qty=0, shelf_qty=0):
+    """网页现货可发点「可发」并输入数量 → 写一条扫码日志，可打单数量 = 输入的数量。"""
+    conn = get_conn()
+    cur = conn.cursor()
+    for stmt in ("ALTER TABLE scan_record ADD COLUMN who TEXT",
+                 "ALTER TABLE scan_record ADD COLUMN print_num TEXT",
+                 "ALTER TABLE scan_record ADD COLUMN printed INTEGER DEFAULT 0"):
+        try:
+            cur.execute(stmt)
+        except Exception:
+            pass
+    cur.execute(
+        "INSERT INTO scan_record(scan_time,barcode,order_no,goods_name,status,pending_qty,shelf_qty,orders_count,who,print_num,printed)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,0)",
+        (now_gmt8(), str(code), "", str(bins or ""), "可", int(pending_qty or 0), int(shelf_qty or 0), 0,
+         str(who or ""), str(int(qty)),),
+    )
+    conn.commit()
+    conn.close()
+
+
+def set_printed(rec_id, flag):
+    """把某条扫码日志标成「已打」（1）/ 未打（0）。"""
+    conn = get_conn()
+    try:
+        conn.execute("ALTER TABLE scan_record ADD COLUMN printed INTEGER DEFAULT 0")
+        conn.commit()
     except Exception:
         pass
-    cur.execute(
-        "INSERT INTO scan_record(scan_time,barcode,order_no,goods_name,status,pending_qty,shelf_qty,orders_count,who)"
-        " VALUES (?,?,?,?,?,?,?,?,?)",
-        (now_gmt8(), barcode, "", "", light, int(pending_qty), int(shelf_qty), int(orders_count),
-         str(who or "")),
-    )
+    conn.execute("UPDATE scan_record SET printed=? WHERE id=?", (1 if flag else 0, int(rec_id)))
     conn.commit()
     conn.close()
 
@@ -672,14 +709,17 @@ def insert_scan(barcode, pending_qty, shelf_qty, orders_count, light, who=""):
 def fetch_all_scans():
     conn = get_conn()
     cur = conn.cursor()
-    try:
-        cur.execute("ALTER TABLE scan_record ADD COLUMN who TEXT")
-        conn.commit()
-    except Exception:
-        pass
+    for stmt in ("ALTER TABLE scan_record ADD COLUMN who TEXT",
+                 "ALTER TABLE scan_record ADD COLUMN print_num TEXT",
+                 "ALTER TABLE scan_record ADD COLUMN printed INTEGER DEFAULT 0"):
+        try:
+            cur.execute(stmt)
+            conn.commit()
+        except Exception:
+            pass
     rows = cur.execute(
-        "SELECT id,scan_time,barcode,pending_qty,shelf_qty,orders_count,status,COALESCE(who,'')"
-        " FROM scan_record ORDER BY id ASC"
+        "SELECT id,scan_time,barcode,pending_qty,shelf_qty,orders_count,status,COALESCE(who,''),"
+        "COALESCE(print_num,''),COALESCE(printed,0) FROM scan_record ORDER BY id ASC"
     ).fetchall()
     conn.close()
     return rows
@@ -1908,6 +1948,20 @@ class _WebHandler(BaseHTTPRequestHandler):
                 left = app.mark_sent(body.get("codes") or body.get("code") or [],
                                      undo=bool(body.get("undo")))
                 return self._json({"ok": True, "sent": len(left)})
+            if path == "/api/stock/canprint":
+                # 网页现货可发点「可发」并输入数量 → 写一条扫码日志（可打单数量 = 输入值）
+                code = str(body.get("code") or "").strip()
+                try:
+                    qty = int(body.get("qty"))
+                except Exception:
+                    return self._json({"error": "数量必须是整数"}, 400)
+                if not code:
+                    return self._json({"error": "缺少编码"}, 400)
+                insert_canprint(code, qty, who=str((me or {}).get("name") or ""),
+                                bins=str(body.get("bins") or ""),
+                                pending_qty=body.get("pending") or 0,
+                                shelf_qty=body.get("shelf") or 0)
+                return self._json({"ok": True, "code": code, "qty": qty})
             if path == "/api/stock/adjust":
                 # 改库存（盘点接口，按货位）。必须带 confirm 二次确认，改完写操作日志。
                 app = self.app
@@ -3140,8 +3194,46 @@ class ScanApp:
 
     def _build_ui(self):
         self._setup_style()
-        main = ttk.Frame(self.root, padding=12)
-        main.pack(fill=tk.BOTH, expand=True)
+        # 外层套一层可滚动区域：窗口右侧竖滚动条；默认看到的区域里就是扫码记录，
+        # 往下滑才看到「操作」「刷新周期」（放到最下面）。
+        wrap = ttk.Frame(self.root)
+        wrap.pack(fill=tk.BOTH, expand=True)
+        _vsb = ttk.Scrollbar(wrap, orient="vertical")
+        _vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        _canvas = tk.Canvas(wrap, highlightthickness=0, yscrollcommand=_vsb.set)
+        _canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        _vsb.configure(command=_canvas.yview)
+        self._main_canvas = _canvas
+        main = ttk.Frame(_canvas, padding=12)
+        _mw = _canvas.create_window((0, 0), window=main, anchor="nw")
+
+        def _on_main_cfg(_e=None):
+            try:
+                _canvas.configure(scrollregion=_canvas.bbox("all"))
+            except Exception:
+                pass
+
+        def _on_canvas_cfg(e):
+            try:
+                _canvas.itemconfigure(_mw, width=e.width)
+            except Exception:
+                pass
+
+        main.bind("<Configure>", _on_main_cfg)
+        _canvas.bind("<Configure>", _on_canvas_cfg)
+
+        def _on_wheel(event):
+            try:
+                over = self.root.winfo_containing(event.x_root, event.y_root)
+                step = int(-1 * (event.delta / 120))
+                if over is not None and str(over).startswith(str(getattr(self, "tree", None))):
+                    self.tree.yview_scroll(step, "units")      # 滚轮压在记录表上 → 滚表格
+                    return "break"
+                _canvas.yview_scroll(step, "units")              # 否则滚动整页
+            except Exception:
+                pass
+
+        _canvas.bind_all("<MouseWheel>", _on_wheel)
         main.columnconfigure(0, weight=1)
 
         # 扫码区
@@ -3178,7 +3270,7 @@ class ScanApp:
 
         # 商品数量筛选
         flt = ttk.LabelFrame(main, text="商品数量筛选（按订单商品件数加载待发货订单）")
-        flt.grid(row=3, column=0, sticky="ew", pady=8)
+        flt.grid(row=4, column=0, sticky="ew", pady=8)
         ttk.Label(flt, text="订单商品数量").grid(row=0, column=0, padx=6, pady=6)
         ttk.Combobox(flt, textvariable=self.filter_relation, values=FILTER_OPTIONS,
                      width=6, state="readonly").grid(row=0, column=1, padx=4)
@@ -3188,7 +3280,7 @@ class ScanApp:
 
         # 操作按钮（网格排布：窄窗口/小屏也不会被切掉）
         ops = ttk.LabelFrame(main, text="操作")
-        ops.grid(row=4, column=0, sticky="ew", pady=6)
+        ops.grid(row=6, column=0, sticky="ew", pady=6)
         for c in range(5):
             ops.columnconfigure(c, weight=1)
         for i, (txt, cmd, sty) in enumerate((
@@ -3211,7 +3303,7 @@ class ScanApp:
 
         # 刷新周期
         itv = ttk.LabelFrame(main, text="刷新周期（分钟）")
-        itv.grid(row=5, column=0, sticky="ew", pady=4)
+        itv.grid(row=7, column=0, sticky="ew", pady=4)
         ttk.Label(itv, text="增量刷新").grid(row=0, column=0, padx=6, pady=6)
         ttk.Spinbox(itv, from_=1, to=180, width=5, textvariable=self.auto_min_var).grid(row=0, column=1)
         ttk.Label(itv, text="全量重拉").grid(row=0, column=2, padx=6)
@@ -3221,7 +3313,7 @@ class ScanApp:
         ttk.Button(itv, text="应用", command=self.apply_intervals).grid(row=0, column=6, padx=10)
 
         status_row = ttk.Frame(main)
-        status_row.grid(row=6, column=0, sticky="ew", pady=4)
+        status_row.grid(row=5, column=0, sticky="ew", pady=4)
         status_row.columnconfigure(0, weight=1)
         self.status_label = ttk.Label(status_row, textvariable=self.status_text, foreground="#0b5394")
         self.status_label.grid(row=0, column=0, sticky="w")
@@ -3231,20 +3323,26 @@ class ScanApp:
 
         # 扫码记录
         log = ttk.LabelFrame(main, text="扫码记录")
-        log.grid(row=7, column=0, sticky="nsew")
-        main.rowconfigure(7, weight=1)
-        cols = ("time", "barcode", "pending", "shelf", "orders", "who", "light")
-        self.tree = ttk.Treeview(log, columns=cols, show="headings", height=10)
-        for c, t, w in (("time", "扫码时间", 160), ("barcode", "商家编码", 220),
-                        ("pending", "待发货订单数", 105), ("shelf", "货架在架数", 95),
-                        ("orders", "件数", 65), ("who", "扫码账号", 130), ("light", "提示", 110)):
+        log.grid(row=3, column=0, sticky="nsew")          # 扫码记录：紧跟在「扫码后显示编码」下面
+        main.rowconfigure(3, weight=1)
+        cols = ("time", "barcode", "pending", "shelf", "orders", "who", "print_num", "printed")
+        self.tree = ttk.Treeview(log, columns=cols, show="headings", height=16)
+        for c, t, w in (("time", "扫码时间", 155), ("barcode", "商家编码", 210),
+                        ("pending", "待发货订单数", 100), ("shelf", "货架在架数", 90),
+                        ("orders", "件数", 60), ("who", "扫码账号", 125),
+                        ("print_num", "可打单数量", 95), ("printed", "已打", 80)):
             self.tree.heading(c, text=t)
             self.tree.column(c, width=w, anchor="center")
         self.tree.pack(fill=tk.BOTH, expand=True)
+        _tsb = ttk.Scrollbar(log, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=_tsb.set)
+        _tsb.pack(side=tk.RIGHT, fill="y")
         ttk.Button(log, text="刷新记录",
                    command=lambda: self._poll_records(force=True)).pack(side=tk.BOTTOM, pady=3)
         self.tree.tag_configure("ok", background=self.GREEN_BG)
         self.tree.tag_configure("alert", background=self.RED_BG)
+        self.tree.tag_configure("printed", background="#FFF6CC", foreground="#B8860B")   # 已打：黄色
+        self.tree.bind("<Button-1>", self._on_record_click)      # 点「已打」那一格可切换
 
         self.scan_entry.focus()
         self._log_count = -1
@@ -4665,7 +4763,7 @@ class ScanApp:
         self.warn_label.config(text="需补货" if short else "")
         self.tree.insert("", 0, values=(now_gmt8(), code, orders_count, shelf, pending,
                                         "桌面版·%s" % (os.environ.get("USERNAME") or "本机"),
-                                        "绿(有货)" if ok else "红(无待发)"),
+                                        "", "【打单】"),
                          tags=("ok",) if ok else ("alert",))
         self.status_text.set("查询完成：%s（一单一件 %d / 一单多件 %d；在架 %d）%s"
                              % (code, one_piece, multi_piece, int(shelf or 0),
@@ -4719,16 +4817,48 @@ class ScanApp:
         except Exception:
             pass
 
+    def _on_record_click(self, event):
+        """点「已打」那一格 → 切换已打（已打的整行变黄）。"""
+        try:
+            if self.tree.identify_column(event.x) != "#8":
+                return
+            row = self.tree.identify_row(event.y)
+            if not row:
+                return
+            try:
+                rid = int(row)                 # 行 iid = 记录 id；新扫的临时行（未入库）忽略
+            except Exception:
+                return
+            vals = list(self.tree.item(row, "values"))
+            flag = 1 if (len(vals) > 7 and "已打" in str(vals[7])) else 0
+            newf = 0 if flag else 1
+            set_printed(rid, newf)
+            self._apply_printed(row, newf)
+        except Exception:
+            pass
+
+    def _apply_printed(self, iid, flag):
+        try:
+            vals = list(self.tree.item(iid, "values"))
+            if len(vals) > 7:
+                vals[7] = "【已打】" if flag else "【打单】"
+                self.tree.item(iid, values=vals, tags=("printed",) if flag else ())
+        except Exception:
+            pass
+
     def reload_records(self):
         for item in self.tree.get_children():
             self.tree.delete(item)
         for r in fetch_all_scans():        # 由旧到新逐个插到第一行 → 最新的排在最上面
             pid, st, bc, pq, sh, oc, light = r[:7]
             who = r[7] if len(r) > 7 else ""
+            pnum = r[8] if len(r) > 8 else ""
+            prn = int(r[9] or 0) if len(r) > 9 else 0
             ok = (light == "绿")
-            self.tree.insert("", 0, values=(st, bc, pq or 0, sh or 0, oc or 0, who or "（本机扫码）",
-                                            "绿(有货)" if ok else "红(无待发)"),
-                             tags=("ok",) if ok else ("alert",))
+            self.tree.insert("", 0, iid=str(pid),
+                             values=(st, bc, pq or 0, sh or 0, oc or 0, who or "（本机扫码）",
+                                     pnum, "【已打】" if prn else "【打单】"),
+                             tags=("printed",) if prn else (("ok",) if ok else ("alert",)))
         try:
             self.tree.yview_moveto(0)      # 刷新后停在顶部，最新那条一眼能看到
         except Exception:
