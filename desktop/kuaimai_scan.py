@@ -3349,6 +3349,15 @@ class ScanApp:
                         ("print_num", "可打单数量", 95), ("printed", "已打", 80)):
             self.tree.heading(c, text=t)
             self.tree.column(c, width=w, anchor="center")
+        _bar = tk.Frame(log)
+        _bar.pack(side=tk.TOP, fill="x", pady=(2, 2))
+        ttk.Label(_bar, text="扫码账号：").pack(side=tk.LEFT, padx=(2, 2))
+        self.acc_var = tk.StringVar(value="全部")
+        self.acc_box = ttk.Combobox(_bar, textvariable=self.acc_var, width=18, state="readonly",
+                                    values=["全部"])
+        self.acc_box.pack(side=tk.LEFT)
+        self.acc_box.bind("<<ComboboxSelected>>", lambda e: self.reload_records())
+        ttk.Label(_bar, text="（选一个账号，只看它扫的记录）").pack(side=tk.LEFT, padx=6)
         self.tree.pack(fill=tk.BOTH, expand=True)
         _tsb = ttk.Scrollbar(log, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=_tsb.set)
@@ -4897,11 +4906,32 @@ class ScanApp:
     def reload_records(self):
         for item in self.tree.get_children():
             self.tree.delete(item)
-        for r in fetch_all_scans():        # 由旧到新逐个插到第一行 → 最新的排在最上面
+        all_rows = fetch_all_scans()
+        try:
+            acc = (self.acc_var.get() if getattr(self, "acc_var", None) else "") or "全部"
+        except Exception:
+            acc = "全部"
+        # 账号下拉：列出记录里出现过的扫码账号
+        accs = ["全部"]
+        for r in all_rows:
+            w = (r[7] if len(r) > 7 else "") or ""
+            if w and w not in accs:
+                accs.append(w)
+        try:
+            if getattr(self, "acc_box", None):
+                self.acc_box.configure(values=accs)
+                if acc not in accs:
+                    acc = "全部"
+                    self.acc_var.set("全部")
+        except Exception:
+            pass
+        for r in all_rows:                 # 由旧到新逐个插到第一行 → 最新的排在最上面
             pid, st, bc, pq, sh, oc, light = r[:7]
             who = r[7] if len(r) > 7 else ""
             pnum = r[8] if len(r) > 8 else ""
             prn = int(r[9] or 0) if len(r) > 9 else 0
+            if acc != "全部" and (who or "") != acc:
+                continue
             ok = (light == "绿")
             self.tree.insert("", 0, iid=str(pid),
                              values=(st, bc, pq or 0, sh or 0, oc or 0, who or "（本机扫码）",
