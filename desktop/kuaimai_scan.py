@@ -31,13 +31,14 @@ import concurrent.futures
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 try:
-    from kuaimai_webui import WEB_INDEX_HTML, PICK_HTML, ORDER_HTML, STOCK_HTML
+    from kuaimai_webui import WEB_INDEX_HTML, PICK_HTML, ORDER_HTML, STOCK_HTML, STOCKTAKE_HTML
     from kuaimai_login_ui import LOGIN_HTML
 except Exception:
     WEB_INDEX_HTML = "<h1>缺少 kuaimai_webui.py</h1>"
     PICK_HTML = WEB_INDEX_HTML
     ORDER_HTML = WEB_INDEX_HTML
     STOCK_HTML = WEB_INDEX_HTML
+    STOCKTAKE_HTML = WEB_INDEX_HTML
     LOGIN_HTML = WEB_INDEX_HTML
 try:
     import kuaimai_auth as auth
@@ -53,7 +54,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timezone, timedelta
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, simpledialog
 
 try:
     import winsound  # Windows 声光提示
@@ -651,13 +652,18 @@ def build_pick_groups(orders, shelf_lookup):
     return groups
 
 
-def insert_scan(barcode, pending_qty, shelf_qty, orders_count, light):
+def insert_scan(barcode, pending_qty, shelf_qty, orders_count, light, who=""):
     conn = get_conn()
     cur = conn.cursor()
+    try:                                  # 老库补 who 列（哪个账号扫的）
+        cur.execute("ALTER TABLE scan_record ADD COLUMN who TEXT")
+    except Exception:
+        pass
     cur.execute(
-        "INSERT INTO scan_record(scan_time,barcode,order_no,goods_name,status,pending_qty,shelf_qty,orders_count)"
-        " VALUES (?,?,?,?,?,?,?,?)",
-        (now_gmt8(), barcode, "", "", light, int(pending_qty), int(shelf_qty), int(orders_count)),
+        "INSERT INTO scan_record(scan_time,barcode,order_no,goods_name,status,pending_qty,shelf_qty,orders_count,who)"
+        " VALUES (?,?,?,?,?,?,?,?,?)",
+        (now_gmt8(), barcode, "", "", light, int(pending_qty), int(shelf_qty), int(orders_count),
+         str(who or "")),
     )
     conn.commit()
     conn.close()
@@ -666,8 +672,13 @@ def insert_scan(barcode, pending_qty, shelf_qty, orders_count, light):
 def fetch_all_scans():
     conn = get_conn()
     cur = conn.cursor()
+    try:
+        cur.execute("ALTER TABLE scan_record ADD COLUMN who TEXT")
+        conn.commit()
+    except Exception:
+        pass
     rows = cur.execute(
-        "SELECT id,scan_time,barcode,pending_qty,shelf_qty,orders_count,status"
+        "SELECT id,scan_time,barcode,pending_qty,shelf_qty,orders_count,status,COALESCE(who,'')"
         " FROM scan_record ORDER BY id ASC"
     ).fetchall()
     conn.close()
@@ -1560,8 +1571,9 @@ def export_scans_to_excel(path=None):
     rows = fetch_all_scans()
     if path is None:
         path = os.path.join(BASE_DIR, "扫码日志_%s.xlsx" % datetime.now().strftime("%Y%m%d_%H%M%S"))
-    headers = ["序号", "扫码时间", "商家编码", "待发货订单数", "货架在架数", "件数", "提示"]
-    data = [[i + 1, r[1], r[2], r[3] or 0, r[4] or 0, r[5] or 0, r[6]] for i, r in enumerate(rows)]
+    headers = ["序号", "扫码时间", "商家编码", "待发货订单数", "货架在架数", "件数", "扫码账号", "提示"]
+    data = [[i + 1, r[1], r[2], r[3] or 0, r[4] or 0, r[5] or 0, (r[7] if len(r) > 7 else ""), r[6]]
+            for i, r in enumerate(rows)]
     write_xlsx(path, headers, data)
     return path, len(data)
 
@@ -1761,6 +1773,8 @@ class _WebHandler(BaseHTTPRequestHandler):
                 return self._send(WEB_INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
             if parsed.path in ("/pick", "/pick.html"):
                 return self._send(PICK_HTML.encode("utf-8"), "text/html; charset=utf-8")
+            if parsed.path in ("/stocktake", "/stocktake.html"):
+                return self._send(STOCKTAKE_HTML.encode("utf-8"), "text/html; charset=utf-8")
             if parsed.path in ("/order", "/order.html"):
                 return self._send(ORDER_HTML.encode("utf-8"), "text/html; charset=utf-8")
             if parsed.path in ("/stock", "/stock.html"):
@@ -1801,7 +1815,12 @@ class _WebHandler(BaseHTTPRequestHandler):
                     n = 0
                 if not code:
                     return self._json({"error": "缺少 code"}, 400)
-                return self._json(app.web_lookup(code, rel, n))
+                out = app.web_lookup(code, rel, n)
+                try:                       # 手机/网页扫一次就写进电脑版扫码记录（带账号）
+                    app.record_web_scan(out, str((me or {}).get("name") or ""))
+                except Exception:
+                    pass
+                return self._json(out)
             if parsed.path == "/api/order":
                 return self._json(app.web_order((qs.get("no") or [""])[0]))
             if parsed.path == "/api/order/img":
@@ -1889,6 +1908,16 @@ class _WebHandler(BaseHTTPRequestHandler):
                 left = app.mark_sent(body.get("codes") or body.get("code") or [],
                                      undo=bool(body.get("undo")))
                 return self._json({"ok": True, "sent": len(left)})
+            if path == "/api/stock/adjust":
+                # 改库存（盘点接口，按货位）。必须带 confirm 二次确认，改完写操作日志。
+                app = self.app
+                if not body.get("confirm"):
+                    return self._json({"error": "缺少二次确认"}, 400)
+                out = app.stock_adjust(body.get("code"), body.get("bin"), body.get("qty"),
+                                       who=str((me or {}).get("name") or ""))
+                return self._json(out, 200 if out.get("ok") else 400)
+            if path == "/api/stock/adjust/log":
+                return self._json({"list": self.app.adjust_logs(int(body.get("limit") or 30))})
             if path == "/api/users":
                 if not auth:
                     return self._json({"error": "账号模块不可用"}, 400)
@@ -2465,6 +2494,7 @@ class ScanApp:
                 "uo": int(e.get("uo", 0) or 0),
                 "up": int(e.get("up", 0) or 0),
                 "b": "、".join(str(b[0]) for b in (sh.get("bins") or [])[:6]),
+                "bl": [[str(b[0]), int(b[1] or 0)] for b in (sh.get("bins") or [])],
             }
         payload = {
             "loaded_at": self.loaded_at,
@@ -2812,6 +2842,110 @@ class ScanApp:
         self._sent_set().clear()
         return []
 
+    # ---------- 改库存（盘点接口，按货位改数量） ----------
+    def _adjust_conn(self):
+        conn = get_conn()
+        conn.execute("""CREATE TABLE IF NOT EXISTS stock_adjust_log(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, who TEXT, code TEXT, bin TEXT,
+            old_num TEXT, new_num TEXT, ok INTEGER, msg TEXT, trace TEXT)""")
+        conn.commit()
+        return conn
+
+    def adjust_logs(self, limit=30):
+        try:
+            conn = self._adjust_conn()
+            rows = conn.execute("SELECT ts,who,code,bin,old_num,new_num,ok,msg FROM stock_adjust_log"
+                                " ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
+            conn.close()
+        except Exception:
+            return []
+        return [{"ts": r[0], "who": r[1], "code": r[2], "bin": r[3], "old": r[4],
+                 "new": r[5], "ok": bool(r[6]), "msg": r[7]} for r in rows]
+
+    def stock_bins_of(self, code):
+        """该编码本地（程序维护的）各货位数量，用于二次确认与对照。"""
+        sh, key = dict_get_ci(self.shelf_map or {}, code)
+        if not sh:
+            return {"code": code, "found": False, "shelf": 0, "bins": []}
+        bins = []
+        for b in (sh.get("bins") or []):
+            try:
+                bins.append([str(b[0]), int(b[1] or 0)])
+            except Exception:
+                pass
+        return {"code": key, "found": True, "shelf": int(sh.get("shelf") or 0),
+                "bins": bins, "shelf_at": self.shelf_at}
+
+    def _warehouse_id(self, code):
+        """取仓库 id：设置里指定 → 否则按编码问接口（erp.item.warehouse.list.get）。"""
+        try:
+            wid = str((load_settings() or {}).get("warehouse_id") or "").strip()
+        except Exception:
+            wid = ""
+        if wid:
+            return wid, "设置"
+        try:
+            r = api_call("erp.item.warehouse.list.get",
+                         {"skuOuterId": code, "pageNo": "1", "pageSize": "20"},
+                         current_session(), timeout=40)
+            for sk in (r.get("skus") or []):
+                for wh in (sk.get("mainWareHousesStock") or []):
+                    if wh.get("id"):
+                        return str(wh.get("id")), "接口"
+        except Exception as e:
+            return "", "错误:%s" % str(e)[:60]
+        return "", "未找到"
+
+    def stock_adjust(self, code, bin_code, qty, who=""):
+        """把某编码在某货位的数量改成 qty（盘点接口，绝对值）。返回结果字典。"""
+        code = str(code or "").strip()
+        bin_code = str(bin_code or "").strip()
+        try:
+            qty = int(qty)
+        except Exception:
+            return {"ok": False, "msg": "数量必须是整数"}
+        if not code or not bin_code:
+            return {"ok": False, "msg": "编码和货位都不能为空"}
+        if qty < 0:
+            return {"ok": False, "msg": "数量不能为负数"}
+        before = self.stock_bins_of(code)
+        old = None
+        for b in (before.get("bins") or []):
+            if str(b[0]).upper() == bin_code.upper():
+                old = b[1]
+        wid, how = self._warehouse_id(code)
+        if not wid:
+            return {"ok": False, "msg": "拿不到仓库 id（%s），请在 API 设置里填仓库 id" % how,
+                    "old": old}
+        details = json.dumps([{"outerId": code, "goodsSectionCode": bin_code, "changeNum": str(qty)}],
+                             ensure_ascii=False)
+        try:
+            res = api_call("inventory.sheet.batch.update",
+                           {"details": details, "warehouseId": str(wid)},
+                           current_session(), timeout=45)
+            ok = bool((res or {}).get("success"))
+            msg = str((res or {}).get("msg") or "")
+            trace = str((res or {}).get("traceId") or "")
+        except Exception as e:
+            ok, msg, trace = False, str(e)[:200], ""
+        try:
+            conn = self._adjust_conn()
+            conn.execute("INSERT INTO stock_adjust_log(ts,who,code,bin,old_num,new_num,ok,msg,trace)"
+                         " VALUES(?,?,?,?,?,?,?,?,?)",
+                         (now_gmt8(), who, code, bin_code, str(old if old is not None else "?"),
+                          str(qty), 1 if ok else 0, msg[:300], trace))
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+        if ok:
+            try:
+                self.reload_shelf(background=True)      # 立刻重拉货位库存，界面就能看到新数
+            except Exception:
+                pass
+        return {"ok": ok, "msg": msg, "trace": trace, "old": old, "new": qty,
+                "code": code, "bin": bin_code, "warehouseId": wid}
+
     def stock_rows(self, kw="", only="all", sort="free"):
         """编码级现货可发列表（数据来自本地索引 + 货位在架，不联网）。"""
         items = (self.web_index_payload().get("items") or {})
@@ -2852,6 +2986,7 @@ class ScanApp:
                          "uo": uo, "up": up, "p1": prio,
                          "sent": 1 if str(code) in sent else 0,
                          "b": str(v.get("b") or ""),
+                         "bl": v.get("bl") or [],
                          "f": free, "l": int(v.get("l") or 0)})
         key = {"shelf": lambda r: (-r["s"], r["c"]),
                "pieces": lambda r: (-r["p"], r["c"]),
@@ -2899,6 +3034,30 @@ class ScanApp:
             except Exception:
                 pass
         return out
+
+    def record_web_scan(self, out, who=""):
+        """把手机/网页的扫码写进扫码记录（和电脑版同一张表，带账号）。"""
+        try:
+            if not isinstance(out, dict):
+                return
+            if out.get("series"):
+                items = out.get("items") or []
+                code = "%s（系列 %d 个）" % (out.get("code") or "", len(items))
+                pend = sum(int(i.get("qty", 0) or 0) for i in items)
+                shl = sum(int(i.get("shelf", 0) or 0) for i in items)
+                orders = len(items)
+                light = "绿" if shl >= pend else "红"
+            else:
+                code = str(out.get("code") or "")
+                pend = int(out.get("qty") or out.get("pending") or out.get("pieces") or 0)
+                shl = int(out.get("shelf") or 0)
+                orders = int(out.get("orders") or 0)
+                light = "绿" if (shl >= pend and (pend or orders)) else "红"
+            if not code:
+                return
+            insert_scan(code, pend, shl, orders, light, who=who)
+        except Exception:
+            pass
 
     def web_lookup(self, code, rel, n):
         idx, _stat = self._web_index(rel, n)
@@ -3033,7 +3192,6 @@ class ScanApp:
         for c in range(5):
             ops.columnconfigure(c, weight=1)
         for i, (txt, cmd, sty) in enumerate((
-                ("批次查询", self.on_batch_dialog, "Accent.TButton"),
                 ("现货可发", self.on_stock_dialog, "Accent.TButton"),
                 ("增量刷新", lambda: self.sync_pending(background=True), "TButton"),
                 ("全量重拉", lambda: self.full_reload(background=True), "TButton"),
@@ -3075,11 +3233,11 @@ class ScanApp:
         log = ttk.LabelFrame(main, text="扫码记录")
         log.grid(row=7, column=0, sticky="nsew")
         main.rowconfigure(7, weight=1)
-        cols = ("time", "barcode", "pending", "shelf", "orders", "light")
+        cols = ("time", "barcode", "pending", "shelf", "orders", "who", "light")
         self.tree = ttk.Treeview(log, columns=cols, show="headings", height=10)
-        for c, t, w in (("time", "扫码时间", 170), ("barcode", "商家编码", 240),
-                        ("pending", "待发货订单数", 110), ("shelf", "货架在架数", 100),
-                        ("orders", "件数", 70), ("light", "提示", 110)):
+        for c, t, w in (("time", "扫码时间", 160), ("barcode", "商家编码", 220),
+                        ("pending", "待发货订单数", 105), ("shelf", "货架在架数", 95),
+                        ("orders", "件数", 65), ("who", "扫码账号", 130), ("light", "提示", 110)):
             self.tree.heading(c, text=t)
             self.tree.column(c, width=w, anchor="center")
         self.tree.pack(fill=tk.BOTH, expand=True)
@@ -3534,6 +3692,9 @@ class ScanApp:
                    command=lambda: mark_sel(True)).pack(side=tk.LEFT, padx=4)
         ttk.Button(top, text="撤回", command=lambda: mark_sel(False)).pack(side=tk.LEFT, padx=3)
         ttk.Button(top, text="清空已发", command=lambda: clear_all()).pack(side=tk.LEFT, padx=3)
+        ttk.Button(top, text="改库存", command=lambda: adjust_one()).pack(side=tk.LEFT, padx=4)
+        ttk.Button(top, text="操作日志",
+                   command=lambda: self.on_adjust_log_dialog()).pack(side=tk.LEFT, padx=4)
         hide_sent = tk.BooleanVar(value=True)
         ttk.Checkbutton(top, text="隐藏已发", variable=hide_sent,
                         command=lambda: refresh()).pack(side=tk.LEFT, padx=6)
@@ -3574,6 +3735,52 @@ class ScanApp:
             if messagebox.askyesno("确认", "清空所有「已发」标记？"):
                 self.clear_sent()
                 refresh()
+
+        def adjust_one():
+            """按货位改库存（盘点接口，绝对值）：选中行 → 填货位/数量 → 二次确认。"""
+            sel = tree.selection()
+            if not sel:
+                messagebox.showinfo("提示", "先在表格里选中要改库存的编码")
+                return
+            code = str(tree.item(sel[0], "values")[0])
+            info_b = self.stock_bins_of(code)
+            bins = info_b.get("bins") or []
+            hint = "、".join("%s=%s" % (b[0], b[1]) for b in bins) if bins else "无货位记录"
+            bin_code = simpledialog.askstring("改库存", "编码 %s\n货位号（现有：%s）" % (code, hint),
+                                              initialvalue=str(bins[0][0]) if bins else "", parent=win)
+            if not bin_code:
+                return
+            bin_code = bin_code.strip()
+            cur = None
+            for b in bins:
+                if str(b[0]).upper() == bin_code.upper():
+                    cur = b[1]
+            qty = simpledialog.askstring("改库存", "把 %s 货位 %s 改成多少件？（当前 %s）"
+                                         % (code, bin_code,
+                                            ("%s 件" % cur) if cur is not None else "无记录"),
+                                         initialvalue=("0" if cur is None else str(cur)), parent=win)
+            if qty is None:
+                return
+            try:
+                q = int(str(qty).strip())
+                if q < 0:
+                    raise ValueError
+            except Exception:
+                messagebox.showerror("改库存", "数量要填 0 或正整数")
+                return
+            if not messagebox.askyesno("确认改库存",
+                                       "编码：%s\n货位：%s\n%s → %d 件\n\n"
+                                       "【这会真实修改快麦里的库存，不可撤销】\n继续？"
+                                       % (code, bin_code,
+                                          ("当前 %s 件" % cur) if cur is not None else "当前无记录", q),
+                                       parent=win):
+                return
+            out = self.stock_adjust(code, bin_code, q, who="桌面版·%s" % (os.environ.get("USERNAME") or "本机"))
+            if out.get("ok"):
+                messagebox.showinfo("改库存", "✓ 已改：%s @ %s → %d 件" % (code, bin_code, q), parent=win)
+                refresh()
+            else:
+                messagebox.showerror("改库存失败", str(out.get("msg") or "未知错误"), parent=win)
 
         def refresh(*_a):
             try:
@@ -3640,6 +3847,168 @@ class ScanApp:
         messagebox.showinfo("已导出", "%s\n共 %d 行" % (path, len(rows)))
 
     # ---------- 批次查询（按打印批次号） ----------
+    def on_adjust_log_dialog(self):
+        """改库存操作日志：时间 / 操作账号 / 编码 / 货位 / 原值→新值 / 结果。"""
+        win = tk.Toplevel(self.root)
+        win.title("改库存 · 操作日志")
+        win.geometry("1000x560")
+        top = tk.Frame(win)
+        top.pack(fill="x", padx=10, pady=8)
+        info = tk.StringVar(value="")
+        ttk.Label(top, textvariable=info, foreground="#0b5394").pack(side=tk.LEFT)
+        cols = ("ts", "who", "code", "bin", "old", "new", "ok", "msg")
+        heads = (("ts", "时间", 150), ("who", "操作账号", 160), ("code", "编码", 175),
+                 ("bin", "货位", 100), ("old", "原数量", 75), ("new", "新数量", 75),
+                 ("ok", "结果", 65), ("msg", "说明", 190))
+        box = tk.Frame(win)
+        box.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        tree = ttk.Treeview(box, columns=cols, show="headings", height=18)
+        for k, txt, w in heads:
+            tree.heading(k, text=txt)
+            tree.column(k, width=w,
+                        anchor="w" if k in ("who", "code", "msg") else "center")
+        vs = ttk.Scrollbar(box, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vs.set)
+        tree.pack(side=tk.LEFT, fill="both", expand=True)
+        vs.pack(side=tk.RIGHT, fill="y")
+        tree.tag_configure("bad", foreground="#c62828")
+
+        def refresh():
+            try:
+                logs = self.adjust_logs(500)
+            except Exception as e:
+                info.set("读取失败：%s" % str(e)[:80])
+                return
+            tree.delete(*tree.get_children())
+            for L in logs:
+                tree.insert("", tk.END,
+                            values=(L["ts"], L["who"], L["code"], L["bin"],
+                                    L["old"], L["new"], "成功" if L["ok"] else "失败", L["msg"]),
+                            tags=() if L["ok"] else ("bad",))
+            info.set("共 %d 条（倒序，最多显示最近 500 条）　时间 / 操作账号 / 内容 / 结果" % len(logs))
+
+        ttk.Button(top, text="刷新", command=refresh).pack(side=tk.RIGHT, padx=4)
+        refresh()
+        return win
+
+    def on_stocktake_dialog(self):
+        """（按用户要求）库存盘点只做在网页版，电脑版不再提供入口。"""
+        return None
+        win = tk.Toplevel(self.root)
+        win.title("库存盘点（按款号）")
+        win.geometry("1000x620")
+        top = tk.Frame(win)
+        top.pack(fill="x", padx=10, pady=8)
+        ttk.Label(top, text="款号：").pack(side=tk.LEFT)
+        kw = tk.StringVar(value="")
+        ent = ttk.Entry(top, textvariable=kw, width=16)
+        ent.pack(side=tk.LEFT)
+        info = tk.StringVar(value="输入款号（如 7107）后回车：列出该款所有颜色尺码的货位与在架数")
+
+        cols = ("code", "bin", "shelf", "pend")
+        tree = ttk.Treeview(win, columns=cols, show="headings", height=18)
+        for c, t, w in (("code", "编码", 250), ("bin", "货位", 130),
+                        ("shelf", "在架", 90), ("pend", "待发货（件）", 110)):
+            tree.heading(c, text=t)
+            tree.column(c, width=w, anchor="w" if c == "code" else "center")
+        vs = ttk.Scrollbar(win, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vs.set)
+        tree.tag_configure("zero", foreground="#c62828")
+
+        def do_query(*_a):
+            k = kw.get().strip().upper()
+            tree.delete(*tree.get_children())
+            if not k:
+                info.set("先输入款号")
+                return
+            idx, _st = self._web_index("any", 0)
+            hits = []
+            for code in (idx or {}):
+                if k in str(code).upper():
+                    sh, _c = dict_get_ci(self.shelf_map, code)
+                    sh = sh or {}
+                    e = (idx or {}).get(code) or {}
+                    pend = int(e.get("qty", 0) or 0)
+                    bins = sh.get("bins") or [["无在架货位", 0]]
+                    if not bins:
+                        bins = [["无在架货位", 0]]
+                    for b in bins:
+                        hits.append((str(code), str(b[0]), int(b[1] or 0), pend))
+            hits.sort(key=lambda x: (x[0], x[1]))
+            for code, bin_, shl, pend in hits:
+                tree.insert("", tk.END, values=(code, bin_, shl, pend),
+                            tags=("zero",) if shl == 0 else ())
+            info.set("款号 %s：%d 个编码 / %d 个货位行，在架合计 %d 件（红字 = 该货位在架 0）"
+                     % (k, len(set(h[0] for h in hits)), len(hits), sum(h[2] for h in hits)))
+
+        def sel_one():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showinfo("提示", "先在表格里选中一行（编码 + 货位）", parent=win)
+                return None, None, None
+            v = tree.item(sel[0], "values")
+            return str(v[0]), str(v[1]), v[2]
+
+        def who_am_i():
+            return "桌面版·%s" % (os.environ.get("USERNAME") or "本机")
+
+        def adjust_sel():
+            code, bin_, shl = sel_one()
+            if not code:
+                return
+            v = simpledialog.askstring("改库存", "%s @ %s 改成多少件？（当前 %s）" % (code, bin_, shl),
+                                       initialvalue=str(shl), parent=win)
+            if v is None:
+                return
+            try:
+                q = int(str(v).strip())
+                if q < 0:
+                    raise ValueError
+            except Exception:
+                messagebox.showerror("改库存", "数量要填 0 或正整数", parent=win)
+                return
+            if not messagebox.askyesno("确认改库存",
+                                       "%s @ %s\n%s → %d 件\n\n【真实修改快麦库存，不可撤销】继续？"
+                                       % (code, bin_, shl, q), parent=win):
+                return
+            out = self.stock_adjust(code, bin_, q, who=who_am_i())
+            if out.get("ok"):
+                messagebox.showinfo("改库存", "✓ 已改：%s @ %s → %d 件" % (code, bin_, q), parent=win)
+            else:
+                messagebox.showerror("改库存失败", str(out.get("msg") or "未知错误"), parent=win)
+            do_query()
+
+        def zero_sel():
+            code, bin_, shl = sel_one()
+            if not code:
+                return
+            if int(shl or 0) == 0:
+                messagebox.showinfo("盘0", "这个货位本来就是在架 0，不用盘", parent=win)
+                return
+            if not messagebox.askyesno("确认盘0",
+                                       "%s @ %s\n%s 件 → 0 件\n\n【真实修改快麦库存，不可撤销】"
+                                       % (code, bin_, shl), parent=win):
+                return
+            if not messagebox.askyesno("再确认一次",
+                                       "真的要盘0吗？\n%s @ %s → 0 件" % (code, bin_), parent=win):
+                return
+            out = self.stock_adjust(code, bin_, 0, who=who_am_i())
+            if out.get("ok"):
+                messagebox.showinfo("盘0", "✓ 已盘0：%s @ %s" % (code, bin_), parent=win)
+            else:
+                messagebox.showerror("盘0失败", str(out.get("msg") or "未知错误"), parent=win)
+            do_query()
+
+        ttk.Button(top, text="查询", command=do_query).pack(side=tk.LEFT, padx=6)
+        ttk.Button(top, text="改库存（选中）", command=adjust_sel).pack(side=tk.LEFT, padx=4)
+        ttk.Button(top, text="盘0（选中）", command=zero_sel).pack(side=tk.LEFT, padx=4)
+        ent.bind("<Return>", do_query)
+        ttk.Label(win, textvariable=info, foreground="#0b5394").pack(anchor="w", padx=12, pady=(0, 6))
+        tree.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        vs.pack(side=tk.RIGHT, fill="y", pady=(0, 10))
+        ent.focus()
+        return win
+
     def on_batch_dialog(self):
         """输入打印批次号 → 列出该批次订单 + 每单商品编码/货位，并按货位汇总。"""
         old = getattr(self, "_batch_win", None)
@@ -4286,6 +4655,7 @@ class ScanApp:
             % (one_piece, multi_piece, bin_txt, int(shelf or 0)))
         self.warn_label.config(text="需补货" if short else "")
         self.tree.insert("", 0, values=(now_gmt8(), code, orders_count, shelf, pending,
+                                        "桌面版·%s" % (os.environ.get("USERNAME") or "本机"),
                                         "绿(有货)" if ok else "红(无待发)"),
                          tags=("ok",) if ok else ("alert",))
         self.status_text.set("查询完成：%s（一单一件 %d / 一单多件 %d；在架 %d）%s"
@@ -4322,9 +4692,10 @@ class ScanApp:
         for item in self.tree.get_children():
             self.tree.delete(item)
         for r in reversed(fetch_all_scans()):
-            pid, st, bc, pq, sh, oc, light = r
+            pid, st, bc, pq, sh, oc, light = r[:7]
+            who = r[7] if len(r) > 7 else ""
             ok = (light == "绿")
-            self.tree.insert("", 0, values=(st, bc, pq or 0, sh or 0, oc or 0,
+            self.tree.insert("", 0, values=(st, bc, pq or 0, sh or 0, oc or 0, who or "（本机扫码）",
                                             "绿(有货)" if ok else "红(无待发)"),
                              tags=("ok",) if ok else ("alert",))
 

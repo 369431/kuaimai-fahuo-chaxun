@@ -3,21 +3,22 @@
 
    行为：一次扫码 = 一次查询，识别到就立刻停摄像头。
 
-   ── 识别速度（v8 起）──
-   1) 码制：v8 原本想「先只试一维码（CODE_128/39/93/ITF），3 秒没结果再自动加上
-      EAN/UPC/二维码/DataMatrix」——但 BrowserMultiFormatReader 根本没有 setHints() 方法
-      （实测 prototype 与实例上都是 undefined），那句调用抛异常又被 catch 吞掉，
-      结果永远只试 4 种一维码，二维码/EAN 类**完全识别不出**（v9 修复）。
-      现在：一开始就带上全部码制（= v8 之前能用的行为），3 秒后只额外开 TRY_HARDER。
-   2) 取消尝试间隔：原来每次尝试之间强制 delay 150ms，等于每秒最多试 6 次；
-      现在设为 0，等于每帧都试一次。
-   3) 对焦：加 focusMode=continuous（不支持的浏览器会忽略），减少"糊着扫不出"的时间。
+   ── v10 针对「经常识别不出」的改动 ──
+   1) 摄像头分辨率从 1280×720 提到 1920×1080（ideal，不支持的机型自动降级）：
+      一维码在画面里占的像素更多，远端/小码更容易解出来。
+   2) 新增「放大 2×」按钮：调摄像头 zoom（手机后摄多数支持），
+      不用凑近就能把小码放大到能识别；实测最有效的一招。
+   3) 新增「补光」按钮：暗仓/背光时打开闪光灯常亮（torch）。
+   4) TRY_HARDER 从 3 秒提前到 1.5 秒。
+   5) 提示语改成可操作建议（横向对准、10-20cm、放大/补光）。
+   按钮只在机型实际支持该能力时才出现（读 getCapabilities）。
 
-   ── 已踩过的坑 ──
+   ── 已踩过的坑（别改回去）──
    • 不能用 blur() 收键盘：会让页面滚动/重排，手机浏览器把滚出视口的 <video> 停止送帧，
      ZXing 拿不到新帧就永远识别不到。改用 inputmode="none"。
    • 解码回调可能早于 decodeFromConstraints 的 Promise 返回，那时 controls 还是 null，
      controls.stop() 停不掉循环 → 会每帧重复查询。先同步置位 handled 丢弃后续帧。
+   • BrowserMultiFormatReader 没有 setHints()（v8 踩过），要改码制只能改内部 reader.setHints()。
 */
 (function () {
   'use strict';
@@ -46,7 +47,8 @@
   var lastCode = '', lastAt = 0, DEDUP_MS = 2500;
   var unmuteTimer = null, statTimer = null;
   var attempts = 0, startedAt = 0, tier = 1, tierTimer = null;
-  var TIER2_AFTER = 3000;          // 3 秒还没有结果就加上重码制
+  var TIER2_AFTER = 1500;                  // 1.5 秒还没有结果就加 TRY_HARDER
+  var track = null, caps = {}, zoomOn = false, torchOn = false;
 
   // ---- 输入法抑制（不用 blur）----
   var codeEl = $('code');
@@ -86,6 +88,65 @@
     return h;
   }
 
+  // ---- 补光 / 放大（按机身能力显示）----
+  var extra = document.createElement('div');
+  extra.id = 'kmScanExtra';
+  extra.style.cssText = 'margin-top:5px;display:flex;gap:6px;flex-wrap:wrap';
+  box.parentNode.insertBefore(extra, bar.nextSibling);
+
+  function apply(key, val) {
+    if (!track || !track.applyConstraints) return false;
+    try {
+      var adv = {};
+      adv[key] = val;
+      track.applyConstraints({ advanced: [adv] });
+      return true;
+    } catch (e) { return false; }
+  }
+
+  function mkBtn(text, fn) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'ghost';
+    b.textContent = text;
+    b.onclick = fn;
+    extra.appendChild(b);
+    return b;
+  }
+
+  function refreshExtras() {
+    extra.innerHTML = '';
+    if (caps.zoom) {
+      mkBtn(zoomOn ? '放大 关' : '放大 2×', function () {
+        zoomOn = !zoomOn;
+        var z = zoomOn ? Math.min(2, (caps.zoom && caps.zoom.max) || 2) : ((caps.zoom && caps.zoom.min) || 1);
+        apply('zoom', z);
+        refreshExtras();
+        say(zoomOn ? '已放大（扫远处小码用），再点一次关掉。' : '已恢复原倍率。');
+      });
+    }
+    if (caps.torch) {
+      mkBtn(torchOn ? '补光 关' : '补光', function () {
+        torchOn = !torchOn;
+        var ok = apply('torch', torchOn);
+        refreshExtras();
+        say(ok ? (torchOn ? '已打开补光。' : '已关闭补光。') : '这台机器的摄像头不支持补光。',
+            ok ? '#444' : '#c62828');
+      });
+    }
+    if (!caps.zoom && !caps.torch) extra.style.display = 'none';
+    else extra.style.display = '';
+  }
+
+  function grabTrack() {
+    try {
+      var st = video.srcObject;
+      track = (st && st.getVideoTracks) ? st.getVideoTracks()[0] : null;
+    } catch (e) { track = null; }
+    try { caps = (track && track.getCapabilities) ? (track.getCapabilities() || {}) : {}; } catch (e) { caps = {}; }
+    refreshExtras();
+  }
+
   function teardown() {
     busy = false;
     var c = controls;
@@ -99,6 +160,8 @@
     try { if (typeof window.stopCam === 'function') window.stopCam(); } catch (e) { }
     if (statTimer) { clearInterval(statTimer); statTimer = null; }
     if (tierTimer) { clearTimeout(tierTimer); tierTimer = null; }
+    track = null; caps = {}; zoomOn = false; torchOn = false;
+    extra.innerHTML = '';
   }
 
   function stop(msg) {
@@ -143,16 +206,16 @@
 
     var reader = new ZX.BrowserMultiFormatReader(
       hintsFor(ONE_D.concat(MORE), false),
-      0                                   // 尝试间隔 0 = 每帧都试（原来传的是对象，类型不对）
+      0                                   // 尝试间隔 0 = 每帧都试
     );
 
     reader.decodeFromConstraints(
       {
         video: {
           facingMode: { ideal: 'environment' },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          advanced: [{ focusMode: 'continuous' }]     // 不支持会被忽略
+          width: { ideal: 1920 },         // v10：提高分辨率，小码/远码更易识别
+          height: { ideal: 1080 },
+          advanced: [{ focusMode: 'continuous' }]
         }
       },
       video,
@@ -161,27 +224,27 @@
       if (handled) { try { c.stop(); } catch (e) { } return; }
       controls = c;
       busy = true;
+      grabTrack();
 
-      // 3 秒还没结果 → 额外打开 TRY_HARDER（码制一开始就带全了，见文件头 v9 说明）
+      // 1.5 秒还没结果 → 额外打开 TRY_HARDER（码制一开始就带全了）
       tierTimer = setTimeout(function () {
         if (!busy || handled) return;
         tier = 2;
         try {
-          var inner = reader.reader;        // 内部真正的 MultiFormatReader
+          var inner = reader.reader;
           if (inner && typeof inner.setHints === 'function') {
             inner.setHints(hintsFor(ONE_D.concat(MORE), true));
           }
-        } catch (e) { /* 拿不到就算了，不影响解码 */ }
+        } catch (e) { }
       }, TIER2_AFTER);
 
-      // 每秒刷新一次进度，方便看"效率"
       statTimer = setInterval(function () {
         if (!busy || handled) return;
         var secs = (Date.now() - startedAt) / 1000;
         var rate = secs > 0.5 ? (attempts / secs).toFixed(0) : '-';
         say('扫描中… 已尝试 ' + attempts + ' 次 · 约 ' + rate + ' 次/秒'
           + (tier === 2 ? '（已开 TRY_HARDER）' : '')
-          + '\n把条码横向放进画面、离 10-20cm，扫到即停。');
+          + '\n扫不出时：❶ 条码横向、占画面一半 ❷ 前后挪到 10-20cm ❸ 点「放大 2×」或「补光」');
       }, 1000);
     }).catch(function (e) {
       busy = false;
@@ -192,5 +255,5 @@
 
   btn.onclick = start;
   if (stopBtn) stopBtn.onclick = function () { stop(); };
-  console.log('[km] ZXing 增强扫码已接管「摄像头扫码」按钮（一维码优先 · 无尝试间隔 · 扫到即停）');
+  console.log('[km] ZXing 增强扫码已接管「摄像头扫码」（v10：高分辨率 + 放大/补光 + 1.5s TRY_HARDER）');
 })();

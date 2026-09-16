@@ -119,9 +119,9 @@ WEB_INDEX_HTML = r"""<!DOCTYPE html>
     </div>
     <div class="toolbar nav4">
       <button id="btnCam" class="ghost">摄像头扫码</button>
-      <button id="btnPick" class="ghost">拣货</button>
       <button id="btnOrder" class="ghost">订单查询</button>
       <button id="btnStock" class="ghost">现货可发</button>
+      <button id="btnTake" class="ghost">库存盘点</button>
       <button id="btnSound" class="ghost">声音：开</button>
     </div>
     <div id="camBox" class="hidden" style="margin-top:8px">
@@ -143,15 +143,7 @@ WEB_INDEX_HTML = r"""<!DOCTYPE html>
     </div>
     <div class="muted" id="stat" style="margin-top:6px">—</div>
   </div>
-  <div class="card">
-    <div class="row" style="justify-content:space-between">
-      <b>扫码记录</b>
-      <span><button id="btnCsv" class="ghost">导出CSV</button><button id="btnClear" class="ghost">清空</button></span>
-    </div>
-    <div style="max-height:44vh; overflow:auto; margin-top:6px">
-      <table id="hist"><thead><tr><th>时间</th><th>商家编码</th><th>订单数</th><th>在架</th><th>件数</th><th>提示</th></tr></thead><tbody></tbody></table>
-    </div>
-  </div>
+  <!-- 扫码记录已移除：手机/网页扫码会直接写进电脑版「扫码记录」（带扫码账号） -->
 </div>
 <script>
 const $ = (id) => document.getElementById(id);
@@ -172,7 +164,8 @@ function beep(ok){
   } catch(e){}
 }
 function renderHistory(){
-  const tb=$('hist').querySelector('tbody'); tb.innerHTML='';
+  const _h=$('hist'); if(!_h) return;
+  const tb=_h.querySelector('tbody'); tb.innerHTML='';
   for (const r of hist.slice().reverse()) {
     const tr=document.createElement('tr');
     tr.innerHTML=`<td>${r.t}</td><td>${r.code}</td><td>${r.orders}</td><td>${r.shelf}</td><td>${r.pieces}</td><td>${r.hint||''}</td>`;
@@ -238,8 +231,9 @@ $('btnApply').onclick=()=>{
   else { $('rmain').textContent='筛选条件已保存，下次扫码按此条件统计'; }
 };
 $('btnSound').onclick=()=>{ SOUND=!SOUND; $('btnSound').textContent='声音：'+(SOUND?'开':'关'); };
-$('btnClear').onclick=()=>{ if(confirm('清空本机扫码记录？')){ hist=[]; saveHist(); renderHistory(); } };
-$('btnCsv').onclick=()=>{
+const _btnClear=$('btnClear'), _btnCsv=$('btnCsv');   // 扫码记录卡已移除，保留兼容判断
+if(_btnClear) _btnClear.onclick=()=>{ if(confirm('清空本机扫码记录？')){ hist=[]; saveHist(); renderHistory(); } };
+if(_btnCsv) _btnCsv.onclick=()=>{
   const head='时间,商家编码,待发货订单数,货架在架数,件数,提示\n';
   const body=hist.map(r=>[r.t,r.code,r.orders,r.shelf,r.pieces,(r.hint||'')].join(',')).join('\n');
   const blob=new Blob(['\ufeff'+head+body],{type:'text/csv;charset=utf-8'});
@@ -257,7 +251,9 @@ async function startCam(){
 function stopCam(){ clearInterval(scanTimer); if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; } $('camBox').classList.add('hidden'); }
 $('btnCam').onclick=startCam; $('btnCamStop').onclick=stopCam;
 /* ---------------- 拣货：独立页面 /pick ---------------- */
-$('btnPick').onclick = () => {
+$('btnTake').onclick = () => { location.href = '/stocktake'; };   // 库存盘点：独立页面
+const _btnPick = $('btnPick');             // 拣货按钮已移除；处理器保留但不再绑定
+if(_btnPick) _btnPick.onclick = () => {
   const sid = (function(){ try { return localStorage.getItem('km_sid') || ''; } catch(e){ return ''; } })();
   const q = {k:K}; if(sid) q.sid = sid;
   location.href = '/pick?' + new URLSearchParams(q).toString();
@@ -272,16 +268,7 @@ $('btnStock').onclick = () => {
   const sid = (function(){ try { return localStorage.getItem('km_sid') || ''; } catch(e){ return ''; } })();
   location.href = '/stock' + (sid ? ('?sid=' + encodeURIComponent(sid)) : '');
 };
-/* 有未结束的批次时，按钮上直接显示可以继续 */
-fetch('/api/pick/current?' + new URLSearchParams({k:K}).toString())
-  .then(r => r.json())
-  .then(d => {
-    if(d && d.running){
-      const b = $('btnPick');
-      b.textContent = '拣货（继续 ' + d.batch + '）';
-      b.classList.remove('ghost');
-    }
-  }).catch(() => {});
+/* （拣货已下线，不再自动查未结束批次） */
 
 /* 会话：登录后从 URL 取一次 token，之后自动附加到所有请求；失效则回登录页 */
 (function(){
@@ -937,6 +924,171 @@ $('no').addEventListener('keydown', function(e){ if(e.key === 'Enter'){ e.preven
 
 
 # ====================== 网页端：现货可发（在架 / 待发货 / 可发数量） ======================
+STOCKTAKE_HTML = r"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>库存盘点 · 快麦扫码</title>
+<style>
+  :root { --bg:#f2f2f7; --card:#ffffff; --sub:#6b7280; --line:rgba(60,60,67,.10); }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; padding:10px 10px 40px; background:var(--bg); color:#111;
+         font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif; }
+  header { display:flex; align-items:baseline; gap:8px; padding:2px 3px 8px; }
+  header b { font-size:17px; }
+  .top { position:sticky; top:0; z-index:9; background:rgba(255,255,255,.94);
+         backdrop-filter:saturate(180%) blur(14px); border-radius:14px; padding:10px;
+         display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  input[type=text] { flex:1 1 130px; min-width:110px; padding:11px 12px; font-size:17px;
+         border:1px solid #d7dbe0; border-radius:10px; }
+  button { padding:11px 14px; font-size:15px; font-weight:700; border:0; border-radius:10px;
+           background:#0b5394; color:#fff; }
+  button.g { background:#e8eef5; color:#0b5394; }
+  .sum { font-size:13px; color:var(--sub); margin:9px 3px; }
+  .flash { font-size:13px; color:#1B7F35; font-weight:700; margin:0 3px 6px; min-height:18px; }
+  .card { background:var(--card); border-radius:14px; padding:4px 12px; margin-top:8px; }
+  .row { display:flex; gap:8px; padding:10px 0; border-top:1px solid var(--line); align-items:center; }
+  .row:first-child { border-top:0; }
+  .main { flex:1; min-width:0; }
+  .l1 { display:flex; align-items:center; gap:6px; }
+  .code { font-size:16px; font-weight:700; flex:1; min-width:0; word-break:break-all; }
+  .num { font-size:17px; font-weight:800; color:#1B7F35; white-space:nowrap; }
+  .num.z { color:#c62828; }
+  .sub { font-size:12.5px; color:var(--sub); margin-top:2px; }
+  .sub b { color:#0b5394; }
+  .btns { display:flex; flex-direction:column; gap:6px; flex:0 0 auto; }
+  .sbtn { padding:9px 13px; font-size:13.5px; border-radius:9px; background:#e8eef5;
+          color:#0b5394; font-weight:700; white-space:nowrap; }
+  .sbtn.zero { background:#fde8e8; color:#b00020; }
+  .muted { color:var(--sub); font-size:14px; }
+</style>
+</head>
+<body>
+<header><b>库存盘点</b><span class="muted">按款号看所有颜色尺码的在架数</span></header>
+<div class="top">
+  <input id="kw" type="text" inputmode="search" autocomplete="off" placeholder="款号，如 7107">
+  <button id="go">查询</button>
+  <button class="g" id="home">返回</button>
+</div>
+<div class="sum" id="sum">输入款号后回车：列出该款所有颜色尺码的货位与在架数，可直接改库存 / 盘0</div>
+<div class="flash" id="flash"></div>
+<div id="list"></div>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const SID = (function(){
+  try { const q = new URLSearchParams(location.search).get('sid'); if(q) localStorage.setItem('km_sid', q);
+        return localStorage.getItem('km_sid') || ''; } catch(e){ return ''; }
+})();
+const K = new URLSearchParams(location.search).get('k') || localStorage.getItem('km_key') || '';
+if (K) localStorage.setItem('km_key', K);
+const KQ = K ? ('&k=' + encodeURIComponent(K)) : '';
+function withSid(u){ return SID ? (u + (u.indexOf('?') >= 0 ? '&' : '?') + 'sid=' + encodeURIComponent(SID) + KQ) : u; }
+function flash(m){ const el=$('flash'); el.textContent=m||'';
+  if(m) setTimeout(()=>{ if(el.textContent===m) el.textContent=''; },5000); }
+/* 尺码排序：S < M < L < XL < 2XL < 3XL …；认不出尺码的排最后 */
+function sizeRank(code){
+  const t = String(code||'').toUpperCase().replace(/[\s\-]/g,'');
+  const m = t.match(/(XXXL|XXL|XS|XL|[2-9]XL|S|M|L|[0-9]{2,3})$/);
+  if(!m) return 900;
+  const tok = m[1];
+  const map = {XS:5, S:10, M:20, L:30, XL:40, XXL:50, XXXL:60};
+  if(map[tok] != null) return map[tok];
+  const d = tok.match(/^([2-9])XL$/);
+  if(d) return 30 + parseInt(d[1],10) * 10;          // 2XL=50, 3XL=60 …
+  if(/^[0-9]{2,3}$/.test(tok)) return 200 + parseInt(tok,10);   // 数字尺码
+  return 900;
+}
+let ROWS = [];
+function load(){
+  const kw = $('kw').value.trim();
+  if(!kw){ $('sum').textContent = '先输入款号（如 7107）'; return; }
+  $('sum').textContent = '正在查 ' + kw + ' …';
+  fetch(withSid('/api/stock?only=all&sort=code&kw=' + encodeURIComponent(kw)), {cache:'no-store'})
+    .then(r => r.json())
+    .then(d => {
+      const all = d.rows || [];
+      const K0 = kw.toUpperCase();
+      // 去掉裸款号本身（如 7107）那一行；其余按尺码 S/M/L/XL/2XL… 排序，同尺码再按编码
+      ROWS = all.filter(r => !(String(r.c).toUpperCase() === K0 && String(r.c).indexOf('-') < 0))
+                .sort((a, b) => (sizeRank(a.c) - sizeRank(b.c))
+                                || String(a.c).localeCompare(String(b.c)));
+      $('sum').textContent = '款号 ' + kw + '：' + ROWS.length + ' 个规格 / '
+        + ROWS.reduce((n,r)=>n+((r.bl||[]).length||1),0) + ' 个货位行（已按尺码排序）';
+      render();
+    })
+    .catch(e => { $('sum').textContent = '查询失败：' + e.message; });
+}
+function render(){
+  const box = $('list');
+  if(!ROWS.length){ box.innerHTML = '<div class="card"><div class="muted" style="padding:12px 0">'
+    + '这个款号没查到编码（试试只输数字前缀，如 7107）</div></div>'; return; }
+  const lines = [];
+  ROWS.forEach(function(r){
+    const bins = (r.bl && r.bl.length) ? r.bl : [['无在架货位', 0]];
+    bins.forEach(function(b, i){
+      const sh = Number(b[1] || 0);
+      lines.push('<div class="row"><div class="main">'
+        + '<div class="l1"><span class="code">' + (i === 0 ? esc(r.c) : '') + '</span>'
+        + '<span class="num' + (sh ? '' : ' z') + '">' + sh + '</span></div>'
+        + '<div class="sub">货位 <b>' + esc(b[0]) + '</b> · 在架 ' + sh + ' 件'
+        + (r.p ? (' · 待发 ' + r.p + ' 件') : '') + '</div></div>'
+        + '<div class="btns">'
+        + '<button class="sbtn adj" data-c="' + esc(r.c) + '" data-b="' + esc(b[0]) + '" data-n="' + sh + '">改库存</button>'
+        + '<button class="sbtn zero" data-c="' + esc(r.c) + '" data-b="' + esc(b[0]) + '" data-n="' + sh + '">盘0</button>'
+        + '</div></div>');
+    });
+  });
+  box.innerHTML = '<div class="card">' + lines.join('') + '</div>';
+  bind();
+}
+function post(code, bin, qty){
+  return fetch(withSid('/api/stock/adjust'), {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({code: code, bin: bin, qty: qty, confirm: 1})})
+    .then(r => r.json());
+}
+function bind(){
+  document.querySelectorAll('.sbtn.adj').forEach(function(b){
+    b.onclick = function(){
+      const code = b.dataset.c, bin = b.dataset.b, cur = b.dataset.n;
+      const v = prompt(code + ' @ ' + bin + '\n改成多少件？（当前 ' + cur + ' 件）', cur);
+      if(v === null) return;
+      const q = parseInt(v, 10);
+      if(isNaN(q) || q < 0){ alert('数量要填 0 或正整数'); return; }
+      if(!confirm('确认改库存？\n\n' + code + '\n货位 ' + bin + '：' + cur + ' → ' + q + ' 件\n\n【真实修改快麦库存，不可撤销】')) return;
+      flash('正在改库存…');
+      post(code, bin, q).then(function(j){
+        alert((j.ok ? '✓ 已改：' : '✗ 失败：') + (j.msg || ''));
+        flash(j.ok ? ('已改：' + code + ' @ ' + bin + ' → ' + q) : ('失败：' + (j.msg || '')));
+        if(j.ok) load();
+      }).catch(e => alert('网络错误：' + e.message));
+    };
+  });
+  document.querySelectorAll('.sbtn.zero').forEach(function(b){
+    b.onclick = function(){
+      const code = b.dataset.c, bin = b.dataset.b, cur = Number(b.dataset.n || 0);
+      if(cur === 0){ alert('这个货位本来就是在架 0，不用盘'); return; }
+      if(!confirm('确认盘0？\n\n' + code + '\n货位 ' + bin + '：' + cur + ' → 0 件\n\n【真实修改快麦库存，不可撤销】')) return;
+      if(!confirm('再确认一次：真的要把 ' + code + ' @ ' + bin + ' 盘成 0 吗？')) return;
+      flash('正在盘0…');
+      post(code, bin, 0).then(function(j){
+        alert((j.ok ? '✓ 已盘0：' : '✗ 失败：') + (j.msg || ''));
+        flash(j.ok ? ('已盘0：' + code + ' @ ' + bin) : ('失败：' + (j.msg || '')));
+        if(j.ok) load();
+      }).catch(e => alert('网络错误：' + e.message));
+    };
+  });
+}
+$('go').onclick = load;
+$('kw').addEventListener('keydown', function(e){ if(e.key === 'Enter'){ e.preventDefault(); load(); } });
+$('home').onclick = function(){ location.href = '/'; };
+if(!SID){ location.href = '/login'; } else { $('kw').focus(); }
+</script>
+</body></html>
+"""
+
+
 STOCK_HTML = r"""<!doctype html>
 <html lang="zh-CN"><head>
 <meta charset="utf-8">
@@ -966,23 +1118,32 @@ STOCK_HTML = r"""<!doctype html>
                 background:var(--green,#34C759); color:#fff; }
   .muted { font-size:12.5px; color:var(--sub); line-height:1.7; margin-top:8px; }
   .row { display:flex; align-items:center; gap:8px; padding:9px 0; border-top:1px solid rgba(60,60,67,.10); }
+  .main { flex:1; min-width:0; }
+  .l1 { display:flex; align-items:center; gap:6px; }
+  .l1 .code { flex:1; min-width:0; }
+  .tag { background:#FF3B30; color:#fff; border-radius:6px; padding:2px 7px; font-size:12px;
+         font-weight:800; white-space:nowrap; flex:0 0 auto; }
+  .btns { display:flex; flex-direction:column; gap:6px; flex:0 0 auto; }
   .row:first-child { border-top:0; }
-  .code { font-size:15.5px; font-weight:700; flex:1; min-width:0; word-break:break-all; }
+  .code { font-size:16px; font-weight:700; word-break:break-all; }
   .num { font-size:12.5px; color:var(--sub); white-space:nowrap; }
   .num b { font-size:15px; color:var(--ink); }
-  .free { font-size:15px; font-weight:800; min-width:64px; text-align:right; white-space:nowrap; }
+  .free { font-size:17px; font-weight:800; min-width:50px; text-align:right; white-space:nowrap;
+          flex:0 0 auto; }
   .free.pos { color:#1B7F35; }
   .free.neg { color:#c62828; }
-  .sub { display:block; font-size:12px; color:var(--sub); margin-top:2px; line-height:1.6; }
+  .sub { display:block; font-size:12.5px; color:var(--sub); margin-top:2px; line-height:1.55; }
   .legend { font-size:12px; color:var(--sub); line-height:1.7; }
   .rec { margin-top:8px; padding:9px 12px; border-radius:12px; background:rgba(52,199,89,.14);
          color:#1B7F35; font-size:14.5px; font-weight:700; line-height:1.5; }
   .rec.bad { background:rgba(255,59,48,.13); color:#c62828; }
   .calc { font-size:12.5px; color:var(--sub); margin-top:3px; line-height:1.7; }
   .calc b { color:var(--ink); }
-  .sbtn { margin-left:6px; padding:6px 10px; font-size:12.5px; border:0; border-radius:9px;
+  .sbtn { margin:0; padding:9px 13px; font-size:13.5px; border:0; border-radius:9px;
           background:#e8eef5; color:#0b5394; font-weight:700; white-space:nowrap; }
   .sbtn.undo { background:#fdecec; color:#c62828; }
+  .sbtn.adj { background:#fff4e5; color:#b26a00; }
+  .sbtn.zero { background:#fde8e8; color:#b00020; }
   .chk { font-size:13px; display:flex; align-items:center; gap:5px; flex:1 1 100%; color:var(--sub); }
   .row.sent { opacity:.55; }
   .code.ug { color:#FF3B30; }
@@ -1089,22 +1250,23 @@ function render(){
   const head = vis.slice(0, 800);
   box.innerHTML = head.map(function(r){
     const cls = r.f >= 0 ? 'pos' : 'neg';
-    return '<div class="row' + (r.sent ? ' sent' : '') + '"><span class="code'
-      + ((r.p1 || r.up || r.uo) ? ' ug' : '') + '">' + esc(r.c)
-      + ((r.p1) ? '<span style="color:#fff;background:#FF3B30;border-radius:6px;padding:1px 6px;font-size:11.5px;font-weight:800">加急·有货</span>' : '')
-      + '<span class="sub"><b style="color:#0b5394">货位 ' + esc(r.b || '无在架货位') + '</b>　在架 '
-      + r.s + ' 件　一单一件 ' + r.n + ' 单（' + r.n + ' 件）　一单多件 '
-      + r.m + ' 单（' + (r.mp == null ? 0 : r.mp) + ' 件）'
-      + ((r.up || r.uo) ? ('　<span style="color:#c62828;font-weight:800">加急 ' + (r.uo || 0) + ' 单/' + (r.up || 0) + ' 件</span>') : '')
-      + (r.l ? ('　锁定 ' + r.l) : '') + '</span>'
-      + '<span class="calc">可发 = min(在架 ' + r.s + '，待发 ' + r.p + ') − 多件 ' + (r.mp == null ? 0 : r.mp)
-      + ' = <b>' + r.f + '</b> 件</span></span>'
-      + '<span class="free ' + cls + '">' + r.f + '</span>'
+    return '<div class="row' + (r.sent ? ' sent' : '') + '">'
+      + '<div class="main"><div class="l1"><span class="code'
+      + ((r.p1 || r.up || r.uo) ? ' ug' : '') + '">' + esc(r.c) + '</span>'
+      + ((r.p1) ? '<span class="tag">加急·有货</span>' : '')
+      + '<span class="free ' + cls + '" title="可发 = min(在架, 待发) − 多件">' + r.f + '</span></div>'
+      + '<div class="sub">货位 <b style="color:#0b5394">' + esc(r.b || '无在架货位') + '</b>'
+      + ' · 在架 ' + r.s + ' · 一件 ' + r.n + ' · 多件 ' + r.m + '(' + (r.mp == null ? 0 : r.mp) + ')'
+      + ((r.up || r.uo) ? (' · <span style="color:#c62828;font-weight:800">加急 ' + (r.uo || 0) + '/' + (r.up || 0) + '</span>') : '')
+      + (r.l ? (' · 锁定 ' + r.l) : '') + '</div></div>'
+      + '<div class="btns">'
       + '<button class="sbtn' + (r.sent ? ' undo' : '') + '" data-c="' + esc(r.c) + '">'
-      + (r.sent ? '撤回' : '已发') + '</button></div>';
+      + (r.sent ? '撤回' : '已发') + '</button>'
+      + '<button class="sbtn adj" data-c="' + esc(r.c) + '">改库存</button>'
+      + '<button class="sbtn zero" data-c="' + esc(r.c) + '">盘0</button></div></div>';
   }).join('') + (vis.length > head.length
       ? ('<div class="muted">只显示前 ' + head.length + ' 条，其余 ' + (vis.length - head.length) + ' 条请用「导出 Excel」或加关键词。</div>') : '');
-  box.querySelectorAll('.sbtn').forEach(function(b){
+  box.querySelectorAll('.sbtn:not(.adj)').forEach(function(b){
     b.onclick = function(){
       const code = b.dataset.c, undo = b.classList.contains('undo');
       // 先本地生效（立刻隐藏/恢复），再同步到服务端
@@ -1121,6 +1283,77 @@ function render(){
           flash((undo ? '已撤回：' : '已标记已发：') + code + '（本地先隐藏，拉到新数据后自动清空）');
         })
         .catch(function(){ load(); flash('同步失败，已刷新列表'); });
+    };
+  });
+  /* 「改库存」：按货位改数量（调盘点接口，二次确认后真实修改快麦库存） */
+  box.querySelectorAll('.sbtn.adj').forEach(function(b){
+    b.onclick = function(){
+      const code = b.dataset.c;
+      const row = ROWS.filter(function(r){ return r.c === code; })[0] || {};
+      const bins = row.bl || [];
+      let bin = bins.length ? String(bins[0][0]) : (prompt('这个编码没有货位记录，请填货位号：') || '');
+      if(!bin) return;
+      if(bins.length > 1){
+        const pick = prompt('有多个货位，要改哪个？（货位=当前数量）',
+                            bins.map(function(x){ return x[0] + '=' + x[1]; }).join('  '));
+        if(pick === null) return;
+        bin = (pick || '').trim() || bin;
+      }
+      let cur = null;
+      bins.forEach(function(x){ if(String(x[0]).toUpperCase() === bin.toUpperCase()) cur = x[1]; });
+      const oldTxt = (cur === null) ? '无记录' : (cur + ' 件');
+      const v = prompt('把 ' + code + ' 货位 ' + bin + ' 改成多少件？（当前 ' + oldTxt + '）',
+                       cur === null ? '0' : String(cur));
+      if(v === null) return;
+      const qty = parseInt(v, 10);
+      if(isNaN(qty) || qty < 0){ alert('数量要填 0 或正整数'); return; }
+      if(!confirm('确认改库存？\n\n编码：' + code + '\n货位：' + bin + '\n' + oldTxt + ' → ' + qty
+                  + ' 件\n\n【这会真实修改快麦里的库存，不可撤销】')) return;
+      flash('正在改库存…');
+      fetch(withSid('/api/stock/adjust'), {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({code: code, bin: bin, qty: qty, confirm: 1})})
+        .then(function(r){ return r.json(); })
+        .then(function(j){
+          alert((j.ok ? '✓ 已改：' : '✗ 失败：') + (j.msg || '')
+                + (j.ok ? ('\n' + code + ' @ ' + bin + ' → ' + j.new + ' 件') : ''));
+          flash(j.ok ? ('已改库存：' + code + ' @ ' + bin + ' → ' + j.new + ' 件')
+                     : ('改库存失败：' + (j.msg || '')));
+          if(j.ok) load();
+        })
+        .catch(function(e){ alert('网络错误：' + e.message); });
+    };
+  });
+  /* 「盘0」：两道确认后把该货位盘成 0（避免误操作） */
+  box.querySelectorAll('.sbtn.zero').forEach(function(b){
+    b.onclick = function(){
+      const code = b.dataset.c;
+      const row = ROWS.filter(function(r){ return r.c === code; })[0] || {};
+      const bins = (row.bl || []).filter(function(x){ return Number(x[1]) > 0; });
+      if(!bins.length){ alert('这个编码当前没有在架数量，无需盘0'); return; }
+      let bin = String(bins[0][0]), cur = bins[0][1];
+      if(bins.length > 1){
+        const pick = prompt('有多个货位有货，要盘哪个为 0？（货位=当前数量）',
+                            bins.map(function(x){ return x[0] + '=' + x[1]; }).join('  '));
+        if(pick === null) return;
+        bin = (pick || '').trim() || bin;
+        let found = null;
+        bins.forEach(function(x){ if(String(x[0]).toUpperCase() === bin.toUpperCase()) found = x[1]; });
+        if(found !== null) cur = found;
+      }
+      if(!confirm('确认盘0？\n\n编码：' + code + '\n货位：' + bin + '\n' + cur + ' 件 → 0 件\n\n'
+                  + '【这会真实修改快麦库存，不可撤销】')) return;
+      if(!confirm('再确认一次：真的要把 ' + code + ' @ ' + bin + ' 盘成 0 吗？')) return;
+      flash('正在盘0…');
+      fetch(withSid('/api/stock/adjust'), {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({code: code, bin: bin, qty: 0, confirm: 1})})
+        .then(function(r){ return r.json(); })
+        .then(function(j){
+          alert((j.ok ? '✓ 已盘0：' : '✗ 失败：') + (j.msg || '')
+                + (j.ok ? ('\n' + code + ' @ ' + bin + ' → 0 件') : ''));
+          flash(j.ok ? ('已盘0：' + code + ' @ ' + bin) : ('盘0失败：' + (j.msg || '')));
+          if(j.ok) load();
+        })
+        .catch(function(e){ alert('网络错误：' + e.message); });
     };
   });
 }
