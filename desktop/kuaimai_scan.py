@@ -694,16 +694,32 @@ def insert_canprint(code, qty, who="", bins="", pending_qty=0, shelf_qty=0):
 
 
 def set_printed(rec_id, flag):
-    """把某条扫码日志标成「已打」（1）/ 未打（0）。"""
-    conn = get_conn()
-    try:
-        conn.execute("ALTER TABLE scan_record ADD COLUMN printed INTEGER DEFAULT 0")
-        conn.commit()
-    except Exception:
-        pass
-    conn.execute("UPDATE scan_record SET printed=? WHERE id=?", (1 if flag else 0, int(rec_id)))
-    conn.commit()
-    conn.close()
+    """把某条扫码日志标成「已打」（1）/ 未打（0）。返回是否写成功。"""
+    want = 1 if flag else 0
+    for _try in range(4):
+        conn = None
+        try:
+            conn = get_conn()
+            try:
+                conn.execute("ALTER TABLE scan_record ADD COLUMN printed INTEGER DEFAULT 0")
+                conn.commit()
+            except Exception:
+                pass
+            conn.execute("UPDATE scan_record SET printed=? WHERE id=?", (want, int(rec_id)))
+            conn.commit()
+            got = conn.execute("SELECT COALESCE(printed,0) FROM scan_record WHERE id=?",
+                               (int(rec_id),)).fetchone()
+            conn.close()
+            if got is not None and int(got[0] or 0) == want:
+                return True
+        except Exception:
+            try:
+                if conn:
+                    conn.close()
+            except Exception:
+                pass
+            time.sleep(0.25)
+    return False
 
 
 def fetch_all_scans():
@@ -3343,6 +3359,7 @@ class ScanApp:
         self.tree.tag_configure("alert", background=self.RED_BG)
         self.tree.tag_configure("printed", background="#FFF6CC", foreground="#B8860B")   # 已打：黄色
         self.tree.bind("<Button-1>", self._on_record_click)      # 点「已打」那一格可切换
+        self.tree.bind("<Double-Button-1>", self._on_record_dblclick)   # 双击整行也能切换
 
         self.scan_entry.focus()
         self._log_count = -1
@@ -4672,7 +4689,14 @@ class ScanApp:
             self._scan_after = None
         code = self.scan_text.get().strip()
         if not code:
-            self.status_text.set("请输入/扫入商家编码")
+            # 输入框空着点「查询」：清空上一次的扫码结果
+            try:
+                self.result.config(text="")
+                self.result_detail.config(text="")
+                self.warn_label.config(text="")
+            except Exception:
+                pass
+            self.status_text.set("已清空上次结果（扫入/输入商家编码后回车查询）")
             return
         if self._scanning:
             return
@@ -4806,34 +4830,58 @@ class ScanApp:
         except Exception:
             n = None
         if (force or (n is not None and n != getattr(self, "_log_count", -1))):
-            try:
-                self.reload_records()
-                if n is not None:
-                    self._log_count = n
-            except Exception:
-                pass
+            if (not force) and (time.time() - getattr(self, "_touch_ts", 0)) < 3:
+                pass                      # 刚点过「已打」，先别重建行
+            else:
+                try:
+                    self.reload_records()
+                    if n is not None:
+                        self._log_count = n
+                except Exception:
+                    pass
         try:
             self.root.after(2000, self._poll_records)
         except Exception:
             pass
 
     def _on_record_click(self, event):
-        """点「已打」那一格 → 切换已打（已打的整行变黄）。"""
+        """点「已打」那一格 → 切换已打（已打的整行变黄）；双击整行也可以。"""
         try:
             if self.tree.identify_column(event.x) != "#8":
                 return
             row = self.tree.identify_row(event.y)
-            if not row:
-                return
-            try:
-                rid = int(row)                 # 行 iid = 记录 id；新扫的临时行（未入库）忽略
-            except Exception:
-                return
+            if row:
+                self._toggle_printed(row)
+        except Exception:
+            pass
+
+    def _on_record_dblclick(self, event):
+        try:
+            row = self.tree.identify_row(event.y)
+            if row:
+                self._toggle_printed(row)
+        except Exception:
+            pass
+
+    def _toggle_printed(self, row):
+        """先改界面再写库（写成才保留）；因此点击永远不会"没反应"。"""
+        try:
+            rid = int(row)                 # 行 iid = 记录 id；新扫的临时行（未入库）忽略
+        except Exception:
+            self.status_text.set("这条是刚扫的新记录，稍后自动刷新后再点")
+            return
+        try:
             vals = list(self.tree.item(row, "values"))
-            flag = 1 if (len(vals) > 7 and "已打" in str(vals[7])) else 0
-            newf = 0 if flag else 1
-            set_printed(rid, newf)
+            if len(vals) < 8:
+                return
+            newf = 0 if "已打" in str(vals[7]) else 1
+            self._touch_ts = time.time()   # 3 秒内不让定时刷新重建行
             self._apply_printed(row, newf)
+            if set_printed(rid, newf):
+                self.status_text.set("已标记：%s" % ("已打" if newf else "未打"))
+            else:
+                self._apply_printed(row, 0 if newf else 1)     # 写失败回滚
+                self.status_text.set("「已打」没能写入数据库，请再点一次")
         except Exception:
             pass
 

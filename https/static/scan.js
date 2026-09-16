@@ -3,15 +3,13 @@
 
    行为：一次扫码 = 一次查询，识别到就立刻停摄像头。
 
-   ── v10 针对「经常识别不出」的改动 ──
-   1) 摄像头分辨率从 1280×720 提到 1920×1080（ideal，不支持的机型自动降级）：
-      一维码在画面里占的像素更多，远端/小码更容易解出来。
-   2) 新增「放大 2×」按钮：调摄像头 zoom（手机后摄多数支持），
-      不用凑近就能把小码放大到能识别；实测最有效的一招。
-   3) 新增「补光」按钮：暗仓/背光时打开闪光灯常亮（torch）。
-   4) TRY_HARDER 从 3 秒提前到 1.5 秒。
-   5) 提示语改成可操作建议（横向对准、10-20cm、放大/补光）。
-   按钮只在机型实际支持该能力时才出现（读 getCapabilities）。
+   ── v11（回退速度／修黑屏，保留放大补光）──
+   1) 分辨率回退到 1280×720：v10 提到 1920×1080 后每帧像素多一倍，实测**解码变慢**，
+      识别率也没有提升（条码大字反而更吃 CPU）。慢/不准 → 先回这个值。
+   2) TRY_HARDER 回退到 3 秒（v10 提前到 1.5 秒反而更吃 CPU、拖慢前 1.5 秒的识别）。
+   3) 保留 v10 的「放大 2×」「补光」按钮（纯增益，按机身能力显示）。
+   4) 修「先黑屏一下再撑开」：注入 CSS 给 #camBox/#video 预留固定高度，
+      摄像头画面出现时布局不再跳一下，黑屏时间也短了。
 
    ── 已踩过的坑（别改回去）──
    • 不能用 blur() 收键盘：会让页面滚动/重排，手机浏览器把滚出视口的 <video> 停止送帧，
@@ -19,6 +17,7 @@
    • 解码回调可能早于 decodeFromConstraints 的 Promise 返回，那时 controls 还是 null，
      controls.stop() 停不掉循环 → 会每帧重复查询。先同步置位 handled 丢弃后续帧。
    • BrowserMultiFormatReader 没有 setHints()（v8 踩过），要改码制只能改内部 reader.setHints()。
+   • 分辨率不是越高越好：1280×720 → 1920×1080 实测更慢且更不准（v11 回退）。
 */
 (function () {
   'use strict';
@@ -26,6 +25,15 @@
   var $ = function (id) { return document.getElementById(id); };
   var btn = $('btnCam'), stopBtn = $('btnCamStop'), video = $('video'), box = $('camBox');
   if (!btn || !video || !box) return;
+
+  // 预留摄像头区域高度：避免画面出现时布局跳一下（"先黑屏再撑开"）
+  try {
+    var st = document.createElement('style');
+    st.textContent = '#camBox{min-height:240px;background:#000;border-radius:12px;overflow:hidden}'
+      + '#camBox.hidden{min-height:0;background:transparent}'
+      + '#video{display:block;width:100%;min-height:240px;background:#000}';
+    document.head.appendChild(st);
+  } catch (e) { }
 
   // ---- 状态条 ----
   var bar = document.createElement('div');
@@ -47,7 +55,7 @@
   var lastCode = '', lastAt = 0, DEDUP_MS = 2500;
   var unmuteTimer = null, statTimer = null;
   var attempts = 0, startedAt = 0, tier = 1, tierTimer = null;
-  var TIER2_AFTER = 1500;                  // 1.5 秒还没有结果就加 TRY_HARDER
+  var TIER2_AFTER = 3000;                  // 3 秒还没有结果才加 TRY_HARDER
   var track = null, caps = {}, zoomOn = false, torchOn = false;
 
   // ---- 输入法抑制（不用 blur）----
@@ -72,7 +80,7 @@
     codeEl.addEventListener('touchstart', unmuteKeyboard, true);
   }
 
-  // ---- 码制分级 ----
+  // ---- 码制 ----
   var ONE_D = [
     ZX.BarcodeFormat.CODE_128, ZX.BarcodeFormat.CODE_39,
     ZX.BarcodeFormat.CODE_93, ZX.BarcodeFormat.ITF
@@ -88,7 +96,7 @@
     return h;
   }
 
-  // ---- 补光 / 放大（按机身能力显示）----
+  // ---- 补光 / 放大 ----
   var extra = document.createElement('div');
   extra.id = 'kmScanExtra';
   extra.style.cssText = 'margin-top:5px;display:flex;gap:6px;flex-wrap:wrap';
@@ -134,14 +142,13 @@
             ok ? '#444' : '#c62828');
       });
     }
-    if (!caps.zoom && !caps.torch) extra.style.display = 'none';
-    else extra.style.display = '';
+    extra.style.display = (caps.zoom || caps.torch) ? '' : 'none';
   }
 
   function grabTrack() {
     try {
-      var st = video.srcObject;
-      track = (st && st.getVideoTracks) ? st.getVideoTracks()[0] : null;
+      var s = video.srcObject;
+      track = (s && s.getVideoTracks) ? s.getVideoTracks()[0] : null;
     } catch (e) { track = null; }
     try { caps = (track && track.getCapabilities) ? (track.getCapabilities() || {}) : {}; } catch (e) { caps = {}; }
     refreshExtras();
@@ -213,8 +220,8 @@
       {
         video: {
           facingMode: { ideal: 'environment' },
-          width: { ideal: 1920 },         // v10：提高分辨率，小码/远码更易识别
-          height: { ideal: 1080 },
+          width: { ideal: 1280 },         // v11：回退到 720p（1080p 实测更慢更不准）
+          height: { ideal: 720 },
           advanced: [{ focusMode: 'continuous' }]
         }
       },
@@ -226,7 +233,7 @@
       busy = true;
       grabTrack();
 
-      // 1.5 秒还没结果 → 额外打开 TRY_HARDER（码制一开始就带全了）
+      // 3 秒还没结果 → 才加 TRY_HARDER（提前开会拖慢前几秒）
       tierTimer = setTimeout(function () {
         if (!busy || handled) return;
         tier = 2;
@@ -255,5 +262,5 @@
 
   btn.onclick = start;
   if (stopBtn) stopBtn.onclick = function () { stop(); };
-  console.log('[km] ZXing 增强扫码已接管「摄像头扫码」（v10：高分辨率 + 放大/补光 + 1.5s TRY_HARDER）');
+  console.log('[km] ZXing 增强扫码已接管「摄像头扫码」（v11：720p 回退 + 放大/补光 + 3s TRY_HARDER + 预留高度不跳版）');
 })();
