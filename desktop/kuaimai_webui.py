@@ -1126,9 +1126,19 @@ function render(){
 }
 $('go').onclick = load;
 $('kw').addEventListener('keydown', function(e){ if(e.key === 'Enter'){ e.preventDefault(); load(); } });
-$('sort').onchange = load;
-$('only').onchange = load;
-$('hidesent').onchange = function(){ HIDE_SENT = this.checked; render(); };
+/* 记住我的选择：隐藏已发 / 排序 / 筛选（刷新、重开页面都保留） */
+try{
+  if(localStorage.getItem('km_hide_sent') === '0'){ HIDE_SENT = false; $('hidesent').checked = false; }
+  var _s = localStorage.getItem('km_sort'); if(_s){ $('sort').value = _s; }
+  var _o = localStorage.getItem('km_only'); if(_o){ $('only').value = _o; }
+}catch(e){}
+$('sort').onchange = function(){ try{ localStorage.setItem('km_sort', this.value); }catch(e){} load(); };
+$('only').onchange = function(){ try{ localStorage.setItem('km_only', this.value); }catch(e){} load(); };
+$('hidesent').onchange = function(){
+  HIDE_SENT = this.checked;
+  try{ localStorage.setItem('km_hide_sent', this.checked ? '1' : '0'); }catch(e){}
+  render();
+};
 $('exp').onclick = function(){ location.href = withSid('/api/stock/export?' + params()); };
 load();
 </script>
