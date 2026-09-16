@@ -3245,6 +3245,8 @@ class ScanApp:
         self.tree.tag_configure("alert", background=self.RED_BG)
 
         self.scan_entry.focus()
+        self._log_count = -1
+        self.root.after(1500, self._poll_records)      # 手机/网页扫的码也会进这张表，定时刷新
 
     # ---------- 后台线程 / 队列 ----------
     def _run_bg(self, fn, *args):
@@ -4603,7 +4605,8 @@ class ScanApp:
             avail_n = int(lock_entry.get("avail", 0) or 0)
 
             light = "绿" if orders_count > 0 else "红"
-            insert_scan(canon, orders_count, shelf, pending, light)
+            insert_scan(canon, orders_count, shelf, pending, light,
+                        who="桌面版·%s" % (os.environ.get("USERNAME") or "本机"))
             self.q.put(lambda: self._apply_scan(canon, orders_count, pending, ones, shelf, shelf_note,
                                                bins, lock_n, sell_n, avail_n, from_hook))
         except Exception as e:
@@ -4687,6 +4690,23 @@ class ScanApp:
         conn.close()
         self.reload_records()
         self.status_text.set("已清空扫码日志")
+
+    def _poll_records(self):
+        """手机/网页扫的码也会写进扫码记录表：定时看条数变没变，变了就刷新列表（不打断输入）。"""
+        try:
+            conn = get_conn()
+            cur = conn.cursor()
+            n = int(cur.execute("SELECT COUNT(*) FROM scan_record").fetchone()[0])
+            conn.close()
+            if n != getattr(self, "_log_count", -1):
+                self._log_count = n
+                self.reload_records()
+        except Exception:
+            pass
+        try:
+            self.root.after(3000, self._poll_records)
+        except Exception:
+            pass
 
     def reload_records(self):
         for item in self.tree.get_children():
