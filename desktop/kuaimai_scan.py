@@ -3241,12 +3241,18 @@ class ScanApp:
             self.tree.heading(c, text=t)
             self.tree.column(c, width=w, anchor="center")
         self.tree.pack(fill=tk.BOTH, expand=True)
+        ttk.Button(log, text="刷新记录",
+                   command=lambda: self._poll_records(force=True)).pack(side=tk.BOTTOM, pady=3)
         self.tree.tag_configure("ok", background=self.GREEN_BG)
         self.tree.tag_configure("alert", background=self.RED_BG)
 
         self.scan_entry.focus()
         self._log_count = -1
         self.root.after(1500, self._poll_records)      # 手机/网页扫的码也会进这张表，定时刷新
+        try:                                           # 切回窗口时也刷一次
+            self.root.bind("<FocusIn>", lambda e: self._poll_records(force=True))
+        except Exception:
+            pass
 
     # ---------- 后台线程 / 队列 ----------
     def _run_bg(self, fn, *args):
@@ -4691,33 +4697,42 @@ class ScanApp:
         self.reload_records()
         self.status_text.set("已清空扫码日志")
 
-    def _poll_records(self):
-        """手机/网页扫的码也会写进扫码记录表：定时看条数变没变，变了就刷新列表（不打断输入）。"""
+    def _poll_records(self, force=False):
+        """手机/网页扫的码也会写进扫码记录表：定时看条数变没变，变了就刷新（不打断输入）。
+        刷新失败不推进计数，下次继续重试。"""
+        n = None
         try:
             conn = get_conn()
-            cur = conn.cursor()
-            n = int(cur.execute("SELECT COUNT(*) FROM scan_record").fetchone()[0])
+            n = int(conn.cursor().execute("SELECT COUNT(*) FROM scan_record").fetchone()[0])
             conn.close()
-            if n != getattr(self, "_log_count", -1):
-                self._log_count = n
-                self.reload_records()
         except Exception:
-            pass
+            n = None
+        if (force or (n is not None and n != getattr(self, "_log_count", -1))):
+            try:
+                self.reload_records()
+                if n is not None:
+                    self._log_count = n
+            except Exception:
+                pass
         try:
-            self.root.after(3000, self._poll_records)
+            self.root.after(2000, self._poll_records)
         except Exception:
             pass
 
     def reload_records(self):
         for item in self.tree.get_children():
             self.tree.delete(item)
-        for r in reversed(fetch_all_scans()):
+        for r in fetch_all_scans():        # 由旧到新逐个插到第一行 → 最新的排在最上面
             pid, st, bc, pq, sh, oc, light = r[:7]
             who = r[7] if len(r) > 7 else ""
             ok = (light == "绿")
             self.tree.insert("", 0, values=(st, bc, pq or 0, sh or 0, oc or 0, who or "（本机扫码）",
                                             "绿(有货)" if ok else "红(无待发)"),
                              tags=("ok",) if ok else ("alert",))
+        try:
+            self.tree.yview_moveto(0)      # 刷新后停在顶部，最新那条一眼能看到
+        except Exception:
+            pass
 
 
 def run_selftest():
