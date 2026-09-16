@@ -4845,13 +4845,13 @@ class ScanApp:
             pass
 
     def _on_record_click(self, event):
-        """点「已打」那一格 → 切换已打（已打的整行变黄）；双击整行也可以。"""
+        """点「已打」那一格 → 标记为已打（单向，之后锁定不可再点）；双击整行也可以。"""
         try:
             if self.tree.identify_column(event.x) != "#8":
                 return
             row = self.tree.identify_row(event.y)
             if row:
-                self._toggle_printed(row)
+                self._mark_printed(row)
         except Exception:
             pass
 
@@ -4859,28 +4859,28 @@ class ScanApp:
         try:
             row = self.tree.identify_row(event.y)
             if row:
-                self._toggle_printed(row)
+                self._mark_printed(row)
         except Exception:
             pass
 
-    def _toggle_printed(self, row):
-        """先改界面再写库（写成才保留）；因此点击永远不会"没反应"。"""
-        try:
-            rid = int(row)                 # 行 iid = 记录 id；新扫的临时行（未入库）忽略
-        except Exception:
-            self.status_text.set("这条是刚扫的新记录，稍后自动刷新后再点")
-            return
+    def _mark_printed(self, row):
+        """单向：打单 → 已打。已打后锁定（再点无效），整行保持黄色。"""
         try:
             vals = list(self.tree.item(row, "values"))
-            if len(vals) < 8:
+            if len(vals) >= 8 and "已打" in str(vals[7]):
+                self.status_text.set("这条已经是「已打」，已锁定")
                 return
-            newf = 0 if "已打" in str(vals[7]) else 1
+            try:
+                rid = int(row)             # 行 iid = 记录 id；新扫的临时行（未入库）忽略
+            except Exception:
+                self.status_text.set("这条是刚扫的新记录，稍后自动刷新后再点")
+                return
             self._touch_ts = time.time()   # 3 秒内不让定时刷新重建行
-            self._apply_printed(row, newf)
-            if set_printed(rid, newf):
-                self.status_text.set("已标记：%s" % ("已打" if newf else "未打"))
+            self._apply_printed(row, 1)
+            if set_printed(rid, 1):
+                self.status_text.set("已标记：已打（该条已锁定）")
             else:
-                self._apply_printed(row, 0 if newf else 1)     # 写失败回滚
+                self._apply_printed(row, 0)     # 写失败回滚成打单，可再点
                 self.status_text.set("「已打」没能写入数据库，请再点一次")
         except Exception:
             pass
