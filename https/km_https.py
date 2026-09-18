@@ -28,7 +28,9 @@ import urllib.request
 import urllib.parse
 from datetime import datetime
 
-BASE = os.path.dirname(os.path.abspath(__file__))
+BASE = (os.path.dirname(os.path.abspath(sys.executable))
+        if getattr(sys, "frozen", False)
+        else os.path.dirname(os.path.abspath(__file__)))
 LOG_FILE = os.path.join(BASE, "km_https.log")
 STATIC_DIR = os.path.join(BASE, "static")
 
@@ -37,6 +39,34 @@ def _certs(name):
     """证书目录下的文件路径（分开写，避免被密钥过滤器误伤）。"""
     return os.path.join(BASE, "lego", "certificates", name)
 
+
+
+def _pick_cert():
+    """自动挑选证书：优先环境变量 KM_DOMAIN 指定域名；否则取 lego/certificates 里最新的一对 crt/key。
+    这样换域名只需把新证书放进来（不必改代码）。"""
+    d = os.path.join(BASE, "lego", "certificates")
+    want = (os.environ.get("KM_DOMAIN") or "").strip()
+    if want:
+        c = os.path.join(d, want + ".crt")
+        k = os.path.join(d, want + ".key")
+        if os.path.exists(c) and os.path.exists(k):
+            return c, k, want
+    pairs = []
+    try:
+        for f in os.listdir(d):
+            if f.endswith(".crt") and not f.endswith("issuer.crt"):
+                stem = f[:-4]
+                c = os.path.join(d, f)
+                k = os.path.join(d, stem + ".key")
+                if os.path.exists(k):
+                    pairs.append((max(os.path.getmtime(c), os.path.getmtime(k)), c, k, stem))
+    except Exception:
+        pass
+    if not pairs:
+        return os.path.join(d, "shsp.pw.crt"), os.path.join(d, "shsp.pw.key"), "shsp.pw"
+    pairs.sort(reverse=True)
+    _, c, k, stem = pairs[0]
+    return c, k, stem
 
 PATCH_PATHS = {"/", "/index.html", "/km", "/km/", "/km/index.html"}
 STATIC_MAP = {
@@ -330,8 +360,9 @@ def main():
     ap = argparse.ArgumentParser(description="快麦扫码查询 HTTPS 入口")
     ap.add_argument("--port", type=int, default=9443)
     ap.add_argument("--backend", default="127.0.0.1:8790")
-    ap.add_argument("--cert", default=_certs("shsp.pw.crt"))
-    ap.add_argument("--key", default=_certs("shsp.pw.key"))
+    _def_c, _def_k, _def_dom = _pick_cert()
+    ap.add_argument("--cert", default=_def_c)
+    ap.add_argument("--key", default=_def_k)
     ap.add_argument("--no-inject", action="store_true", help="只做纯转发，不注入扫码增强脚本")
     args = ap.parse_args()
 
