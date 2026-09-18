@@ -169,6 +169,30 @@ def list_users():
     return sorted(out, key=lambda x: (x["role"] != "admin", x["name"]))
 
 
+def user_perms_raw(name):
+    """账号里存的原始权限表（可能是 None / 缺字段 —— 老数据）。
+
+    只有真正保存过权限的账号才有这个字段；算成完整权限表由 kuaimai_perms.effective 负责。
+    """
+    u = users().get(str(name or ""))
+    if not u:
+        return None
+    p = u.get("perms")
+    return p if isinstance(p, dict) else None
+
+
+def set_user_perms(name, values):
+    """保存某账号的按钮权限（只写 perms 字段，不动口令/会话）。"""
+    d = _load()
+    us = d.setdefault("users", {})
+    u = us.get(str(name or ""))
+    if not u:
+        return "账号不存在"
+    u["perms"] = dict(values or {})
+    _save(d)
+    return ""
+
+
 def add_user(name, pw, role="user"):
     name = str(name or "").strip()
     if not name or not pw:

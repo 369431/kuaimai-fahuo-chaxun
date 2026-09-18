@@ -31,7 +31,8 @@ import concurrent.futures
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 try:
-    from kuaimai_webui import WEB_INDEX_HTML, PICK_HTML, ORDER_HTML, STOCK_HTML, STOCKTAKE_HTML
+    from kuaimai_webui import (WEB_INDEX_HTML, PICK_HTML, ORDER_HTML, STOCK_HTML,
+                               STOCKTAKE_HTML, PERMS_HTML)
     from kuaimai_login_ui import LOGIN_HTML
 except Exception:
     WEB_INDEX_HTML = "<h1>缺少 kuaimai_webui.py</h1>"
@@ -39,11 +40,16 @@ except Exception:
     ORDER_HTML = WEB_INDEX_HTML
     STOCK_HTML = WEB_INDEX_HTML
     STOCKTAKE_HTML = WEB_INDEX_HTML
+    PERMS_HTML = WEB_INDEX_HTML
     LOGIN_HTML = WEB_INDEX_HTML
 try:
     import kuaimai_auth as auth
 except Exception:
     auth = None
+try:
+    import kuaimai_perms as perms      # 网页按钮权限清单（权限键的唯一来源）
+except Exception:
+    perms = None
 import kuaimai_db              # 订单缓存 SQLite 存储层（kuaimai_db.py）
 import traceback
 import collections
@@ -1696,6 +1702,19 @@ def lan_ips():
     return ips
 
 
+class _Denied(Exception):
+    """没有权限：由 _need() 抛出，在 do_GET / do_POST 顶层统一转成 403。
+
+    不能直接把 _json(...) 的返回值当「拒绝标记」—— _json 会把响应立刻发出去并返回 None，
+    调用方就看不见拒绝、继续把动作执行完了（客户端看到 403，接口却真的变了）。
+    """
+
+    def __init__(self, key, label):
+        Exception.__init__(self, label)
+        self.perm = key
+        self.label = label
+
+
 class _WebHandler(BaseHTTPRequestHandler):
     app = None
 
@@ -1801,12 +1820,101 @@ class _WebHandler(BaseHTTPRequestHandler):
             return False
         return peer in ("127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost")
 
+    # ---------- 按钮权限（按账号） ----------
+    def _perms_of(self, me):
+        """当前登录账号的完整权限表（管理员全开；老账号缺字段按默认值）。"""
+        if not me or auth is None or perms is None:
+            return {}
+        try:
+            return perms.effective(auth.user_perms_raw(me.get("name")), me.get("role"))
+        except Exception:
+            return {}
+
+    def _can(self, me, key):
+        if not me:
+            return False
+        pf = self._perms_of(me)
+        if not pf:                      # 账号/权限模块不可用时不要把所有人锁死
+            return auth is None or perms is None
+        return bool(pf.get(key))
+
+    def _deny(self, key):
+        label = (perms.LABELS.get(key) if perms else None) or key
+        raise _Denied(key, label)
+
+    def _need(self, me, key):
+        """有权限就返回 None 继续跑；没权限则抛 _Denied（顶层转 403，后续动作一律不执行）。"""
+        if not self._can(me, key):
+            self._deny(key)
+        return None
+
+    def _need_any(self, me, keys):
+        for k in keys:
+            if self._can(me, k):
+                return None
+        self._deny(keys[0])
+        return None
+
+    def _page(self, html, me):
+        """把当前账号的权限表塞进页面：左上角入口和按钮显隐都由它决定。"""
+        try:
+            me_json = json.dumps({"name": (me or {}).get("name") or "",
+                                  "role": (me or {}).get("role") or ""}, ensure_ascii=False)
+            p_json = json.dumps(self._perms_of(me), ensure_ascii=False)
+            inject = ("<script>window.KM_ME=%s;window.KM_PERMS=%s;"
+                      "window.KM_CAN=function(k){var p=window.KM_PERMS;"
+                      "if(!p)return true;return p[k]!==false;};"
+                      "window.KM_APPLY=function(){var p=window.KM_PERMS;if(!p)return;"
+                      "var els=document.querySelectorAll('[data-perm]');"
+                      "for(var i=0;i<els.length;i++){"
+                      "if(p[els[i].getAttribute('data-perm')]===false)els[i].style.display='none';}};"
+                      "if(document.readyState==='loading')"
+                      "{document.addEventListener('DOMContentLoaded',window.KM_APPLY);}"
+                      "else{window.KM_APPLY();}</script>") % (me_json, p_json)
+            # 左上角：管理员是可点的「权限管理」入口，普通账号显示账号名（服务端直接渲染）
+            name = str((me or {}).get("name") or "")
+            if str((me or {}).get("role") or "") == "admin":
+                title = '<a href="/perms" style="color:inherit;text-decoration:none">权限管理</a>'
+            else:
+                title = (name.replace("&", "&amp;").replace("<", "&lt;")
+                             .replace(">", "&gt;").replace('"', "&quot;"))
+            html = html.replace('<span id="hdrTitle"></span>',
+                                '<span id="hdrTitle">' + title + '</span>', 1)
+            if "</head>" in html:
+                return html.replace("</head>", inject + "</head>", 1).encode("utf-8")
+            return (inject + html).encode("utf-8")
+        except Exception:
+            return html.encode("utf-8")
+
+    def _forbidden_page(self, msg):
+        body = ("<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>"
+                "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                "<title>无权访问</title></head>"
+                "<body style='font-family:-apple-system,sans-serif;padding:28px;line-height:1.8'>"
+                "<h3>无权访问</h3><p>%s</p>"
+                "<p style='color:#666'>这是账号权限设置，请联系管理员。</p>"
+                "<p><a href='/'>返回首页</a></p></body></html>") % (msg or "没有权限")
+        return self._send(body.encode("utf-8"), "text/html; charset=utf-8", 403)
+
+    def _perms_payload(self):
+        """权限管理页面的数据：清单 + 每个账号当前的完整权限表。"""
+        out = []
+        for u in (auth.list_users() if auth else []):
+            name = u.get("name")
+            role = u.get("role") or "user"
+            out.append({"name": name, "role": role, "device": u.get("device") or "",
+                        "perms": self._perms_of({"name": name, "role": role})})
+        return {"catalog": (perms.catalog() if perms else []),
+                "groups": ([{"name": g, "keys": ks} for g, ks in perms.groups()] if perms else []),
+                "users": out}
+
     def _auth_state(self, qs):
         u = self._auth(qs)
         return {"need_setup": bool(auth and auth.need_setup()),
                 "local": self._client_is_local(),
                 "user": (u or {}).get("name"), "role": (u or {}).get("role"),
                 "users": (auth.list_users() if (auth and u and u.get("role") == "admin") else []),
+                "perms": self._perms_of(u),
                 "open": (u is not None)}
 
     def do_GET(self):
@@ -1826,20 +1934,39 @@ class _WebHandler(BaseHTTPRequestHandler):
                 # 没登录时直接返回登录页（不靠 302，中转/任何客户端都能看到）
                 return self._send(LOGIN_HTML.encode("utf-8"), "text/html; charset=utf-8")
             if parsed.path in ("/", "/index.html"):
-                return self._send(WEB_INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
+                return self._send(self._page(WEB_INDEX_HTML, me), "text/html; charset=utf-8")
+            if parsed.path in ("/perms", "/perms.html"):        # 权限管理页：只有管理员进得去
+                if not self._can(me, "admin.perms"):
+                    return self._forbidden_page("权限管理只有管理员能打开")
+                return self._send(self._page(PERMS_HTML, me), "text/html; charset=utf-8")
             if parsed.path in ("/pick", "/pick.html"):
-                return self._send(PICK_HTML.encode("utf-8"), "text/html; charset=utf-8")
+                if not self._can(me, "pick.view"):
+                    return self._forbidden_page("这个账号没有拣货权限")
+                return self._send(self._page(PICK_HTML, me), "text/html; charset=utf-8")
             if parsed.path in ("/stocktake", "/stocktake.html"):
-                return self._send(STOCKTAKE_HTML.encode("utf-8"), "text/html; charset=utf-8")
+                if not self._can(me, "stocktake.view"):
+                    return self._forbidden_page("这个账号没有库存盘点权限")
+                return self._send(self._page(STOCKTAKE_HTML, me), "text/html; charset=utf-8")
             if parsed.path in ("/order", "/order.html"):
-                return self._send(ORDER_HTML.encode("utf-8"), "text/html; charset=utf-8")
+                if not self._can(me, "order.query"):
+                    return self._forbidden_page("这个账号没有订单查询权限")
+                return self._send(self._page(ORDER_HTML, me), "text/html; charset=utf-8")
             if parsed.path in ("/stock", "/stock.html"):
-                return self._send(STOCK_HTML.encode("utf-8"), "text/html; charset=utf-8")
+                if not self._can(me, "stock.view"):
+                    return self._forbidden_page("这个账号没有现货可发权限")
+                return self._send(self._page(STOCK_HTML, me), "text/html; charset=utf-8")
+            if parsed.path == "/api/perms":
+                if not self._can(me, "admin.perms"):
+                    return self._deny("admin.perms")
+                return self._json(self._perms_payload())
             if parsed.path == "/api/status":
                 return self._json(app.web_status())
             if parsed.path == "/api/index":
                 return self._json(app.web_index_payload())
             if parsed.path == "/api/pick/list":
+                deny = self._need(me, "pick.view")
+                if deny:
+                    return deny
                 try:
                     pdays = int((qs.get("days") or ["3"])[0] or 3)
                 except Exception:
@@ -1847,8 +1974,14 @@ class _WebHandler(BaseHTTPRequestHandler):
                 return self._json(app.web_pick_list((qs.get("batch") or [""])[0], pdays,
                                                     (qs.get("refresh") or ["0"])[0] in ("1", "true")))
             if parsed.path == "/api/pick/current":
+                deny = self._need(me, "pick.view")
+                if deny:
+                    return deny
                 return self._json(app.web_pick_current())
             if parsed.path == "/api/pick/mark":
+                deny = self._need(me, "pick.mark")
+                if deny:
+                    return deny
                 try:
                     gidx = int((qs.get("g") or ["-1"])[0])
                 except Exception:
@@ -1861,8 +1994,14 @@ class _WebHandler(BaseHTTPRequestHandler):
                 return self._json(app.web_pick_mark((qs.get("batch") or [""])[0], gidx,
                                                     (qs.get("state") or ["pending"])[0], lidx))
             if parsed.path == "/api/pick/end":
+                deny = self._need(me, "pick.end")
+                if deny:
+                    return deny
                 return self._json(app.web_pick_end((qs.get("batch") or [""])[0]))
             if parsed.path == "/api/lookup":
+                deny = self._need(me, "scan.query")
+                if deny:
+                    return deny
                 code = (qs.get("code") or [""])[0].strip()
                 rel = (qs.get("rel") or ["any"])[0] or "any"
                 try:
@@ -1878,17 +2017,29 @@ class _WebHandler(BaseHTTPRequestHandler):
                     pass
                 return self._json(out)
             if parsed.path == "/api/order":
+                deny = self._need(me, "order.query")
+                if deny:
+                    return deny
                 return self._json(app.web_order((qs.get("no") or [""])[0]))
             if parsed.path == "/api/order/img":
+                deny = self._need(me, "order.query")
+                if deny:
+                    return deny
                 ctype, data = app.web_order_image((qs.get("u") or [""])[0])
                 if not data:
                     return self._json({"error": "图片地址不允许或取不到"}, 400)
                 return self._send(data, ctype)
             if parsed.path == "/api/stock":
+                deny = self._need_any(me, ("stock.view", "stocktake.view"))
+                if deny:
+                    return deny
                 return self._json(app.web_stock((qs.get("kw") or [""])[0],
                                                 (qs.get("only") or ["all"])[0],
                                                 (qs.get("sort") or ["free"])[0]))
             if parsed.path == "/api/stock/export":
+                deny = self._need(me, "stock.export")
+                if deny:
+                    return deny
                 data = app.stock_xlsx((qs.get("kw") or [""])[0],
                                       (qs.get("only") or ["all"])[0],
                                       (qs.get("sort") or ["free"])[0])
@@ -1898,6 +2049,9 @@ class _WebHandler(BaseHTTPRequestHandler):
                                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                        "xianhuo_kefa.xlsx")
             return self._json({"error": "not found"}, 404)
+        except _Denied as d:
+            return self._json({"error": "没有这个功能的权限：" + d.label,
+                               "denied": True, "perm": d.perm}, 403)
         except Exception as e:
             return self._json({"error": str(e)[:200]}, 500)
 
@@ -1957,6 +2111,9 @@ class _WebHandler(BaseHTTPRequestHandler):
                 return self._json({"ok": True})
             if path == "/api/stock/sent":
                 # 现货可发：标记/撤回「已发」（存在程序里，所有账号共用；拉新数据后自动清空）
+                deny = self._need(me, "stock.canprint")
+                if deny:
+                    return deny
                 app = self.app
                 if body.get("clear"):
                     app.clear_sent()
@@ -1966,6 +2123,9 @@ class _WebHandler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, "sent": len(left)})
             if path == "/api/stock/canprint":
                 # 网页现货可发点「可发」并输入数量 → 写一条扫码日志（可打单数量 = 输入值）
+                deny = self._need(me, "stock.canprint")
+                if deny:
+                    return deny
                 code = str(body.get("code") or "").strip()
                 try:
                     qty = int(body.get("qty"))
@@ -1980,6 +2140,13 @@ class _WebHandler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, "code": code, "qty": qty})
             if path == "/api/stock/adjust":
                 # 改库存（盘点接口，按货位）。必须带 confirm 二次确认，改完写操作日志。
+                try:
+                    _qty = int(body.get("qty"))
+                except Exception:
+                    _qty = None
+                deny = self._need(me, "stock.zero" if _qty == 0 else "stock.edit")
+                if deny:
+                    return deny
                 app = self.app
                 if not body.get("confirm"):
                     return self._json({"error": "缺少二次确认"}, 400)
@@ -1987,7 +2154,28 @@ class _WebHandler(BaseHTTPRequestHandler):
                                        who=str((me or {}).get("name") or ""))
                 return self._json(out, 200 if out.get("ok") else 400)
             if path == "/api/stock/adjust/log":
+                deny = self._need_any(me, ("stock.edit", "stock.zero"))
+                if deny:
+                    return deny
                 return self._json({"list": self.app.adjust_logs(int(body.get("limit") or 30))})
+            if path == "/api/perms":
+                # 保存某账号的按钮权限：只有管理员能调（非管理员连清单都拿不到）
+                if not self._can(me, "admin.perms"):
+                    return self._deny("admin.perms")
+                if not (auth and perms):
+                    return self._json({"error": "账号/权限模块不可用"}, 400)
+                if str(body.get("action") or "save") == "list":
+                    return self._json(self._perms_payload())
+                target = str(body.get("name") or "").strip()
+                if not target:
+                    return self._json({"error": "缺少账号"}, 400)
+                if (auth.users().get(target) or {}).get("role") == "admin":
+                    return self._json({"error": "管理员始终拥有全部权限，不用配置"}, 400)
+                err = auth.set_user_perms(target, perms.sanitize(body.get("perms") or {}))
+                if err:
+                    return self._json({"error": err}, 400)
+                return self._json({"ok": True, "name": target,
+                                   "perms": self._perms_of({"name": target, "role": "user"})})
             if path == "/api/users":
                 if not auth:
                     return self._json({"error": "账号模块不可用"}, 400)
@@ -2009,6 +2197,9 @@ class _WebHandler(BaseHTTPRequestHandler):
                     return self._json({"error": err}, 400)
                 return self._json({"ok": True, "users": auth.list_users()})
             return self._json({"error": "not found"}, 404)
+        except _Denied as d:
+            return self._json({"error": "没有这个功能的权限：" + d.label,
+                               "denied": True, "perm": d.perm}, 403)
         except Exception as e:
             return self._json({"error": str(e)[:200]}, 500)
 

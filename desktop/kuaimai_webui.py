@@ -110,23 +110,23 @@ WEB_INDEX_HTML = r"""<!DOCTYPE html>
 </style>
 </head>
 <body>
-<header><span>快麦扫码查询</span><small id="hdr">连接中…</small></header>
+<header><span id="hdrTitle"></span><small id="hdr">连接中…</small></header>
 <div class="wrap">
   <div class="card">
-    <div class="row">
+    <div class="row" data-perm="scan.query">
       <input id="code" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="扫商家编码…" autofocus>
-      <button id="btnQuery" class="ghost">查询</button>
+      <button id="btnQuery" class="ghost" data-perm="scan.query">查询</button>
     </div>
-    <div class="toolbar nav4">
-      <button id="btnCam" class="ghost">摄像头扫码</button>
-      <button id="btnOrder" class="ghost">订单查询</button>
-      <button id="btnStock" class="ghost">现货可发</button>
-      <button id="btnTake" class="ghost">库存盘点</button>
-      <button id="btnSound" class="ghost">声音：开</button>
+    <div class="toolbar nav4" id="navBar">
+      <button id="btnCam" class="ghost" data-perm="scan.camera">摄像头扫码</button>
+      <button id="btnOrder" class="ghost" data-perm="order.query">订单查询</button>
+      <button id="btnStock" class="ghost" data-perm="stock.view">现货可发</button>
+      <button id="btnTake" class="ghost" data-perm="stocktake.view">库存盘点</button>
+      <button id="btnSound" class="ghost" data-perm="ui.sound">声音：开</button>
     </div>
     <div id="camBox" class="hidden" style="margin-top:8px">
       <video id="video" playsinline muted></video>
-      <div class="toolbar"><button id="btnCamStop" class="ghost">关闭摄像头</button></div>
+      <div class="toolbar"><button id="btnCamStop" class="ghost" data-perm="scan.camera">关闭摄像头</button></div>
     </div>
   </div>
   <div id="result">
@@ -134,7 +134,7 @@ WEB_INDEX_HTML = r"""<!DOCTYPE html>
     <div id="rmain">扫码后显示</div>
     <div id="rdetail"></div>
   </div>
-  <div class="card">
+  <div class="card" data-perm="scan.filter">
     <div class="row" style="flex-wrap:wrap">
       <span class="muted">订单商品数量筛选</span>
       <select id="rel"><option value="any">不限</option><option value="gt">大于</option><option value="lt">小于</option><option value="eq">等于</option></select>
@@ -413,12 +413,12 @@ PICK_HTML = r"""<!doctype html>
 <div class="card">
   <div class="row">
     <input id="pbatch" inputmode="numeric" autocomplete="off" placeholder="打印批次号">
-    <button id="btnGo">开始拣货</button>
+    <button id="btnGo" data-perm="pick.start">开始拣货</button>
   </div>
   <div class="row row4" style="margin-top:8px">
-    <button id="btnRefresh" class="ghost">重新拉取</button>
-    <button id="btnEnd" class="ghost">结束批次</button>
-    <button id="btnSpeak" class="ghost">播报：开</button>
+    <button id="btnRefresh" class="ghost" data-perm="pick.start">重新拉取</button>
+    <button id="btnEnd" class="ghost" data-perm="pick.end">结束批次</button>
+    <button id="btnSpeak" class="ghost" data-perm="pick.speak">播报：开</button>
     <button id="btnHome" class="ghost">返回扫码</button>
   </div>
   <div id="pinfo" class="muted" style="margin-top:8px">—</div>
@@ -426,7 +426,7 @@ PICK_HTML = r"""<!doctype html>
 <div class="zones" id="zones"></div>
 <div class="filters" id="filters">
   <button data-f="one">单条</button>
-  <button id="btnZone">按分区拣货</button>
+  <button id="btnZone" data-perm="pick.zone">按分区拣货</button>
   <button data-f="pending" class="ghost">待拣</button>
   <button data-f="all" class="ghost">全部</button>
   <button data-f="done" class="ghost">已完成</button>
@@ -436,11 +436,12 @@ PICK_HTML = r"""<!doctype html>
 <div id="psumbox" class="card hidden"><pre id="psum"></pre></div>
 <div class="bar">
   <button id="btnSum" class="ghost">按货位汇总</button>
-  <button id="btnEnd2">结束批次</button>
+  <button id="btnEnd2" data-perm="pick.end">结束批次</button>
 </div>
 <script>
 const K = new URLSearchParams(location.search).get('k') || '';
 const $ = function(id){ return document.getElementById(id); };
+const CAN = function(k){ return window.KM_CAN ? window.KM_CAN(k) : true; };
 let PICK = null, FILTER = 'pending', MODE = 'one', SUM_ON = false;
 let SPOKE = false;
 /* 按分区拣货：默认开，顺序 A → B → C → D（记在手机上） */
@@ -668,11 +669,11 @@ function render(){
       + '　<span class="pprog">共 ' + ls.length + ' 个商品 · 已拣 ' + (ls.length - pending) + '/' + ls.length + '</span></div>'
       + linesHtml
       + ((MODE === 'one' && nl)
-          ? ('<div class="pbtns">'
+          ? (CAN('pick.mark') ? ('<div class="pbtns">'
              + '<button class="pdone" data-o="' + oi + '" data-l="' + nl.i + '" data-s="done">拣货完成</button>'
              + '<button class="pshort" data-o="' + oi + '" data-l="' + nl.i + '" data-s="short">'
              + ((!nl.l.bins || nl.l.bins === '无在架货位') ? '无货位' : '无货') + '</button>'
-             + '</div>')
+             + '</div>') : '')
           : '');
     box.appendChild(div);
   });
@@ -985,6 +986,7 @@ const K = new URLSearchParams(location.search).get('k') || localStorage.getItem(
 if (K) localStorage.setItem('km_key', K);
 const KQ = K ? ('&k=' + encodeURIComponent(K)) : '';
 function withSid(u){ return SID ? (u + (u.indexOf('?') >= 0 ? '&' : '?') + 'sid=' + encodeURIComponent(SID) + KQ) : u; }
+const CAN = function(k){ return window.KM_CAN ? window.KM_CAN(k) : true; };
 function flash(m){ const el=$('flash'); el.textContent=m||'';
   if(m) setTimeout(()=>{ if(el.textContent===m) el.textContent=''; },5000); }
 /* 尺码排序：S < M < L < XL < 2XL < 3XL …；认不出尺码的排最后 */
@@ -1035,8 +1037,8 @@ function render(){
         + '<div class="sub">货位 <b>' + esc(b[0]) + '</b> · 在架 ' + sh + ' 件'
         + (r.p ? (' · 待发 ' + r.p + ' 件') : '') + '</div></div>'
         + '<div class="btns">'
-        + '<button class="sbtn adj" data-c="' + esc(r.c) + '" data-b="' + esc(b[0]) + '" data-n="' + sh + '">改库存</button>'
-        + '<button class="sbtn zero" data-c="' + esc(r.c) + '" data-b="' + esc(b[0]) + '" data-n="' + sh + '">盘0</button>'
+        + (CAN('stock.edit') ? ('<button class="sbtn adj" data-c="' + esc(r.c) + '" data-b="' + esc(b[0]) + '" data-n="' + sh + '">改库存</button>') : '')
+        + (CAN('stock.zero') ? ('<button class="sbtn zero" data-c="' + esc(r.c) + '" data-b="' + esc(b[0]) + '" data-n="' + sh + '">盘0</button>') : '')
         + '</div></div>');
     });
   });
@@ -1179,7 +1181,7 @@ STOCK_HTML = r"""<!doctype html>
       <option value="urgent">只看有加急</option>
       <option value="urg_free">只看加急且有货</option>
     </select>
-    <button id="exp" title="导出 Excel：编码 / 货位 / 一单一件 / 一单多件 / 多件件数 / 加急 / 待发货 / 在架 / 可发 / 加急有货">导出</button>
+    <button id="exp" data-perm="stock.export" title="导出 Excel：编码 / 货位 / 一单一件 / 一单多件 / 多件件数 / 加急 / 待发货 / 在架 / 可发 / 加急有货">导出</button>
     <label class="chk"><input type="checkbox" id="hidesent" checked> 隐藏已发（数据拉新后自动清空标记）</label>
   </div>
   <div class="muted" id="sum">正在载入…</div>
@@ -1208,6 +1210,7 @@ const SID = (function(){
 function withSid(u){ return SID ? (u + (u.indexOf('?') >= 0 ? '&' : '?') + 'sid=' + encodeURIComponent(SID)) : u; }
 let ROWS = [];
 let HIDE_SENT = true;
+const CAN = function(k){ return window.KM_CAN ? window.KM_CAN(k) : true; };
 function flash(msg){
   const el = $('flash');
   if(!el) return;
@@ -1260,10 +1263,11 @@ function render(){
       + ((r.up || r.uo) ? (' · <span style="color:#c62828;font-weight:800">加急 ' + (r.uo || 0) + '/' + (r.up || 0) + '</span>') : '')
       + (r.l ? (' · 锁定 ' + r.l) : '') + '</div></div>'
       + '<div class="btns">'
-      + '<button class="sbtn' + (r.sent ? ' undo' : '') + '" data-c="' + esc(r.c) + '">'
-      + (r.sent ? '撤回' : '可发') + '</button>'
-      + '<button class="sbtn adj" data-c="' + esc(r.c) + '">改库存</button>'
-      + '<button class="sbtn zero" data-c="' + esc(r.c) + '">盘0</button></div></div>';
+      + (CAN('stock.canprint') ? ('<button class="sbtn' + (r.sent ? ' undo' : '') + '" data-c="' + esc(r.c) + '">'
+          + (r.sent ? '撤回' : '可发') + '</button>') : '')
+      + (CAN('stock.edit') ? ('<button class="sbtn adj" data-c="' + esc(r.c) + '">改库存</button>') : '')
+      + (CAN('stock.zero') ? ('<button class="sbtn zero" data-c="' + esc(r.c) + '">盘0</button>') : '')
+      + '</div></div>';
   }).join('') + (vis.length > head.length
       ? ('<div class="muted">只显示前 ' + head.length + ' 条，其余 ' + (vis.length - head.length) + ' 条请用「导出 Excel」或加关键词。</div>') : '');
   box.querySelectorAll('.sbtn:not(.adj):not(.zero)').forEach(function(b){
@@ -1390,6 +1394,145 @@ $('hidesent').onchange = function(){
   render();
 };
 $('exp').onclick = function(){ location.href = withSid('/api/stock/export?' + params()); };
+load();
+</script>
+</body></html>
+"""
+
+
+# ====================== 权限管理（管理员专用：账号 × 按钮 勾选矩阵） ======================
+PERMS_HTML = r"""<!doctype html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>权限管理 · 快麦扫码查询</title>
+<style>
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  :root { --blue:#007AFF; --green:#34C759; --red:#FF3B30; --ink:#1d1d1f; --sub:#6e6e73;
+          --line:rgba(60,60,67,.12); --fill:rgba(120,120,128,.10); --glass:rgba(255,255,255,.80); }
+  body { margin:0; padding:12px 12px 88px; color:var(--ink);
+         font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+         letter-spacing:-.01em; -webkit-font-smoothing:antialiased;
+         background:linear-gradient(170deg,#eef3fa 0%,#e6edf8 45%,#e1e8f4 100%) fixed; }
+  h1 { font-size:18px; margin:2px 0 4px; }
+  .note { font-size:12.5px; color:var(--sub); line-height:1.75; margin-bottom:10px; }
+  .note b { color:var(--ink); }
+  .note a { color:var(--blue); }
+  .card { background:var(--glass); backdrop-filter:saturate(180%) blur(20px);
+          -webkit-backdrop-filter:saturate(180%) blur(20px); border:1px solid rgba(255,255,255,.62);
+          border-radius:14px; padding:10px; box-shadow:0 8px 24px rgba(24,39,75,.10); }
+  .scroll { overflow:auto; max-height:68vh; }
+  table { border-collapse:separate; border-spacing:0; font-size:13px; }
+  th, td { padding:7px 8px; border-bottom:1px solid var(--line); white-space:nowrap; text-align:center; }
+  thead th { position:sticky; top:0; z-index:3; background:rgba(245,247,251,.97); font-weight:700; }
+  th.first, td.first { position:sticky; left:0; z-index:2; background:rgba(245,247,251,.97);
+        text-align:left; white-space:normal; min-width:210px; max-width:270px; }
+  thead th.first { z-index:4; }
+  tr.grp td { background:var(--fill); font-weight:700; color:var(--sub); text-align:left;
+        font-size:12px; letter-spacing:.04em; }
+  input[type=checkbox] { width:19px; height:19px; accent-color:var(--blue); }
+  .badge { font-size:11px; border-radius:6px; padding:1px 6px; background:var(--fill);
+        color:var(--sub); margin-left:4px; font-weight:400; }
+  .badge.adm { background:rgba(255,59,48,.14); color:#c62828; }
+  .bar { position:fixed; left:0; right:0; bottom:0; display:flex; gap:10px; padding:10px 12px;
+         background:rgba(255,255,255,.86); backdrop-filter:saturate(180%) blur(20px);
+         -webkit-backdrop-filter:saturate(180%) blur(20px); border-top:1px solid var(--line); }
+  .bar button { flex:1; padding:13px; font-size:16px; font-weight:700; border:0; border-radius:12px;
+         background:var(--blue); color:#fff; font-family:inherit; }
+  .bar button.g { flex:0 0 108px; background:var(--fill); color:var(--blue); }
+  #msg { font-size:13.5px; font-weight:700; color:var(--green); margin:8px 2px; min-height:18px; line-height:1.6; }
+  #msg.bad { color:#c62828; }
+  @media (prefers-color-scheme: dark) {
+    body { background:linear-gradient(170deg,#1c1c1e,#151517 60%,#1a1a1c) fixed; color:#f2f2f7; }
+    .card { background:rgba(28,28,30,.74); border-color:rgba(255,255,255,.08); }
+    thead th, th.first, td.first { background:rgba(38,38,40,.97); }
+    .bar { background:rgba(28,28,30,.86); border-top-color:rgba(255,255,255,.08); }
+  }
+</style></head>
+<body>
+<h1>权限管理</h1>
+<div class="note">按账号勾选能用的按钮 / 功能，<b>保存后立即生效</b>：没勾的按钮不显示，直接调接口也会被拒（403）。<br>
+查询类默认给所有人开放；动作类（改库存、盘0、可发…）默认关闭，要用哪个再勾。<br>
+管理员账号始终拥有全部权限，不用配置。 <a href="/">返回扫码</a></div>
+<div id="msg"></div>
+<div class="card"><div class="scroll" id="matrix">正在载入…</div></div>
+<div class="bar"><button id="save">保存</button><button class="g" id="reload">重新载入</button></div>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const SID = (function(){
+  try { const q = new URLSearchParams(location.search).get('sid'); if(q) localStorage.setItem('km_sid', q);
+        return localStorage.getItem('km_sid') || ''; } catch(e){ return ''; }
+})();
+function withSid(u){ return SID ? (u + (u.indexOf('?') >= 0 ? '&' : '?') + 'sid=' + encodeURIComponent(SID)) : u; }
+let DATA = null;
+function msg(t, bad){ const el = $('msg'); el.textContent = t || ''; el.className = bad ? 'bad' : ''; }
+function load(){
+  msg('正在载入…');
+  fetch(withSid('/api/perms'), {cache:'no-store'})
+    .then(r => r.json())
+    .then(d => {
+      if(d.error || d.denied){ msg(d.error || '没有权限管理权限', true); return; }
+      DATA = d; render();
+      msg('载入完成：' + (d.users||[]).length + ' 个账号 / ' + (d.catalog||[]).length + ' 项权限');
+    })
+    .catch(e => msg('载入失败：' + e.message, true));
+}
+function render(){
+  const us = DATA.users || [], cat = DATA.catalog || [];
+  let h = '<table><thead><tr><th class="first">账号 / 权限</th>';
+  us.forEach(function(u){
+    h += '<th>' + esc(u.name) + '<span class="badge' + (u.role === 'admin' ? ' adm' : '') + '">'
+       + (u.role === 'admin' ? '管理员' : '普通') + '</span></th>';
+  });
+  h += '</tr></thead><tbody>';
+  let curG = null;
+  cat.forEach(function(c){
+    if(c.group !== curG){ curG = c.group;
+      h += '<tr class="grp"><td colspan="' + (us.length + 1) + '">' + esc(curG) + '</td></tr>'; }
+    h += '<tr><td class="first">' + esc(c.label)
+       + '<div style="color:#8e8e93;font-size:11.5px">' + esc(c.key) + '</div></td>';
+    us.forEach(function(u, i){
+      const on = !!(u.perms && u.perms[c.key]);
+      h += '<td><input type="checkbox" data-u="' + esc(u.name) + '" data-k="' + esc(c.key) + '"'
+         + (on ? ' checked' : '') + (u.role === 'admin' ? ' disabled' : '') + '></td>';
+    });
+    h += '</tr>';
+  });
+  h += '</tbody></table>';
+  $('matrix').innerHTML = h;
+}
+function collect(){
+  const out = {};
+  document.querySelectorAll('#matrix input[data-k]').forEach(function(b){
+    const i = b.getAttribute('data-u');
+    if(!out[i]) out[i] = {};
+    out[i][b.getAttribute('data-k')] = !!b.checked;
+  });
+  return out;
+}
+async function save(){
+  if(!DATA){ msg('还没载入', true); return; }
+  if(!confirm('保存后立即生效，确定保存吗？')) return;
+  const map = collect();
+  const targets = (DATA.users || []).filter(function(u){ return u.role !== 'admin'; });
+  let okN = 0; const errs = [];
+  for(let i = 0; i < targets.length; i++){
+    const u = targets[i];
+    try {
+      const r = await fetch(withSid('/api/perms'), {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({name: u.name, perms: map[u.name] || {}})});
+      const j = await r.json();
+      if(r.ok && j.ok){ okN++; }
+      else { errs.push(u.name + '：' + ((j && j.error) || ('HTTP ' + r.status))); }
+    } catch(e){ errs.push(u.name + '：' + e.message); }
+  }
+  if(errs.length){ msg('保存 ' + okN + ' 个，失败 ' + errs.length + ' 个 —— ' + errs.join('；'), true); }
+  else { msg('已保存 ' + okN + ' 个账号的权限（立即生效）'); }
+  load();
+}
+$('save').onclick = save;
+$('reload').onclick = load;
 load();
 </script>
 </body></html>
