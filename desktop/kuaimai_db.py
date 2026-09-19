@@ -23,7 +23,7 @@ SHIPPED_SQL = ",".join("'%s'" % s for s in SHIPPED)
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS orders(
   sid TEXT PRIMARY KEY, sys_status TEXT, us TEXT, item_count INTEGER, upd_ts REAL,
-  urgent INTEGER DEFAULT 0);
+  urgent INTEGER DEFAULT 0, ex TEXT);
 CREATE TABLE IF NOT EXISTS order_items(
   sid TEXT, code TEXT, qty INTEGER, is_main INTEGER);
 CREATE INDEX IF NOT EXISTS idx_items_code ON order_items(code);
@@ -44,6 +44,21 @@ def connect(path, check_same_thread=True):
         conn.execute("ALTER TABLE orders ADD COLUMN urgent INTEGER DEFAULT 0")
     except Exception:
         pass
+        try:
+            conn.execute("ALTER TABLE orders ADD COLUMN ex TEXT")
+        except Exception:
+            pass
+        for _ddl in ("CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(sys_status)",
+                     "CREATE INDEX IF NOT EXISTS idx_orders_urgent ON orders(urgent, item_count)",
+                     "CREATE INDEX IF NOT EXISTS idx_orders_ex ON orders(ex)"):
+            try:
+                conn.execute(_ddl)
+            except Exception:
+                pass
+        try:
+            pass
+        except Exception:
+            pass
     return conn
 
 
@@ -90,7 +105,7 @@ def _chunks(seq, size=400):
 def _record_rows(sid, rec):
     """一条 store 记录 → (orders 行, order_items 行列表)。"""
     out = (str(sid), rec.get("status"), rec.get("us"),
-           int(rec.get("count") or 0), time.time(), 1 if rec.get("urgent") else 0)
+           int(rec.get("count") or 0), time.time(), 1 if rec.get("urgent") else 0, str(rec.get("ex") or ""))
     items = []
     for pair in (rec.get("pairs") or []):
         try:
@@ -118,8 +133,8 @@ def import_store(conn, store, loaded_at="", replace=True):
         if replace:
             cur.execute("DELETE FROM orders")
             cur.execute("DELETE FROM order_items")
-        cur.executemany("INSERT OR REPLACE INTO orders(sid,sys_status,us,item_count,upd_ts,urgent)"
-                         " VALUES(?,?,?,?,?,?)", rows)
+        cur.executemany("INSERT OR REPLACE INTO orders(sid,sys_status,us,item_count,upd_ts,urgent,ex)"
+                         " VALUES(?,?,?,?,?,?,?)", rows)
         cur.executemany("INSERT INTO order_items VALUES(?,?,?,?)", items)
         if loaded_at:
             cur.execute("INSERT OR REPLACE INTO meta VALUES('loaded_at',?)", (loaded_at,))
@@ -149,8 +164,8 @@ def upsert_records(conn, records, delete_sids=(), commit=True):
         for chunk in _chunks([r[0] for r in rows]):
             ph = ",".join("?" * len(chunk))
             cur.execute("DELETE FROM order_items WHERE sid IN (%s)" % ph, chunk)
-        cur.executemany("INSERT OR REPLACE INTO orders(sid,sys_status,us,item_count,upd_ts,urgent)"
-                         " VALUES(?,?,?,?,?,?)", rows)
+        cur.executemany("INSERT OR REPLACE INTO orders(sid,sys_status,us,item_count,upd_ts,urgent,ex)"
+                         " VALUES(?,?,?,?,?,?,?)", rows)
         cur.executemany("INSERT INTO order_items VALUES(?,?,?,?)", items)
         if commit:
             conn.commit()
@@ -262,9 +277,27 @@ def orders_stat(conn, relation="不限", n=0):
 def rebuild_index_db(conn, relation="不限", n=0):
     """SQL 版 rebuild_index：返回 (index, stat)，index 结构与 JSON 版一致。"""
     raw = index_counts(conn, relation, n)
+    # 一单一件的加急，按快递拆开（只统计中通/申通）；单独查一次，不改动原查询
+    _ue = {}
+    try:
+        _sql = ("SELECT oi.code, "
+                "SUM(CASE WHEN o.urgent=1 AND o.item_count=1 AND "
+                "  (o.ex LIKE '%中通%' OR UPPER(COALESCE(o.ex,'')) LIKE '%ZTO%') THEN 1 ELSE 0 END), "
+                "SUM(CASE WHEN o.urgent=1 AND o.item_count=1 AND "
+                "  (o.ex LIKE '%申通%' OR UPPER(COALESCE(o.ex,'')) LIKE '%STO%') THEN 1 ELSE 0 END) "
+                "FROM order_items oi JOIN orders o ON o.sid=oi.sid "
+                "WHERE " + live_where("o") + " GROUP BY oi.code")
+        for _c, _zt, _st in conn.execute(_sql):
+            if _zt or _st:
+                _ue[str(_c)] = {"中通": int(_zt or 0), "申通": int(_st or 0)}
+    except Exception:
+        _ue = {}
     index = {code: {"qty": v[1], "orders": v[0], "ones": v[2], "main": False,
                     "uo": (v[3] if len(v) > 3 else 0), "up": (v[4] if len(v) > 4 else 0)}
              for code, v in raw.items()}
+    for _code, _e in index.items():
+        if _code in _ue:
+            _e["ue"] = _ue[_code]
     return index, orders_stat(conn, relation, n)
 
 

@@ -211,7 +211,12 @@ async function query(code){
   const short=d.pieces>d.shelf;          // 在架少于待发货件数 → 需补货
   CUR = d.code;
   $('rcode').textContent = d.code;
-  $('rmain').innerHTML = `待发货一单一件：${onePiece}<br>待发货一单多件：${multiPiece}`;
+  function urgentLine(ue){
+  ue = ue || {};
+  return '<br><span style="color:#c62828;font-weight:700">一单一件 加急 中通 ' + (ue['中通'] || 0) + '单</span>'
+       + '<br><span style="color:#c62828;font-weight:700">一单一件 加急 申通 ' + (ue['申通'] || 0) + '单</span>';
+  }
+$('rmain').innerHTML = `待发货一单一件：${onePiece}<br>待发货一单多件：${multiPiece}` + urgentLine(d.ue);
   $('rdetail').innerHTML = `货位：${bins}（在架 ${d.shelf}）`
     + (short ? '<br><span style="color:#c62828;font-weight:800;font-size:22px">需补货</span>' : '');
   const hint = d.orders===0 ? '没有待发货订单' : (short ? '需补货' : '可以拣货');
@@ -1259,7 +1264,7 @@ function render(){
       + ((r.p1) ? '<span class="tag">加急·有货</span>' : '')
       + '<span class="free ' + cls + '" title="可发 = min(在架, 待发) − 多件">' + r.f + '</span></div>'
       + '<div class="sub">货位 <b style="color:#0b5394">' + esc(r.b || '无在架货位') + '</b>'
-      + ' · 在架 ' + r.s + ' · 一件 ' + r.n + ' · 多件 ' + r.m + '(' + (r.mp == null ? 0 : r.mp) + ')'
+      + ' · 在架 ' + r.s + ' · 一件 ' + r.n + ' · 多件 ' + r.m + '(' + (r.mp == null ? 0 : r.mp) + ')' + (function(ue){ue=ue||{};var p=[];if(ue['中通'])p.push('中通 '+ue['中通']+'件');if(ue['申通'])p.push('申通 '+ue['申通']+'件');return ' <span style="color:#c62828;font-weight:700">· 加急 中通 '+((r.ue&&r.ue['中通'])||0)+'单 申通 '+((r.ue&&r.ue['申通'])||0)+'单</span>';})(r.ue)
       + ((r.up || r.uo) ? (' · <span style="color:#c62828;font-weight:800">加急 ' + (r.uo || 0) + '/' + (r.up || 0) + '</span>') : '')
       + (r.l ? (' · 锁定 ' + r.l) : '') + '</div></div>'
       + '<div class="btns">'

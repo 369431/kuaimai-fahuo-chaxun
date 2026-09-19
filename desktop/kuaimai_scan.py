@@ -942,12 +942,31 @@ def _rec_shipped(rec):
     return str(rec.get("status") or "").strip().upper() in SHIPPED_SYS_STATUS
 
 
+# 只统计这两家的加急（用户要求）
+URGENT_EXPRESS_KEYS = ("中通", "申通")
+URGENT_EXPRESS_CODES = ("ZTO", "STO", "ZHONGTONG", "SHENTONG")
+
+
+def _urgent_express(name):
+    """快递名 → 是否属于要统计的两家（返回规范名或 ""）。"""
+    s = str(name or "").upper()
+    for k in URGENT_EXPRESS_KEYS:
+        if k in str(name or ""):
+            return k
+    for c in URGENT_EXPRESS_CODES:
+        if c in s:
+            return "中通" if c in ("ZTO", "ZHONGTONG") else "申通"
+    return ""
+
+
 def _store_record(trade):
     """生成 store 记录（全量保留，含平台状态；剔除动作放到本地建索引时做）。"""
     count, pairs = _order_contribution(trade)
     return {"status": trade.get("sysStatus"),
             "us": trade.get("unifiedStatus"),
             "urgent": bool(trade.get("isUrgent")),
+            "ex": str(trade.get("expressCompanyName") or trade.get("logisticsCompanyName")
+                      or trade.get("expressCode") or ""),
             "count": count, "pairs": pairs}
 
 
@@ -1321,6 +1340,12 @@ def rebuild_index(store, relation="不限", n=0):
             if rec.get("urgent"):
                 e["uo"] += 1        # 加急订单数
                 e["up"] += qty      # 加急件数
+                # 一单一件的加急，按快递拆开（只统计中通/申通）
+                if int(rec.get("count") or 0) == 1:
+                    _ex = _urgent_express(rec.get("ex"))
+                    if _ex:
+                        ue = e.setdefault("ue", {})
+                        ue[_ex] = int(ue.get(_ex, 0)) + 1
     live = len(store) - shipped
     stat = {"total_orders": live, "store_orders": len(store),
             "shipped_excluded": shipped, "included_orders": included,
@@ -2754,6 +2779,7 @@ class ScanApp:
                 "l": int(lk.get("lock", 0) or 0),
                 "uo": int(e.get("uo", 0) or 0),
                 "up": int(e.get("up", 0) or 0),
+                "ue": {k: int(v or 0) for k, v in (e.get("ue") or {}).items()},
                 "b": "、".join(str(b[0]) for b in (sh.get("bins") or [])[:6]),
                 "bl": [[str(b[0]), int(b[1] or 0)] for b in (sh.get("bins") or [])],
             }
@@ -3223,6 +3249,7 @@ class ScanApp:
             ones = int(v.get("n") or 0)
             uo = int(v.get("uo") or 0)
             up = int(v.get("up") or 0)
+            _ue_any = sum(int(x or 0) for x in (v.get("ue") or {}).values())
             if kw and kw not in str(code).upper():
                 continue
             if _pick_group_excluded(code):        # 1166 / 买家秀 / 圆虹包 等占位、补偿商品：不显示
@@ -3237,14 +3264,15 @@ class ScanApp:
                 continue
             if only == "orders" and pieces <= 0:
                 continue
-            if only == "urgent" and up <= 0 and uo <= 0:
+            if only == "urgent" and _ue_any <= 0:
                 continue
-            prio = 1 if ((uo > 0 or up > 0) and free > 0 and shelf > 0) else 0   # 加急且有货可发
+            prio = 1 if (_ue_any > 0 and free > 0 and shelf > 0) else 0   # 加急且有货可发
             if only == "urg_free" and not prio:
                 continue
             rows.append({"c": str(code), "s": shelf, "p": pieces, "o": orders,
                          "n": ones, "m": max(0, orders - ones), "mp": multi_pieces,
                          "uo": uo, "up": up, "p1": prio,
+                       "ue": {k: int(v2 or 0) for k, v2 in ((v.get("ue") or {}).items())},
                          "sent": 1 if str(code) in sent else 0,
                          "b": str(v.get("b") or ""),
                          "bl": v.get("bl") or [],
@@ -3351,6 +3379,7 @@ class ScanApp:
             "orders": int(e.get("orders", 0) or 0),
             "pieces": int(e.get("qty", 0) or 0),
             "ones": int(e.get("ones", 0) or 0),
+            "ue": {k: int(v or 0) for k, v in (e.get("ue") or {}).items()},
             "shelf": int(sh.get("shelf", 0) or 0),
             "bins": (sh.get("bins") or [])[:6],
             "lock": int(lk.get("lock", 0) or 0),
