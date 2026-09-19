@@ -1722,7 +1722,7 @@ def play_alert_sound():
 # ============================ 内置手机网页服务 ============================
 WEB_PORT = 8790
 DISCOVER_PORT = 8791          # 子客户端「自动发现」的 UDP 广播端口
-APP_VER = (getattr(kmclient, "APP_VER", "") or "v1.13") if kmclient else "v1.13"
+APP_VER = (getattr(kmclient, "APP_VER", "") or "v1.14") if kmclient else "v1.14"
 # ---- 界面配色（macOS 风格扁平浅色）----
 UI_BG = "#f5f5f7"          # 窗口底
 UI_CARD = "#ffffff"        # 卡片
@@ -3938,6 +3938,8 @@ class ScanApp:
         main = ttk.Frame(_canvas, padding=12)
         _mw = _canvas.create_window((0, 0), window=main, anchor="nw")
 
+        _size = {"w": 0, "h": 0}
+
         def _on_main_cfg(_e=None):
             try:
                 _canvas.configure(scrollregion=_canvas.bbox("all"))
@@ -3945,7 +3947,11 @@ class ScanApp:
                 pass
 
         def _on_canvas_cfg(e):
+            # 只有尺寸真的变了才动（最小化再打开会发一堆 Configure，全処理会让窗口闪一下）
             try:
+                if (e.width, e.height) == (_size["w"], _size["h"]):
+                    return
+                _size["w"], _size["h"] = e.width, e.height
                 _canvas.itemconfigure(_mw, width=e.width)
             except Exception:
                 pass
@@ -4117,10 +4123,8 @@ class ScanApp:
         self.scan_entry.focus()
         self._log_count = -1
         self.root.after(1500, self._poll_records)      # 手机/网页扫的码也会进这张表，定时刷新
-        try:                                           # 切回窗口时也刷一次
-            self.root.bind("<FocusIn>", lambda e: self._poll_records(force=True))
-        except Exception:
-            pass
+        # 以前这里绑了 FocusIn → 强制刷新：最小化再打开拿焦点的瞬间会整块重画（闪屏）。
+        # 定时轮询（本地 2 秒 / 子端 10 秒）已经够用，不靠焦点事件。
 
     # ---------- 登录身份 / 按钮权限 ----------
     def can(self, key):
@@ -4830,6 +4834,10 @@ class ScanApp:
         try:
             if self._float is not None:
                 self._float.withdraw()
+                try:
+                    self._float.attributes("-topmost", False)   # 别留着置顶属性（会干扰主窗口重画）
+                except Exception:
+                    pass
         except Exception:
             pass
         if self._float_after:
@@ -6179,7 +6187,9 @@ class ScanApp:
                 accs.append(w)
         try:
             if getattr(self, "acc_box", None):
-                self.acc_box.configure(values=accs)
+                if getattr(self, "_acc_list", None) != accs:      # 列表没变就不动下拉（少一次重画）
+                    self._acc_list = list(accs)
+                    self.acc_box.configure(values=accs)
                 if acc not in accs:
                     acc = "全部"
                     self.acc_var.set("全部")
