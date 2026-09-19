@@ -1,9 +1,9 @@
 {
-  "version": "v1.13",
-  "notes": "网页端权限管理改手机友好（选账号→开关列表）；网页端也能设「电脑端+网页端同时登录」；修最小化再打开窗口闪屏；取消「配置 API」弹窗（只在状态栏显示接口状态）",
+  "version": "v1.14",
+  "notes": "修「最小化再打开闪屏」（去掉焦点强制刷新、Configure 只在尺寸变化时重排、浮窗取消置顶）；网页版权限管理手机友好 + 同时登录开关；取消配置 API 弹窗",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.13/kuaimai-scan-setup-v1.13.exe",
-  "sha256": "a1ee10fec602ffd58748a5af42b85273974b365f3674c1b2a78169945eaa7458",
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.14/kuaimai-scan-setup-v1.14.exe",
+  "sha256": "2fd0c2c2ceeddb2c113a0f08cef87f051c19d4f70c944b0270aeeed2cb50d9a9",
   "mandatory": false,
-  "published_at": "2026-09-20 02:16"
+  "published_at": "2026-09-20 02:21"
 }
