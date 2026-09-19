@@ -1,9 +1,9 @@
 {
   "version": "v1.11",
-  "notes": "桌面端登录 + 主/子客户端；对外访问设置（域名/frp/证书）；扫码记录增加中通/申通加急列；检查更新；修登录窗不显示的坑",
+  "notes": "桌面端登录 + 主/子客户端；对外访问设置（域名/frp/证书）；扫码记录加中通/申通加急列；检查更新；修登录窗不显示/卡在检查本机服务的坑",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
   "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.11/kuaimai-scan-setup-v1.11.exe",
-  "sha256": "3d5ba6317c7e7972924d214865e1f059e91dc62b4388942ed04e7dd7c23572b2",
+  "sha256": "882f7e0fba660b842ee8a1c4f520ebbf7638846bf59bb26931f977ef86278711",
   "mandatory": false,
-  "published_at": "2026-09-20 01:34"
+  "published_at": "2026-09-20 01:37"
 }
