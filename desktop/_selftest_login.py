@@ -206,6 +206,19 @@ def main():
         # 1) 免登录的 /api/ping
         okk, ping = kmc.http_json(base, "/api/ping", timeout=5)
         ok("/api/ping 免登录可访问", okk and ping.get("app") == "kuaimai-fahuo-chaxun", ping.get("error"))
+        # 地址解析：局域网 IP / 带端口 / https 域名:9443 / 裸 IPv6 都要认
+        cases = (("192.168.1.5", "http://192.168.1.5:8790"),
+                 ("192.168.1.5:8790", "http://192.168.1.5:8790"),
+                 ("kmcx.cc:9443", "https://kmcx.cc:9443"),
+                 ("https://kmcx.cc:9443/", "https://kmcx.cc:9443"),
+                 ("https://kmcx.cc", "https://kmcx.cc:443"),
+                 ("http://kmcx.cc/", "http://kmcx.cc:8790"),
+                 ("[2408:8207::1]:8790", "http://[2408:8207::1]:8790"),
+                 ("2408:8207:883a::1", "http://[2408:8207:883a::1]:8790"))
+        bad = [(a, kmc.norm_base(a), want) for a, want in cases if kmc.norm_base(a) != want]
+        ok("地址解析：局域网 IP / 端口 / https 域名:9443 / 裸 IPv6 都能认", not bad, bad)
+        ok("证书校验开关能存能读", kmc.set_insecure(True) is True and kmc.insecure() is True)
+        kmc.set_insecure(False)
         ok("/api/ping 带 need_setup", isinstance(ping.get("need_setup"), bool), ping)
 
         # 2) 没登录时 /api/scans 要 401

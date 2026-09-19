@@ -176,7 +176,8 @@ class LoginWindow:
     # ---------------- 子客户端 ----------------
     def _build_remote(self, f):
         self.remote_info = tk.Label(
-            f, text="在局域网里找主客户端（那台跑着程序、登录了管理员账号的电脑）",
+            f, text="填主客户端地址：局域网可以是 192.168.1.5；外网/跨网就走客户那套 "
+                    "https://域名:9443（frp 转发到主客户端）",
             fg=BLUE, bg=BG, font=("Microsoft YaHei", 9), wraplength=440, justify="left")
         self.remote_info.pack(anchor="w", pady=(0, 8))
 
@@ -207,7 +208,10 @@ class LoginWindow:
         ttk.Label(f, text="密码").pack(anchor="w")
         self.remote_pw = tk.StringVar()
         self.remote_pw_ent = ttk.Entry(f, textvariable=self.remote_pw, show="*", font=("Microsoft YaHei", 11))
-        self.remote_pw_ent.pack(fill=tk.X, pady=(2, 8))
+        self.remote_pw_ent.pack(fill=tk.X, pady=(2, 6))
+        self.insecure = tk.BooleanVar(value=bool(self.cfg.get("tls_insecure")))
+        ttk.Checkbutton(f, text="跳过证书校验（自签证书 / 用 IP 直连 https 时勾）",
+                        variable=self.insecure).pack(anchor="w", pady=(0, 6))
         tk.Label(f, text="子客户端只显示主账号给你开的按钮；数据实时来自主客户端。\n"
                          "被主账号踢下线后，这台电脑 10 分钟内不能再登录。",
                  bg=BG, fg="#6e6e73", font=("Microsoft YaHei", 9), justify="left",
@@ -264,8 +268,9 @@ class LoginWindow:
     def _test_remote(self):
         base = kmc.norm_base(self.remote_addr.get())
         if not base:
-            self._set_msg("先填主客户端地址，例如 192.168.1.5")
+            self._set_msg("先填主客户端地址，例如 192.168.1.5 或 https://域名:9443")
             return
+        kmc.set_insecure(bool(self.insecure.get()))
         self._set_msg("正在连接 %s …" % base, ok=True)
 
         def work():
@@ -330,6 +335,7 @@ class LoginWindow:
             if not base:
                 self._set_msg("请先填主客户端地址（或点「自动发现」）")
                 return
+            kmc.set_insecure(bool(self.insecure.get()))
         if not name or not pw:
             self._set_msg("账号和密码都要填")
             return

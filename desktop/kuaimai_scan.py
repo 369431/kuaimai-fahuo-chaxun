@@ -3008,7 +3008,14 @@ class ScanApp:
             urls.append("http://%s:%d/%s" % (ip, port, qs))
         if not urls:
             urls.append("http://127.0.0.1:%d/%s" % (port, qs))
-        self.web_label.config(text="手机扫码地址：" + "    ".join(urls))
+        sub = []
+        if host:                                   # 客户那套：域名 + 9443（frp 转发到本机）
+            sub.append("https://%s:9443" % host)
+        _ips = lan_ips()
+        if _ips:
+            sub.append("%s:%d" % (_ips[0], port))
+        tip = ("\n子客户端地址：这台就是主客户端，子端登录时填 %s" % "　或　".join(sub)) if sub else ""
+        self.web_label.config(text="手机扫码地址：" + "    ".join(urls) + tip)
 
     def on_key_toggle(self):
         """勾选/取消「手机访问需口令」；值没变就直接返回（防止启动时误触发）。"""

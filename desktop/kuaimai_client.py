@@ -173,26 +173,90 @@ def discover(timeout=1.5):
     return sorted(found.values(), key=lambda x: (x["host"], x["port"]))
 
 
-def norm_base(addr):
-    """把用户填的「192.168.1.5」「192.168.1.5:8790」「http://192.168.1.5:8790」统一成 URL。"""
+def norm_base(addr, default_port=None):
+    """把用户填的地址统一成 URL。支持：
+
+      192.168.1.5                     → http://192.168.1.5:8790
+      192.168.1.5:8790                → http://192.168.1.5:8790
+      kmcx.cc:9443                    → https://kmcx.cc:9443   （9443/443 默认当成 https）
+      https://kmcx.cc:9443/           → https://kmcx.cc:9443
+      https://kmcx.cc                 → https://kmcx.cc:443
+      [2408:8207::1]:8790             → http://[2408:8207::1]:8790
+      2408:8207:883a::1               → http://[2408:8207:883a::1]:8790   （裸 IPv6 自动加括号）
+    """
     a = str(addr or "").strip().rstrip("/")
     if not a:
         return ""
-    if not a.lower().startswith(("http://", "https://")):
-        a = "http://" + a
-    try:
-        p = urllib.parse.urlsplit(a)
-        host = p.hostname or ""
-        port = p.port or DEFAULT_PORT
-        if not host:
-            return ""
-        return "%s://%s:%d" % (p.scheme or "http", host, int(port))
-    except Exception:
+    scheme = ""
+    low = a.lower()
+    if low.startswith("http://"):
+        scheme, a = "http", a[7:]
+    elif low.startswith("https://"):
+        scheme, a = "https", a[8:]
+    a = a.split("/")[0].split("?")[0].strip()      # 去掉路径/查询串
+    host, port = "", ""
+    if a.startswith("["):                            # [IPv6]:port
+        end = a.find("]")
+        if end > 0:
+            host = a[1:end]
+            rest = a[end + 1:]
+            if rest.startswith(":"):
+                port = rest[1:]
+    elif a.count(":") == 1:                          # host:port
+        host, port = a.rsplit(":", 1)
+    else:                                             # 没端口（含裸 IPv6）
+        host = a.strip("[]")
+    host = host.strip()
+    if not host:
         return ""
+    if not scheme:
+        scheme = "https" if port in ("443", "9443") else "http"
+    try:
+        port_n = int(port) if port else (443 if scheme == "https" else int(default_port or DEFAULT_PORT))
+    except Exception:
+        port_n = int(default_port or DEFAULT_PORT)
+    if ":" in host:                                  # IPv6 字面量要方括号
+        host = "[%s]" % host.strip("[]")
+    return "%s://%s:%d" % (scheme, host, port_n)
 
 
 # 不认系统代理：主客户端在局域网里，走代理会直接把请求拐跑（有些电脑装了代理/安全软件）
-_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+_OPENER_PLAIN = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+_OPENER_INSECURE = None          # 跳过证书校验时才用（自签证书 / 用 IP 访问）
+_INSECURE_TLS = bool(load_config().get("tls_insecure"))
+
+
+def set_insecure(flag):
+    """https 证书校验开关（只影响桌面端子客户端连主端）。"""
+    global _INSECURE_TLS, _OPENER_INSECURE
+    _INSECURE_TLS = bool(flag)
+    _OPENER_INSECURE = None
+    try:
+        save_config({"tls_insecure": _INSECURE_TLS})
+    except Exception:
+        pass
+    return _INSECURE_TLS
+
+
+def insecure():
+    return bool(_INSECURE_TLS)
+
+
+def _opener():
+    global _OPENER_INSECURE
+    if not _INSECURE_TLS:
+        return _OPENER_PLAIN
+    if _OPENER_INSECURE is None:
+        try:
+            import ssl
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            _OPENER_INSECURE = urllib.request.build_opener(
+                urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=ctx))
+        except Exception:
+            _OPENER_INSECURE = _OPENER_PLAIN
+    return _OPENER_INSECURE
 
 
 def http_json(base, path, method="GET", params=None, body=None, token="", timeout=20):
@@ -210,7 +274,7 @@ def http_json(base, path, method="GET", params=None, body=None, token="", timeou
         headers["X-KM-Token"] = str(token)
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with _OPENER.open(req, timeout=float(timeout or 20)) as r:
+        with _opener().open(req, timeout=float(timeout or 20)) as r:
             raw = r.read()
             ctype = (r.headers.get("Content-Type") or "").lower()
             if "json" in ctype:
