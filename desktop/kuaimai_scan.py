@@ -67,6 +67,14 @@ try:
 except Exception:
     kuaimai_gateway_ui = None
 try:
+    import kuaimai_update as kmupd      # 检查更新（拉 version.json）
+except Exception:
+    kmupd = None
+try:
+    import kuaimai_update_ui as kmupdui
+except Exception:
+    kmupdui = None
+try:
     import kuaimai_gateway as kmgw      # 对外访问配置 / 证书 / 隧道启停
 except Exception:
     kmgw = None
@@ -1710,7 +1718,7 @@ def play_alert_sound():
 # ============================ 内置手机网页服务 ============================
 WEB_PORT = 8790
 DISCOVER_PORT = 8791          # 子客户端「自动发现」的 UDP 广播端口
-APP_VER = "v1.11"
+APP_VER = (getattr(kmclient, "APP_VER", "") or "v1.11") if kmclient else "v1.11"
 # ---- 界面配色（macOS 风格扁平浅色）----
 UI_BG = "#f5f5f7"          # 窗口底
 UI_CARD = "#ffffff"        # 卡片
@@ -2888,7 +2896,7 @@ class ScanApp:
         self.remote = bool(kmclient and session is not None and session.is_remote)
         self.gated = {}                        # 权限键 → [(控件, 处理方式, 说明)]
         self._locked = False                   # 被踢下线后锁界面
-        self.root.title("快麦扫码查询" + ("（子客户端）" if self.remote else ""))
+        self.root.title("快麦扫码查询 %s%s" % (APP_VER, "（子客户端）" if self.remote else ""))
         self.root.geometry("1080x760")
         self.root.minsize(920, 620)
         try:
@@ -2968,6 +2976,7 @@ class ScanApp:
             self.root.after(900, lambda: self.reload_lock(background=True))
             self.root.after(1000 * 60 * self.auto_refresh_min, self._auto_tick)
         self.root.after(1500, self._init_scan_hook)      # 后台扫码监听（最小化也能扫）
+        self.root.after(6000, lambda: self.on_check_update(silent=True))   # 开机悄悄查一次更新
 
     def _init_orders_db(self):
         """建订单库；库为空而 JSON 缓存还在就先导入一次（JSON 保留不删）。"""
@@ -3987,6 +3996,7 @@ class ScanApp:
                      ("API 设置", self.on_api_settings, "TButton", "api.settings"),
                      ("子客户端管理", self.on_admin_panel, "Accent.TButton", "desktop.admin"),
                      ("对外访问设置", self.on_gateway_settings, "TButton", "gateway.settings"),
+                     ("检查更新", self.on_check_update, "TButton", "__any"),
                      ("重新登录", self.on_relogin, "TButton", "__any"))
         for i, (txt, cmd, sty, perm) in enumerate(_ops_list):
             _b = ttk.Button(ops, text=txt, command=cmd, style=sty)
@@ -4232,7 +4242,6 @@ class ScanApp:
             messagebox.showerror("打不开", str(e)[:200])
 
     def on_gateway_settings(self):
-        """对外访问设置：域名 / frp 服务器与 token / HTTPS 证书 / 一键启动（原来在安装向导里填的）。"""
         if self.remote:
             return self._host_only("对外访问设置")
         if not self._need_perm("gateway.settings"):
@@ -4244,6 +4253,45 @@ class ScanApp:
             kuaimai_gateway_ui.open_gateway_dialog(self)
         except Exception as e:
             messagebox.showerror("打不开", str(e)[:200])
+
+    # ---------- 检查更新 ----------
+    def on_check_update(self, silent=False):
+        """拉 version.json 看有没有新版；silent=True 时只有发现新版才弹窗。"""
+        if kmupd is None or kmupdui is None:
+            if not silent:
+                messagebox.showerror("检查更新", "缺少 kuaimai_update.py / kuaimai_update_ui.py")
+            return
+        cur = APP_VER
+        if not silent:
+            self.status_text.set("正在检查更新…")
+
+        def done(info):
+            try:
+                if not info.get("ok"):
+                    if not silent:
+                        messagebox.showwarning("检查更新", str(info.get("error") or "检查失败"))
+                        self.status_text.set("检查更新失败（可能没网）")
+                    return
+                if not info.get("has_update"):
+                    self.status_text.set("已是最新版 %s" % cur)
+                    if not silent:
+                        messagebox.showinfo("检查更新", "已经是最新版 %s" % cur)
+                    return
+                if silent:
+                    try:
+                        if kmclient and str(kmclient.load_config().get("update_skip") or "") == str(info.get("latest")):
+                            return                     # 这版已经提醒过，不再弹
+                    except Exception:
+                        pass
+                self.status_text.set("发现新版本 %s（点「检查更新」可下载）" % info.get("latest"))
+                kmupdui.ask_update(
+                    self.root, info, cur,
+                    on_later=lambda i: (kmclient.save_config({"update_skip": str(i.get("latest") or "")})
+                                        if kmclient else None))
+            except Exception:
+                pass
+
+        kmupdui.check_in_background(self.root, cur, done)
 
     # ---------- 子客户端（远程模式） ----------
     def _remote_startup(self):

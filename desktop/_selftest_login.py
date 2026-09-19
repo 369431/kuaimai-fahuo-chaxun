@@ -384,8 +384,11 @@ def main():
             root = tk.Tk()
             root.withdraw()
             lw = kmlw.LoginWindow(root, lambda: port, default_port=port)
-            lw.win.withdraw()
+            lw.win.update()
             ok("桌面登录窗能建起来", True)
+            ok("桌面登录窗真的会显示出来（root 已 withdraw 的情况下）",
+               bool(lw.win.winfo_ismapped()), "ismapped=%s viewable=%s"
+               % (lw.win.winfo_ismapped(), lw.win.winfo_viewable()))
             fake_app = type("A", (), {})()
             fake_app.root = root
             fake_app.session = admin
@@ -593,6 +596,23 @@ def main():
             ok("证书：本机没有 shsp.pw 证书做样本（跳过）", True, "跳过")
         ok("对外访问设置：status() 能跑出来",
            isinstance(gw.status(), dict) and "frpc" in gw.status())
+        # 服务目录（frp / kuaimai_https 不一定在程序目录旁）
+        other = os.path.join(TMP, "servroot")
+        try:
+            os.makedirs(os.path.join(other, "frp"), exist_ok=True)
+            os.makedirs(os.path.join(other, "kuaimai_https"), exist_ok=True)
+            c2 = gw.load_config()
+            c2["serv_root"] = other
+            gw.save_config(c2)
+            ok("服务目录：指到别处后 frp/中转/证书路径都跟过去",
+               gw.paths()["frp_dir"].startswith(other) and gw.paths()["cert_dir"].startswith(other),
+               gw.paths()["cert_dir"])
+            c3 = gw.load_config()
+            c3["serv_root"] = ""
+            gw.save_config(c3)
+            ok("服务目录：清空后回到程序目录", gw.paths()["frp_dir"].startswith(gwdir), gw.paths()["frp_dir"])
+        except Exception as e:
+            ok("服务目录：指到别处后 frp/中转/证书路径都跟过去", False, repr(e)[:150])
 
         # 20) 「对外访问设置」窗口能不能建起来（建完就销毁）
         try:
@@ -612,6 +632,42 @@ def main():
             groot.destroy()
         except Exception as e:
             ok("对外访问设置窗口能建起来", False, repr(e)[:200])
+
+        # 21) 检查更新：版本比较 + 清单解析（用本地 file:// 清单，不联网）
+        import kuaimai_update as upd
+        ok("版本比较：v1.11 比 v1.9 新", upd.newer("v1.11", "v1.9") and not upd.newer("v1.9", "v1.11"))
+        ok("版本比较：v1.11 == 1.11 不算新版", not upd.newer("v1.11", "1.11"))
+        mani = os.path.join(TMP, "version.json")
+        io.open(mani, "w", encoding="utf-8").write(json.dumps({
+            "version": "v1.12", "notes": "修了个 bug", "setup_url": "https://example.com/a.exe",
+            "sha256": "abc", "page_url": "https://example.com/page", "mandatory": False},
+            ensure_ascii=False))
+        _mu = "file:///" + mani.replace("\\", "/")
+        info = upd.check("v1.11", url=_mu)
+        ok("清单能解析出「有新版本」",
+           info.get("ok") and info.get("has_update") and info.get("latest") == "v1.12", info)
+        ok("清单里的说明/下载地址/校验值都拿到了",
+           info.get("notes") == "修了个 bug" and info.get("setup_url") == "https://example.com/a.exe"
+           and info.get("sha256") == "abc", info)
+        info2 = upd.check("v1.12", url=_mu)
+        ok("已是最新版时不提示更新", bool(info2.get("ok")) and not info2.get("has_update"), info2)
+        bad = upd.check("v1.11", url="file:///" + os.path.join(TMP, "nope.json").replace("\\", "/"))
+        ok("清单拉不到时给出人话错误", (not bad.get("ok")) and bool(bad.get("error")), bad.get("error"))
+        try:
+            import kuaimai_update_ui as updui
+            uroot = tk.Tk()
+            uroot.withdraw()
+            uwin = updui.ask_update(uroot, {"latest": "v1.12", "notes": "test", "setup_url": "",
+                                            "page_url": "", "mandatory": False}, "v1.11")
+            ok("检查更新窗口能建起来", uwin is not None)
+            try:
+                uwin.withdraw()
+                uwin.destroy()
+            except Exception:
+                pass
+            uroot.destroy()
+        except Exception as e:
+            ok("检查更新窗口能建起来", False, repr(e)[:200])
     finally:
         for s in servers:
             try:

@@ -99,6 +99,14 @@ class GatewayDialog:
         ttk.Checkbutton(form, text="同时把 443 也映射到这台（手机上不用带端口）",
                         variable=self.expose443).grid(row=5, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
+        ttk.Label(form, text="frp/中转目录").grid(row=6, column=0, sticky="w", pady=4)
+        self.serv_root = tk.StringVar(value=gw.serv_root())
+        ttk.Entry(form, textvariable=self.serv_root, font=("Consolas", 10)).grid(
+            row=6, column=1, sticky="ew", padx=8, pady=4)
+        ttk.Button(form, text="选择…", command=self._pick_serv_root).grid(row=6, column=2, sticky="w")
+        tk.Label(form, text="frp\frpc.exe 与 kuaimai_https 在哪（默认程序目录）",
+                 fg="#6e6e73", bg=BG).grid(row=7, column=0, columnspan=3, sticky="w", padx=2)
+
         # ---- 证书 ----
         cert = ttk.LabelFrame(win, text="HTTPS 证书（手机开摄像头必须 https）", padding=10)
         cert.pack(fill=tk.X, padx=14, pady=4)
@@ -163,6 +171,11 @@ class GatewayDialog:
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _pick_serv_root(self):
+        d = filedialog.askdirectory(title="选 frp / kuaimai_https 所在目录")
+        if d:
+            self.serv_root.set(d)
+
     def _open_cert_dir(self):
         d = gw.paths()["cert_dir"]
         try:
@@ -213,6 +226,7 @@ class GatewayDialog:
             lines.append("frpc.toml：%s　·　开机自启：%s"
                          % ("有" if st.get("frpc_toml") else "没有",
                             "已开" if st.get("autostart") else "没开"))
+            lines.append("服务目录：%s" % ((cfg.get("serv_root") or "").strip() or gw.serv_root()))
             self.status_txt.config(text="\n".join(lines))
             self.cert_txt.config(text=("当前证书：%s（到期 %s）" % (cert.get("domain"), cert.get("not_after") or "未知"))
                                       if cert else "还没有证书")
@@ -271,6 +285,7 @@ class GatewayDialog:
         except Exception:
             cfg["https_port"] = gw.DEFAULT_HTTPS_PORT
         cfg["expose_443"] = bool(self.expose443.get())
+        cfg["serv_root"] = self.serv_root.get().strip()
         return cfg
 
     def _save(self, restart=True):

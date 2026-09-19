@@ -14,6 +14,15 @@ from tkinter import ttk, messagebox, simpledialog
 
 import kuaimai_client as kmc
 
+try:
+    import kuaimai_update as kmupd          # 检查更新
+except Exception:
+    kmupd = None
+try:
+    import kuaimai_update_ui as kmupdui
+except Exception:
+    kmupdui = None
+
 BG = "#f2f2f7"
 BLUE = "#0b5394"
 
@@ -30,18 +39,25 @@ class LoginWindow:
 
         win = tk.Toplevel(parent)
         self.win = win
-        win.title("快麦发货查询 · 登录")
+        win.title("快麦扫码查询 %s · 登录" % kmc.APP_VER)
         win.geometry("520x470")
         win.resizable(False, False)
         try:
             win.configure(bg=BG)
         except Exception:
             pass
-        win.transient(parent)
+        # 注意：**不能** win.transient(parent)。
+        # main() 里 root 是 withdraw 的，而 Tk 的规则是「owner 不可见 → 子窗口也不显示」，
+        # 一 transient 就永远看不到登录窗（进程在跑、屏幕上一个窗口都没有）。
+        try:
+            win.deiconify()
+            win.lift()
+        except Exception:
+            pass
 
         head = tk.Frame(win, bg=BG)
         head.pack(fill=tk.X, padx=16, pady=(14, 4))
-        tk.Label(head, text="快麦发货查询", bg=BG, fg="#1d1d1f",
+        tk.Label(head, text="快麦发货查询 %s" % kmc.APP_VER, bg=BG, fg="#1d1d1f",
                  font=("Microsoft YaHei", 17, "bold")).pack(anchor="w")
         self.sub = tk.Label(head, text="登录后才能看到数据：管理员账号 = 主客户端，其它账号 = 子客户端",
                             bg=BG, fg="#6e6e73", font=("Microsoft YaHei", 9))
@@ -68,6 +84,7 @@ class LoginWindow:
 
         bar = tk.Frame(win, bg=BG)
         bar.pack(fill=tk.X, padx=16, pady=(0, 14))
+        ttk.Button(bar, text="检查更新", command=self._check_update).pack(side=tk.LEFT)
         ttk.Button(bar, text="退出", command=self._cancel).pack(side=tk.RIGHT)
         self.login_btn = ttk.Button(bar, text="登  录", style="Accent.TButton", command=self._submit)
         self.login_btn.pack(side=tk.RIGHT, padx=8)
@@ -85,6 +102,36 @@ class LoginWindow:
         self.nb.bind("<<NotebookTabChanged>>", lambda e: self._on_tab())
         self._on_tab()
         win.after(120, self._focus_entry)
+        win.after(3000, lambda: self._check_update(silent=True))   # 登录前也悄悄查一次更新
+        self._upd_info = None
+
+    def _check_update(self, silent=False):
+        """拉 version.json：silent=True 时只在窗口里提示，不弹窗。"""
+        if kmupd is None or kmupdui is None:
+            if not silent:
+                messagebox.showwarning("检查更新", "缺少更新模块（kuaimai_update*.py）", parent=self.win)
+            return
+        if (not silent) and self._upd_info and self._upd_info.get("has_update"):
+            kmupdui.ask_update(self.win, self._upd_info, kmc.APP_VER)
+            return
+        if not silent:
+            self._set_msg("正在检查更新…", ok=True)
+
+        def done(info):
+            self._upd_info = info
+            if not info.get("ok"):
+                if not silent:
+                    messagebox.showwarning("检查更新", str(info.get("error") or "检查失败"), parent=self.win)
+                return
+            if not info.get("has_update"):
+                if not silent:
+                    messagebox.showinfo("检查更新", "已经是最新版 %s" % kmc.APP_VER, parent=self.win)
+                return
+            self._set_msg("发现新版本 %s → 点「检查更新」下载" % info.get("latest"), ok=True)
+            if not silent:
+                kmupdui.ask_update(self.win, info, kmc.APP_VER)
+
+        kmupdui.check_in_background(self.win, kmc.APP_VER, done)
 
     # ---------------- 本机（主客户端） ----------------
     def _build_host(self, f):

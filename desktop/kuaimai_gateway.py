@@ -51,44 +51,64 @@ def base():
     return BASE
 
 
+def _cfg_path():
+    return os.path.join(BASE, "kuaimai_gateway.json")
+
+
+def _read_raw():
+    try:
+        with io.open(_cfg_path(), encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def serv_root():
+    r"""frp / kuaimai_https 到底在哪：默认程序目录；配置里指了别处就用它。
+
+    （本机就是这种情况：主程序装在 %LOCALAPPDATA%\KuaimaiScan，
+    而中转和 frp 在桌面另一个目录。）
+    """
+    r = str(_read_raw().get("serv_root") or "").strip()
+    if r and os.path.isdir(r):
+        return r
+    return BASE
+
+
 def paths():
+    root = serv_root()
     return {
-        "cfg": os.path.join(BASE, "kuaimai_gateway.json"),
-        "frp_dir": os.path.join(BASE, "frp"),
-        "frpc": os.path.join(BASE, "frp", "frpc.exe"),
-        "frpc_toml": os.path.join(BASE, "frp", "frpc.toml"),
-        "https_dir": os.path.join(BASE, "kuaimai_https"),
-        "relay_exe": os.path.join(BASE, "kuaimai_https", "km_https.exe"),
-        "relay_py": os.path.join(BASE, "kuaimai_https", "km_https.py"),
-        "cert_dir": os.path.join(BASE, "kuaimai_https", "lego", "certificates"),
-        "autostart_ps1": os.path.join(BASE, "装开机自启.ps1"),
+        "cfg": _cfg_path(),
+        "serv_root": root,
+        "frp_dir": os.path.join(root, "frp"),
+        "frpc": os.path.join(root, "frp", "frpc.exe"),
+        "frpc_toml": os.path.join(root, "frp", "frpc.toml"),
+        "https_dir": os.path.join(root, "kuaimai_https"),
+        "relay_exe": os.path.join(root, "kuaimai_https", "km_https.exe"),
+        "relay_py": os.path.join(root, "kuaimai_https", "km_https.py"),
+        "cert_dir": os.path.join(root, "kuaimai_https", "lego", "certificates"),
+        "autostart_ps1": os.path.join(root, "装开机自启.ps1"),
     }
 
 
 # ---------------------------------------------------------------- 配置
 def load_config():
-    p = paths()["cfg"]
-    d = {}
-    try:
-        with io.open(p, encoding="utf-8") as f:
-            d = json.load(f)
-    except Exception:
-        d = {}
-    if not isinstance(d, dict):
-        d = {}
+    d = _read_raw()
     out = {"domain": str(d.get("domain") or "").strip(),
            "server_addr": str(d.get("server_addr") or DEFAULT_SERVER).strip(),
            "server_port": int(d.get("server_port") or DEFAULT_SERVER_PORT),
            "token": str(d.get("token") or ""),
            "https_port": int(d.get("https_port") or DEFAULT_HTTPS_PORT),
            "web_port": int(d.get("web_port") or DEFAULT_WEB_PORT),
+           "serv_root": str(d.get("serv_root") or "").strip(),
            "expose_443": bool(d.get("expose_443", True))}
     return out
 
 
 def save_config(cfg):
     try:
-        with io.open(paths()["cfg"], "w", encoding="utf-8") as f:
+        with io.open(_cfg_path(), "w", encoding="utf-8") as f:
             f.write(json.dumps(cfg, ensure_ascii=False, indent=2))
         return True, ""
     except Exception as e:
