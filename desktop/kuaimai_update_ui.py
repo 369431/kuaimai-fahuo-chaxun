@@ -7,6 +7,7 @@ import webbrowser
 from tkinter import ttk, messagebox
 
 import kuaimai_update as upd
+import kuaimai_uikit as uikit
 
 BG = "#f2f2f7"
 BLUE = "#0b5394"
@@ -15,16 +16,18 @@ GREEN = "#1B7F35"
 
 def check_in_background(widget, current, on_result=None, timeout=10):
     """后台拉清单（不卡界面）；on_result(info) 在 UI 线程回调。"""
+    try:
+        uikit.start(widget)
+    except Exception:
+        pass
+
     def work():
         try:
             info = upd.check(current, timeout=timeout)
         except Exception as e:
             info = {"ok": False, "has_update": False, "latest": "", "error": str(e)[:120]}
         if on_result:
-            try:
-                widget.after(0, lambda: on_result(info))
-            except Exception:
-                pass
+            uikit.post(widget, on_result, info)
 
     threading.Thread(target=work, daemon=True).start()
 
@@ -38,6 +41,10 @@ def ask_update(parent, info, current, on_done=None, on_later=None):
     try:
         win.configure(bg=BG)
         win.transient(parent)
+    except Exception:
+        pass
+    try:
+        uikit.start(win)
     except Exception:
         pass
 
@@ -98,10 +105,7 @@ def ask_update(parent, info, current, on_done=None, on_later=None):
                                                          (" / %.1f MB" % (total / 1048576.0)) if total else ""))
                 except Exception:
                     pass
-            try:
-                win.after(0, apply)
-            except Exception:
-                pass
+            uikit.post(win, apply)
 
         def work():
             path, err = upd.download_setup(info, progress=prog)
@@ -130,10 +134,7 @@ def ask_update(parent, info, current, on_done=None, on_later=None):
                     tip.config(text=msg, fg="#d70015")
                     messagebox.showerror("打不开安装包", msg, parent=win)
                     btn_install.state(["!disabled"])
-            try:
-                win.after(0, done)
-            except Exception:
-                pass
+            uikit.post(win, done)
 
         threading.Thread(target=work, daemon=True).start()
 

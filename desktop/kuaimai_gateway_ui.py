@@ -10,6 +10,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
 import kuaimai_gateway as gw
+import kuaimai_uikit as uikit
 
 BG = "#f2f2f7"
 BLUE = "#0b5394"
@@ -141,6 +142,11 @@ class GatewayDialog:
                             justify="left", anchor="w", wraplength=690)
         self.msg.pack(fill=tk.X)
 
+        try:
+            uikit.start(win)          # 让后台线程能安全地把结果交回界面
+        except Exception:
+            pass
+
         self.refresh()
 
     # ---------------- 工具 ----------------
@@ -164,10 +170,7 @@ class GatewayDialog:
                 self._busy = False
                 if done:
                     done(res)
-            try:
-                self.win.after(0, fin)
-            except Exception:
-                pass
+            uikit.post(self.win, fin)
 
         threading.Thread(target=work, daemon=True).start()
 

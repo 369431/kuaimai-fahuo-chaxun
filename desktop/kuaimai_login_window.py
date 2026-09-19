@@ -13,6 +13,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 
 import kuaimai_client as kmc
+import kuaimai_uikit as uikit
 
 try:
     import kuaimai_update as kmupd          # 检查更新
@@ -40,8 +41,9 @@ class LoginWindow:
         win = tk.Toplevel(parent)
         self.win = win
         win.title("快麦扫码查询 %s · 登录" % kmc.APP_VER)
-        win.geometry("520x470")
-        win.resizable(False, False)
+        win.geometry("580x720")
+        win.minsize(560, 660)
+        win.resizable(True, True)
         try:
             win.configure(bg=BG)
         except Exception:
@@ -63,31 +65,33 @@ class LoginWindow:
                             bg=BG, fg="#6e6e73", font=("Microsoft YaHei", 9))
         self.sub.pack(anchor="w", pady=(2, 0))
 
-        self.nb = ttk.Notebook(win)
-        self.nb.pack(fill=tk.BOTH, expand=True, padx=16, pady=8)
-        self.tab_host = ttk.Frame(self.nb, padding=12)
-        self.tab_remote = ttk.Frame(self.nb, padding=12)
-        self.nb.add(self.tab_host, text="  本机（主客户端）  ")
-        self.nb.add(self.tab_remote, text="  子客户端（连主客户端）  ")
-
-        self._build_host(self.tab_host)
-        self._build_remote(self.tab_remote)
+        # 先把底部两栏占好位置（side=BOTTOM），再用 Notebook 填剩下空间：
+        # 这样无论标签页内容多高，「登录/退出」都不会被挤出可视区。
+        bar = tk.Frame(win, bg=BG)
+        bar.pack(side=tk.BOTTOM, fill=tk.X, padx=16, pady=(0, 12))
+        ttk.Button(bar, text="检查更新", command=self._check_update).pack(side=tk.LEFT)
+        ttk.Button(bar, text="退出", command=self._cancel).pack(side=tk.RIGHT)
+        self.login_btn = ttk.Button(bar, text="登  录", style="Accent.TButton", command=self._submit)
+        self.login_btn.pack(side=tk.RIGHT, padx=8)
 
         foot = tk.Frame(win, bg=BG)
-        foot.pack(fill=tk.X, padx=16, pady=(0, 4))
+        foot.pack(side=tk.BOTTOM, fill=tk.X, padx=16, pady=(0, 4))
         self.msg = tk.Label(foot, text="", bg=BG, fg="#d70015", font=("Microsoft YaHei", 9),
-                            wraplength=470, justify="left")
+                            wraplength=520, justify="left")
         self.msg.pack(anchor="w")
         self.memo = tk.BooleanVar(value=bool(self.cfg.get("remember", True)))
         ttk.Checkbutton(foot, text="记住账号与本机设置（不记密码）",
                         variable=self.memo).pack(anchor="w", pady=(4, 0))
 
-        bar = tk.Frame(win, bg=BG)
-        bar.pack(fill=tk.X, padx=16, pady=(0, 14))
-        ttk.Button(bar, text="检查更新", command=self._check_update).pack(side=tk.LEFT)
-        ttk.Button(bar, text="退出", command=self._cancel).pack(side=tk.RIGHT)
-        self.login_btn = ttk.Button(bar, text="登  录", style="Accent.TButton", command=self._submit)
-        self.login_btn.pack(side=tk.RIGHT, padx=8)
+        self.nb = ttk.Notebook(win)
+        self.nb.pack(fill=tk.BOTH, expand=True, padx=16, pady=8)
+        self.tab_host = ttk.Frame(self.nb, padding=12)
+        self.tab_remote = ttk.Frame(self.nb, padding=12)
+        self.nb.add(self.tab_host, text="  本机登录（这台就是主客户端）  ")
+        self.nb.add(self.tab_remote, text="  子客户端（连别的主客户端）  ")
+
+        self._build_host(self.tab_host)
+        self._build_remote(self.tab_remote)
 
         win.protocol("WM_DELETE_WINDOW", self._cancel)
         win.bind("<Return>", lambda e: self._submit())
@@ -104,6 +108,10 @@ class LoginWindow:
         win.after(120, self._focus_entry)
         win.after(3000, lambda: self._check_update(silent=True))   # 登录前也悄悄查一次更新
         self._upd_info = None
+        try:
+            uikit.start(win)          # 让后台线程能安全地把结果交回界面
+        except Exception:
+            pass
 
     def _check_update(self, silent=False):
         """拉 version.json：silent=True 时只在窗口里提示，不弹窗。"""
@@ -187,14 +195,15 @@ class LoginWindow:
         try:
             port = int(self.ensure_server() or self.default_port)
         except Exception as e:
-            self._set_msg("本机服务启动失败：%s" % str(e)[:120])
+            self.host_info.config(text="本机服务启动失败：%s" % str(e)[:120])
+            self._set_msg("本机服务启动失败：%s（检查 8790 端口是不是被别的程序占了）" % str(e)[:80])
             return
         self.cfg["port"] = port
         base = self._host_base()
 
         def work():
             ok, st = kmc.server_state(base)
-            self.win.after(0, lambda: self._apply_host_state(ok, st, base))
+            uikit.post(self.win, self._apply_host_state, ok, st, base)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -284,8 +293,8 @@ class LoginWindow:
                 found = kmc.discover()
             except Exception as e:
                 found = []
-                self.win.after(0, lambda: self._set_msg("自动发现失败：%s" % str(e)[:80]))
-            self.win.after(0, lambda: self._apply_found(found))
+                uikit.post(self.win, self._set_msg, "自动发现失败：%s" % str(e)[:80], False)
+            uikit.post(self.win, self._apply_found, found)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -322,7 +331,7 @@ class LoginWindow:
 
         def work():
             ok, st = kmc.server_state(base)
-            self.win.after(0, lambda: self._apply_test(ok, st, base))
+            uikit.post(self.win, self._apply_test, ok, st, base)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -398,7 +407,7 @@ class LoginWindow:
                     sess, err = kmc.login(base, name, pw, mode=mode)
             except Exception as e:
                 sess, err = None, str(e)[:150]
-            self.win.after(0, lambda: self._finish(sess, err, mode, base, name))
+            uikit.post(self.win, self._finish, sess, err, mode, base, name)
 
         threading.Thread(target=work, daemon=True).start()
 

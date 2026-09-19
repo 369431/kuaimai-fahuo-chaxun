@@ -20,6 +20,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -389,6 +390,30 @@ def main():
             ok("桌面登录窗真的会显示出来（root 已 withdraw 的情况下）",
                bool(lw.win.winfo_ismapped()), "ismapped=%s viewable=%s"
                % (lw.win.winfo_ismapped(), lw.win.winfo_viewable()))
+            # 「登录」按钮不能被挤出窗口（内容比窗口高时，底部按钮就看不见了）
+            try:
+                btn_bottom = lw.login_btn.winfo_rooty() + lw.login_btn.winfo_height()
+                win_bottom = lw.win.winfo_rooty() + lw.win.winfo_height()
+                ok("登录按钮在窗口可见范围内（不会被挤出可视区）",
+                   btn_bottom <= win_bottom + 2 and lw.login_btn.winfo_height() > 1,
+                   "按钮底 %s / 窗口底 %s" % (btn_bottom, win_bottom))
+            except Exception as e:
+                ok("登录按钮在窗口可见范围内（不会被挤出可视区）", False, repr(e)[:120])
+            # 后台线程 post 回 UI 线程：不再卡在“正在检查本机服务…”
+            try:
+                import kuaimai_uikit as uikit
+                flag = []
+                th = threading.Thread(target=lambda: uikit.post(lw.win, lambda: flag.append(1)))
+                th.start()
+                th.join(timeout=3)
+                for _ in range(30):
+                    lw.win.update()
+                    if flag:
+                        break
+                    time.sleep(0.05)
+                ok("后台线程能安全地把结果交回界面（修“一直在检查本机服务”）", bool(flag), flag)
+            except Exception as e:
+                ok("后台线程能安全地把结果交回界面（修“一直在检查本机服务”）", False, repr(e)[:120])
             fake_app = type("A", (), {})()
             fake_app.root = root
             fake_app.session = admin
