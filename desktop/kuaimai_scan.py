@@ -1722,7 +1722,7 @@ def play_alert_sound():
 # ============================ 内置手机网页服务 ============================
 WEB_PORT = 8790
 DISCOVER_PORT = 8791          # 子客户端「自动发现」的 UDP 广播端口
-APP_VER = (getattr(kmclient, "APP_VER", "") or "v1.11") if kmclient else "v1.11"
+APP_VER = (getattr(kmclient, "APP_VER", "") or "v1.13") if kmclient else "v1.13"
 # ---- 界面配色（macOS 风格扁平浅色）----
 UI_BG = "#f5f5f7"          # 窗口底
 UI_CARD = "#ffffff"        # 卡片
@@ -1970,6 +1970,10 @@ class _WebHandler(BaseHTTPRequestHandler):
             name = u.get("name")
             role = u.get("role") or "user"
             out.append({"name": name, "role": role, "device": u.get("device") or "",
+                        "owner": bool(u.get("owner")),
+                        "allow_multi_device": bool(u.get("allow_multi_device")),
+                        "online": bool(u.get("online")),
+                        "kinds": u.get("kinds") or [],
                         "perms": self._perms_of({"name": name, "role": role})})
         return {"catalog": (perms.catalog() if perms else []),
                 "groups": ([{"name": g, "keys": ks} for g, ks in perms.groups()] if perms else []),
@@ -4648,7 +4652,7 @@ class ScanApp:
 
     # ---------- 首次使用（未配置 API）----------
     def _first_run_api_hint(self):
-        """API 参数不完整时的提示：状态行常驻说明，弹窗只弹一次（不再每次启动都烦人）。"""
+        """API 参数不完整时：只在状态栏右侧写一行字，**不弹窗、不自动开窗口**。"""
         if API_CONF.get("appKey") and API_CONF.get("sessionId"):
             self._api_state_text("已配置")
             return
@@ -4658,19 +4662,6 @@ class ScanApp:
         if not self.can("api.settings"):
             self.status_text.set("快麦接口未配置：请让主客户端那台在「API 设置」里填好")
             return
-        s = load_settings()
-        if not s.get("api_hint_shown"):
-            s["api_hint_shown"] = 1
-            save_settings(s)
-            try:
-                messagebox.showinfo("需要配置快麦接口参数",
-                                    "还没有配置快麦接口参数（缺 %s）。\n\n"
-                                    "点主界面的「API 设置」填 appKey / appSecret / refreshToken / sessionId，\n"
-                                    "可以点「测试连接」验证，然后「保存并应用」。\n\n"
-                                    "（这条提示只会提醒一次，以后在状态栏右侧看接口状态即可）"
-                                    % "、".join(missing), parent=self.root)
-            except Exception:
-                pass
         self.status_text.set("快麦接口未配置（缺 %s）：点「API 设置」填写" % "、".join(missing))
 
     def _api_state_text(self, state):
@@ -6170,13 +6161,17 @@ class ScanApp:
         return rows
 
     def _render_records(self, rows):
-        """把行列表画到表上（UI 线程）。"""
-        for item in self.tree.get_children():
-            self.tree.delete(item)
+        """把行列表画到表上（UI 线程）。
+
+        **增量刷新**：只增删/更新真正变了的行 —— 以前是清空重插，最小化再打开时
+        （FocusIn 会触发一次强制刷新）整张表会闪一下。
+        """
+        tree = self.tree
         try:
             acc = (self.acc_var.get() if getattr(self, "acc_var", None) else "") or "全部"
         except Exception:
             acc = "全部"
+        # 账号下拉：列出记录里出现过的扫码账号（用全量行，不受筛选影响）
         accs = ["全部"]
         for r in rows:
             w = r.get("who") or ""
@@ -6190,20 +6185,55 @@ class ScanApp:
                     self.acc_var.set("全部")
         except Exception:
             pass
-        for r in rows:                     # 由旧到新逐个插到第一行 → 最新的排在最上面
+
+        def _vals(r):
+            return (r.get("time"), r.get("code"), r.get("pending"), r.get("shelf"),
+                    r.get("who") or "（本机扫码）", r.get("pnum") or "", r.get("zt") or 0,
+                    r.get("st") or 0, "【已打】" if r.get("prn") else "【打单】")
+
+        def _tags(r):
+            return ("printed",) if r.get("prn") else (("ok",) if r.get("ok") else ("alert",))
+
+        want = {}
+        for r in rows:
             if acc != "全部" and (r.get("who") or "") != acc:
                 continue
-            self.tree.insert("", 0, iid=str(r.get("id")),
-                             values=(r.get("time"), r.get("code"), r.get("pending"),
-                                     r.get("shelf"), r.get("who") or "（本机扫码）",
-                                     r.get("pnum") or "", r.get("zt") or 0, r.get("st") or 0,
-                                     "【已打】" if r.get("prn") else "【打单】"),
-                             tags=("printed",) if r.get("prn")
-                             else (("ok",) if r.get("ok") else ("alert",)))
-        try:
-            self.tree.yview_moveto(0)      # 刷新后停在顶部，最新那条一眼能看到
-        except Exception:
-            pass
+            want[str(r.get("id"))] = r
+        shown = getattr(self, "_shown_rows", None)
+        if shown is None:
+            shown = {}
+            self._shown_rows = shown
+        changed = False
+        for iid in list(shown.keys()):                     # 1) 不在列表里的删掉
+            if iid not in want:
+                try:
+                    tree.delete(iid)
+                except Exception:
+                    pass
+                shown.pop(iid, None)
+                changed = True
+        for iid, r in want.items():                        # 2) 新的插到最上面，变了的改值
+            v = _vals(r)
+            if iid in shown:
+                if shown[iid] != v:
+                    try:
+                        tree.item(iid, values=v, tags=_tags(r))
+                    except Exception:
+                        pass
+                    shown[iid] = v
+                    changed = True
+            else:
+                try:
+                    tree.insert("", 0, iid=iid, values=v, tags=_tags(r))
+                    shown[iid] = v
+                    changed = True
+                except Exception:
+                    pass
+        if changed:
+            try:
+                tree.yview_moveto(0)      # 有变化才回到顶部，避免无谓跳动
+            except Exception:
+                pass
 
     def _remote_bg(self, path, params=None, timeout=25, on_ok=None, label=""):
         """子客户端：所有主端请求都丢后台线程，回来再用 uikit 刷界面（不卡）。"""

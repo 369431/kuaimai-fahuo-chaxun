@@ -1415,53 +1415,75 @@ PERMS_HTML = r"""<!doctype html>
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   :root { --blue:#007AFF; --green:#34C759; --red:#FF3B30; --ink:#1d1d1f; --sub:#6e6e73;
           --line:rgba(60,60,67,.12); --fill:rgba(120,120,128,.10); --glass:rgba(255,255,255,.80); }
-  body { margin:0; padding:12px 12px 88px; color:var(--ink);
+  body { margin:0; padding:12px 12px 96px; color:var(--ink);
          font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
-         letter-spacing:-.01em; -webkit-font-smoothing:antialiased;
+         letter-spacing:-.01em; -webkit-font-smoothing:antialiased; font-size:16px;
          background:linear-gradient(170deg,#eef3fa 0%,#e6edf8 45%,#e1e8f4 100%) fixed; }
-  h1 { font-size:18px; margin:2px 0 4px; }
-  .note { font-size:12.5px; color:var(--sub); line-height:1.75; margin-bottom:10px; }
-  .note b { color:var(--ink); }
-  .note a { color:var(--blue); }
+  h1 { font-size:19px; margin:2px 0 6px; }
+  .note { font-size:12.5px; color:var(--sub); line-height:1.7; margin-bottom:10px; }
+  .note a { color:var(--blue); text-decoration:none; }
+  #msg { font-size:13.5px; font-weight:700; color:var(--green); margin:6px 2px 8px; min-height:18px; line-height:1.5; }
+  #msg.bad { color:#c62828; }
+  .chips { display:flex; gap:8px; overflow-x:auto; padding:2px 2px 10px; -webkit-overflow-scrolling:touch; }
+  .chip { flex:0 0 auto; border:1px solid var(--line); background:var(--glass); color:var(--ink);
+          border-radius:999px; padding:9px 14px; font-size:14.5px; font-weight:600; font-family:inherit;
+          display:flex; align-items:center; gap:6px; }
+  .chip.on { background:var(--blue); border-color:var(--blue); color:#fff; }
+  .dot { width:7px; height:7px; border-radius:50%; background:var(--green); }
+  .tag { font-size:11px; border-radius:6px; padding:1px 6px; background:var(--fill); color:var(--sub); font-weight:600; }
+  .chip.on .tag { background:rgba(255,255,255,.25); color:#fff; }
+  .tag.own { background:rgba(255,149,0,.18); color:#a85b00; }
+  .tag.adm { background:rgba(255,59,48,.14); color:#c62828; }
   .card { background:var(--glass); backdrop-filter:saturate(180%) blur(20px);
           -webkit-backdrop-filter:saturate(180%) blur(20px); border:1px solid rgba(255,255,255,.62);
-          border-radius:14px; padding:10px; box-shadow:0 8px 24px rgba(24,39,75,.10); }
-  .scroll { overflow:auto; max-height:68vh; }
-  table { border-collapse:separate; border-spacing:0; font-size:13px; }
-  th, td { padding:7px 8px; border-bottom:1px solid var(--line); white-space:nowrap; text-align:center; }
-  thead th { position:sticky; top:0; z-index:3; background:rgba(245,247,251,.97); font-weight:700; }
-  th.first, td.first { position:sticky; left:0; z-index:2; background:rgba(245,247,251,.97);
-        text-align:left; white-space:normal; min-width:210px; max-width:270px; }
-  thead th.first { z-index:4; }
-  tr.grp td { background:var(--fill); font-weight:700; color:var(--sub); text-align:left;
-        font-size:12px; letter-spacing:.04em; }
-  input[type=checkbox] { width:19px; height:19px; accent-color:var(--blue); }
-  .badge { font-size:11px; border-radius:6px; padding:1px 6px; background:var(--fill);
-        color:var(--sub); margin-left:4px; font-weight:400; }
-  .badge.adm { background:rgba(255,59,48,.14); color:#c62828; }
-  .bar { position:fixed; left:0; right:0; bottom:0; display:flex; gap:10px; padding:10px 12px;
-         background:rgba(255,255,255,.86); backdrop-filter:saturate(180%) blur(20px);
+          border-radius:14px; padding:6px 12px; box-shadow:0 8px 24px rgba(24,39,75,.10); margin-bottom:12px; }
+  .card h2 { font-size:13px; color:var(--sub); font-weight:700; letter-spacing:.04em;
+             margin:10px 0 4px; }
+  .row { display:flex; align-items:center; gap:10px; padding:12px 0; border-bottom:1px solid var(--line); }
+  .row:last-child { border-bottom:0; }
+  .row .txt { flex:1; min-width:0; }
+  .row .lbl { font-size:15.5px; line-height:1.35; }
+  .row .key { font-size:11.5px; color:#8e8e93; margin-top:2px; word-break:break-all; }
+  .sw { position:relative; flex:0 0 52px; width:52px; height:32px; }
+  .sw input { position:absolute; opacity:0; width:100%; height:100%; margin:0; }
+  .sw i { position:absolute; inset:0; border-radius:16px; background:var(--fill); transition:background .18s; }
+  .sw i:after { content:""; position:absolute; top:3px; left:3px; width:26px; height:26px; border-radius:50%;
+        background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.25); transition:transform .18s; }
+  .sw input:checked + i { background:var(--green); }
+  .sw input:checked + i:after { transform:translateX(20px); }
+  .sw input:disabled + i { opacity:.45; }
+  .row.dis .lbl { color:var(--sub); }
+  .who { font-size:12.5px; color:var(--sub); line-height:1.6; margin:8px 0 2px; }
+  .grid { display:block; }
+  @media (min-width:820px) { .grid { display:grid; grid-template-columns:1fr 1fr; gap:0 16px; align-items:start; } }
+  .bar { position:fixed; left:0; right:0; bottom:0; display:flex; gap:8px; padding:10px 12px 14px;
+         background:rgba(255,255,255,.88); backdrop-filter:saturate(180%) blur(20px);
          -webkit-backdrop-filter:saturate(180%) blur(20px); border-top:1px solid var(--line); }
-  .bar button { flex:1; padding:13px; font-size:16px; font-weight:700; border:0; border-radius:12px;
+  .bar button { flex:1; padding:14px 8px; font-size:16px; font-weight:700; border:0; border-radius:12px;
          background:var(--blue); color:#fff; font-family:inherit; }
-  .bar button.g { flex:0 0 108px; background:var(--fill); color:var(--blue); }
-  #msg { font-size:13.5px; font-weight:700; color:var(--green); margin:8px 2px; min-height:18px; line-height:1.6; }
-  #msg.bad { color:#c62828; }
+  .bar button.g { flex:0 0 auto; padding:14px 12px; background:var(--fill); color:var(--blue); font-size:14.5px; }
+  .bar button:disabled { opacity:.5; }
   @media (prefers-color-scheme: dark) {
     body { background:linear-gradient(170deg,#1c1c1e,#151517 60%,#1a1a1c) fixed; color:#f2f2f7; }
-    .card { background:rgba(28,28,30,.74); border-color:rgba(255,255,255,.08); }
-    thead th, th.first, td.first { background:rgba(38,38,40,.97); }
-    .bar { background:rgba(28,28,30,.86); border-top-color:rgba(255,255,255,.08); }
+    .card, .chip { background:rgba(28,28,30,.74); border-color:rgba(255,255,255,.08); }
+    .chip.on { background:var(--blue); }
+    .bar { background:rgba(28,28,30,.88); border-top-color:rgba(255,255,255,.08); }
+    .sw i { background:rgba(120,120,128,.28); }
   }
 </style></head>
 <body>
 <h1>权限管理</h1>
-<div class="note">按账号勾选能用的按钮 / 功能，<b>保存后立即生效</b>：没勾的按钮不显示，直接调接口也会被拒（403）。<br>
-查询类默认给所有人开放；动作类（改库存、盘0、可发…）默认关闭，要用哪个再勾。<br>
-管理员账号始终拥有全部权限，不用配置。 <a href="/">返回扫码</a></div>
+<div class="note">选一个账号 → 打开/关掉它可用的功能 → <b>保存后立即生效</b>（没开的按钮不显示，直接调接口也会被拒 403）。<br>
+查询类默认开放；动作类（改库存、盘 0、可发…）默认关闭。主账号与管理员的权限不用配。 <a href="/">返回扫码</a></div>
 <div id="msg"></div>
-<div class="card"><div class="scroll" id="matrix">正在载入…</div></div>
-<div class="bar"><button id="save">保存</button><button class="g" id="reload">重新载入</button></div>
+<div class="chips" id="chips"></div>
+<div id="panel">正在载入…</div>
+<div class="bar">
+  <button id="save">保存</button>
+  <button class="g" id="all">全选</button>
+  <button class="g" id="none">全不选</button>
+  <button class="g" id="reload">重载</button>
+</div>
 <script>
 const $ = id => document.getElementById(id);
 const esc = s => String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -1470,74 +1492,144 @@ const SID = (function(){
         return localStorage.getItem('km_sid') || ''; } catch(e){ return ''; }
 })();
 function withSid(u){ return SID ? (u + (u.indexOf('?') >= 0 ? '&' : '?') + 'sid=' + encodeURIComponent(SID)) : u; }
-let DATA = null;
+let DATA = null, CUR = null, DIRTY = 0;
+
 function msg(t, bad){ const el = $('msg'); el.textContent = t || ''; el.className = bad ? 'bad' : ''; }
+
 function load(){
   msg('正在载入…');
   fetch(withSid('/api/perms'), {cache:'no-store'})
     .then(r => r.json())
     .then(d => {
-      if(d.error || d.denied){ msg(d.error || '没有权限管理权限', true); return; }
-      DATA = d; render();
-      msg('载入完成：' + (d.users||[]).length + ' 个账号 / ' + (d.catalog||[]).length + ' 项权限');
+      if(d.error || d.denied){ msg(d.error || '没有权限管理权限', true); $('panel').innerHTML=''; return; }
+      DATA = d; DIRTY = 0;
+      const us = d.users || [];
+      if(!CUR || !us.some(u => u.name === CUR.name)) CUR = us[0] || null;
+      else CUR = us.filter(u => u.name === CUR.name)[0];
+      render();
+      msg('共 ' + us.length + ' 个账号 · ' + (d.catalog||[]).length + ' 项权限');
     })
     .catch(e => msg('载入失败：' + e.message, true));
 }
-function render(){
-  const us = DATA.users || [], cat = DATA.catalog || [];
-  let h = '<table><thead><tr><th class="first">账号 / 权限</th>';
-  us.forEach(function(u){
-    h += '<th>' + esc(u.name) + '<span class="badge' + (u.role === 'admin' ? ' adm' : '') + '">'
-       + (u.role === 'admin' ? '管理员' : '普通') + '</span></th>';
+
+function userByName(n){ return (DATA.users||[]).filter(u => u.name === n)[0] || null; }
+
+function render(){ renderChips(); renderPanel(); }
+
+function renderChips(){
+  const us = DATA.users || [];
+  $('chips').innerHTML = us.map(function(u){
+    const tag = u.owner ? '<span class="tag own">主账号</span>'
+              : (u.role === 'admin' ? '<span class="tag adm">管理员</span>' : '<span class="tag">子账号</span>');
+    const dot = u.online ? '<span class="dot"></span>' : '';
+    return '<button class="chip' + (CUR && u.name === CUR.name ? ' on' : '') + '" data-u="' + esc(u.name) + '">'
+         + dot + esc(u.name) + tag + (u.allow_multi_device ? '<span class="tag">双端</span>' : '') + '</button>';
+  }).join('');
+  $('chips').querySelectorAll('button[data-u]').forEach(function(b){
+    b.onclick = function(){ CUR = userByName(b.getAttribute('data-u')); render(); };
   });
-  h += '</tr></thead><tbody>';
-  let curG = null;
-  cat.forEach(function(c){
-    if(c.group !== curG){ curG = c.group;
-      h += '<tr class="grp"><td colspan="' + (us.length + 1) + '">' + esc(curG) + '</td></tr>'; }
-    h += '<tr><td class="first">' + esc(c.label)
-       + '<div style="color:#8e8e93;font-size:11.5px">' + esc(c.key) + '</div></td>';
-    us.forEach(function(u, i){
-      const on = !!(u.perms && u.perms[c.key]);
-      h += '<td><input type="checkbox" data-u="' + esc(u.name) + '" data-k="' + esc(c.key) + '"'
-         + (on ? ' checked' : '') + (u.role === 'admin' ? ' disabled' : '') + '></td>';
+}
+
+function renderPanel(){
+  if(!CUR){ $('panel').innerHTML = '<div class="card"><div class="row"><div class="txt">还没有账号</div></div></div>'; return; }
+  const cat = DATA.catalog || [], groups = DATA.groups || [];
+  const isAdmin = CUR.role === 'admin';
+  const locked = isAdmin;                       // 管理员全开、不用配
+  let h = '';
+  h += '<div class="card"><h2>账号设置</h2>';
+  h += '<div class="row' + (locked ? '' : '') + '"><div class="txt"><div class="lbl">电脑端 + 网页端同时登录</div>'
+     + '<div class="key">关：一处登录，新的把旧的顶下线　开：电脑端、网页端各留一个</div></div>'
+     + '<label class="sw"><input type="checkbox" id="multi"' + (CUR.allow_multi_device ? ' checked' : '') + '><i></i></label></div>';
+  h += '<div class="who">身份：' + (CUR.owner ? '主账号（主客户端只能用主账号登录）'
+        : (isAdmin ? '管理员' : '子账号'))
+     + (CUR.owner ? '' : '') + (CUR.device ? '　·　最近登录设备：' + esc(CUR.device) : '')
+     + (CUR.online ? '　·　当前在线（' + esc((CUR.kinds||[]).join(' / ')) + '）' : '') + '</div>';
+  h += '</div>';
+  if(locked){
+    h += '<div class="card"><h2>权限</h2><div class="row"><div class="txt">'
+       + '<div class="lbl">' + (CUR.owner ? '主账号' : '管理员') + '始终拥有全部权限</div>'
+       + '<div class="key">不用配置；要限制它就请先把它改成子账号（桌面端权限管理里改）</div>'
+       + '</div></div></div>';
+  } else {
+    groups.forEach(function(g){
+      h += '<div class="card"><h2>' + esc(g.name) + '</h2>';
+      (g.keys||[]).forEach(function(k){
+        const c = cat.filter(x => x.key === k)[0] || {key:k, label:k};
+        const on = !!(CUR.perms && CUR.perms[k]);
+        h += '<div class="row"><div class="txt"><div class="lbl">' + esc(c.label) + '</div>'
+           + '<div class="key">' + esc(k) + '</div></div>'
+           + '<label class="sw"><input type="checkbox" data-k="' + esc(k) + '"' + (on ? ' checked' : '') + '><i></i></label></div>';
+      });
+      h += '</div>';
     });
-    h += '</tr>';
+    $('panel').innerHTML = '<div class="grid" id="grid"></div>';
+    const grid = $('grid'), cards = [];
+    // 把上面的卡片按两列排（宽屏）；手机上单列
+    let tmp = document.createElement('div'); tmp.innerHTML = h;
+    while(tmp.firstChild){ cards.push(tmp.firstChild); tmp.removeChild(tmp.firstChild); }
+    const colA = document.createElement('div'), colB = document.createElement('div');
+    cards.forEach(function(c, i){ (i % 2 === 0 ? colA : colB).appendChild(c); });
+    grid.appendChild(colA); grid.appendChild(colB);
+  }
+  if(locked){ $('panel').innerHTML = h; }
+  const m = $('multi');
+  if(m) m.onchange = function(){ CUR.allow_multi_device = !!m.checked; DIRTY++; msg('改动未保存：同时登录已设为「' + (m.checked ? '开' : '关') + '」'); };
+  $('panel').querySelectorAll('input[data-k]').forEach(function(b){
+    b.onchange = function(){
+      if(!CUR.perms) CUR.perms = {};
+      CUR.perms[b.getAttribute('data-k')] = !!b.checked;
+      DIRTY++;
+      msg('改动未保存：' + b.getAttribute('data-k') + ' → ' + (b.checked ? '开' : '关'));
+    };
   });
-  h += '</tbody></table>';
-  $('matrix').innerHTML = h;
+  updateBar();
 }
-function collect(){
-  const out = {};
-  document.querySelectorAll('#matrix input[data-k]').forEach(function(b){
-    const i = b.getAttribute('data-u');
-    if(!out[i]) out[i] = {};
-    out[i][b.getAttribute('data-k')] = !!b.checked;
-  });
-  return out;
+
+function updateBar(){
+  $('save').textContent = DIRTY ? ('保存（' + DIRTY + ' 处改动）') : '保存';
+  $('save').disabled = false;
 }
+
+function setAll(v){
+  if(!CUR || CUR.role === 'admin'){ msg('管理员不用配置', true); return; }
+  $('panel').querySelectorAll('input[data-k]').forEach(function(b){ b.checked = v; });
+  if(!CUR.perms) CUR.perms = {};
+  (DATA.catalog||[]).forEach(function(c){ CUR.perms[c.key] = v; });
+  DIRTY++; msg('改动未保存：本账号权限已' + (v ? '全选' : '全不选'));
+  updateBar();
+}
+
 async function save(){
   if(!DATA){ msg('还没载入', true); return; }
-  if(!confirm('保存后立即生效，确定保存吗？')) return;
-  const map = collect();
-  const targets = (DATA.users || []).filter(function(u){ return u.role !== 'admin'; });
+  const us = DATA.users || [];
   let okN = 0; const errs = [];
-  for(let i = 0; i < targets.length; i++){
-    const u = targets[i];
+  for(let i = 0; i < us.length; i++){
+    const u = us[i];
+    if(u.role === 'admin') continue;                  // 管理员全开，不用写
     try {
       const r = await fetch(withSid('/api/perms'), {method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({name: u.name, perms: map[u.name] || {}})});
+        body: JSON.stringify({name: u.name, perms: u.perms || {}})});
       const j = await r.json();
-      if(r.ok && j.ok){ okN++; }
-      else { errs.push(u.name + '：' + ((j && j.error) || ('HTTP ' + r.status))); }
+      if(r.ok && j.ok){ okN++; } else { errs.push(u.name + '：' + ((j && j.error) || ('HTTP ' + r.status))); }
     } catch(e){ errs.push(u.name + '：' + e.message); }
+    try {
+      const r2 = await fetch(withSid('/api/users'), {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({action:'multi', name: u.name, flag: !!u.allow_multi_device})});
+      const j2 = await r2.json();
+      if(!(r2.ok && j2.ok)) errs.push(u.name + '（同时登录）：' + ((j2 && j2.error) || ('HTTP ' + r2.status)));
+    } catch(e){ errs.push(u.name + '（同时登录）：' + e.message); }
   }
+  DIRTY = 0;
   if(errs.length){ msg('保存 ' + okN + ' 个，失败 ' + errs.length + ' 个 —— ' + errs.join('；'), true); }
-  else { msg('已保存 ' + okN + ' 个账号的权限（立即生效）'); }
+  else { msg('已保存 ' + okN + ' 个账号权限 + 同时登录设置（立即生效）'); }
   load();
 }
+
 $('save').onclick = save;
+$('all').onclick = function(){ setAll(true); };
+$('none').onclick = function(){ setAll(false); };
 $('reload').onclick = load;
+window.addEventListener('beforeunload', function(e){ if(DIRTY){ e.preventDefault(); e.returnValue = ''; } });
 load();
 </script>
 </body></html>

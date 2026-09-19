@@ -638,6 +638,37 @@ def main():
                                          timeout=8)
                 ok("子账号登录响应里 owner=False（登录窗据此不让它当主客户端）",
                    okk4 and r4.get("ok") and r4.get("owner") is False, r4.get("owner"))
+                # 网页端权限管理页：手机友好（选账号 + 开关列表）+ 带「同时登录」
+                # （注意：先跑这几条，最后再验主账号登录 —— 主账号再登录会把当前会话顶掉）
+                okp = False
+                rp = {}
+                try:
+                    import json as _json
+                    import urllib.request as _ur
+                    _tk = str(getattr(hs, "token", "") or "")
+                    _op = _ur.build_opener(_ur.ProxyHandler({}))
+                    rp = _json.loads(_op.open(hbase2 + "/api/perms?sid=" + _tk, timeout=6)
+                                     .read().decode("utf-8"))
+                    okp = bool(rp) and not rp.get("error")
+                except Exception as e:
+                    okp = False
+                    rp = {"error": repr(e)[:80]}
+                ok("/api/perms 每个账号带 owner / allow_multi_device（网页页需用）",
+                   okp and bool(rp.get("users")) and all(
+                       ("owner" in u and "allow_multi_device" in u) for u in (rp.get("users") or [])),
+                   len(rp.get("users") or []))
+                try:
+                    import urllib.request as _ur
+                    _op2 = _ur.build_opener(_ur.ProxyHandler({}))
+                    _req = _ur.Request(hbase2 + "/perms?sid=" + str(getattr(hs, "token", "") or ""))
+                    _pg = _op2.open(_req, timeout=8).read().decode("utf-8", "replace")
+                    ok("网页权限页：手机友好（账号切换 chips + 开关列表）",
+                       ('id="chips"' in _pg) and ("data-k" in _pg), len(_pg))
+                    ok("网页权限页：带「电脑端 + 网页端同时登录」开关",
+                       ("同时登录" in _pg) and ("multi" in _pg))
+                except Exception as e:
+                    ok("网页权限页：手机友好（账号切换 chips + 开关列表）", False, repr(e)[:150])
+                # 放最后：主账号再登录一次（会把上面用的会话顶掉，所以后面别再用了）
                 okk5, r5 = kmc.http_json(hbase2, "/api/auth/login", "POST",
                                          body={"name": owner_name, "pw": "pw12345",
                                                "kind": "desktop", "dev_id": "selftest-own"},
