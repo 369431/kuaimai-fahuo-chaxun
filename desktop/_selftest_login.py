@@ -52,8 +52,12 @@ class _Tee:
 sys.stdout = _Tee()
 
 TMP = tempfile.mkdtemp(prefix="km_selftest_")
-REAL_USERS = os.path.join(os.path.dirname(os.path.abspath(sys.executable)) if getattr(sys, "frozen", False) else HERE,
-                          "kuaimai_users.json")
+REAL_USERS = []          # 跑之前/之后都比对哈希：真账号文件一个也不能被动
+for _p in (os.path.join(HERE, "kuaimai_users.json"),
+           os.path.join(os.path.dirname(HERE), "kuaimai_users.json"),
+           os.path.join(os.path.expanduser("~"), "Desktop", "kuaimai_users.json")):
+    if os.path.exists(_p):
+        REAL_USERS.append(_p)
 FAILS = []
 STEPS = []
 
@@ -170,9 +174,9 @@ def free_port(start=21000, end=31000):
 
 
 def main():
-    real_before = sha(REAL_USERS)
+    real_before = {p: sha(p) for p in REAL_USERS}
     print("临时目录：%s" % TMP)
-    print("真实账号文件：%s（跑完要比对这个文件的哈希）" % REAL_USERS)
+    print("真实账号文件（跑完要逐一比对哈希）：%s" % (REAL_USERS or "（无）"))
 
     import kuaimai_scan as km
     import kuaimai_client as kmc
@@ -183,7 +187,7 @@ def main():
     km.auth.USERS_FILE = os.path.join(TMP, "kuaimai_users.json")
     km.auth.BASE_DIR = TMP
     kmc.CONFIG_FILE = os.path.join(TMP, "kuaimai_client.json")
-    if os.path.abspath(km.auth.USERS_FILE) == os.path.abspath(REAL_USERS):
+    if os.path.abspath(km.auth.USERS_FILE) in [os.path.abspath(p) for p in REAL_USERS]:
         print("！！临时账号文件挂载失败，中止")
         return 2
     print("已把账号文件挂到临时目录：%s" % km.auth.USERS_FILE)
@@ -514,6 +518,72 @@ def main():
             except Exception:
                 pass
             km.stop_web_server()
+
+        # 19) 对外访问设置（域名 / frp / 证书）的逻辑：配置 + frpc.toml + 证书安装校验
+        gwdir = os.path.join(TMP, "gw")
+        try:
+            os.makedirs(os.path.join(gwdir, "frp"), exist_ok=True)
+        except Exception:
+            pass
+        import kuaimai_gateway as gw
+        gw.set_base(gwdir)
+        gcfg = {"domain": "shsp.pw", "server_addr": "106.52.122.158", "server_port": 7000,
+                "token": "tok-123", "https_port": 9443, "web_port": 8790, "expose_443": True}
+        okw, gerr = gw.save_config(gcfg)
+        ok("对外访问设置：配置能存", okw, gerr)
+        okw, gerr = gw.write_frpc_toml(gcfg)
+        toml = ""
+        try:
+            toml = io.open(gw.paths()["frpc_toml"], encoding="utf-8").read()
+        except Exception:
+            pass
+        ok("对外访问设置：frpc.toml 写对了（服务器/token/9443/443）",
+           okw and 'serverAddr = "106.52.122.158"' in toml and 'auth.token = "tok-123"' in toml
+           and "remotePort = 9443" in toml and "remotePort = 443" in toml, toml[:80].replace("\r", ""))
+        ok("对外访问设置：外网地址拼得对", gw.public_url(gcfg) == "https://shsp.pw:9443/", gw.public_url(gcfg))
+        ok("对外访问设置：配置读回一致", (gw.load_config().get("token") == "tok-123"
+                                     and gw.load_config().get("domain") == "shsp.pw"))
+        # 真证书（本机现成的 shsp.pw 一对）→ 装进临时目录
+        fx_crt = r"C:\Users\Kerwin\Desktop\kuaimai_https\lego\certificates\shsp.pw.crt"
+        fx_key = r"C:\Users\Kerwin\Desktop\kuaimai_https\lego\certificates\shsp.pw.key"
+        if os.path.exists(fx_crt) and os.path.exists(fx_key):
+            okp, pmsg = gw.check_pair(fx_crt, fx_key)
+            ok("证书：一对的 .crt/.key 能通过校验", okp, pmsg)
+            oki, imsg, dom = gw.install_cert(fx_crt, fx_key, "")
+            ok("证书：能装进证书目录并识别域名", oki and dom == "shsp.pw", "%s / %s" % (imsg, dom))
+            ok("证书：装完能在清单里看到（带到期日）",
+               any(c.get("domain") == "shsp.pw" and c.get("not_after") for c in gw.cert_pairs()),
+               [c.get("domain") for c in gw.cert_pairs()])
+            oki2, imsg2, dom2 = gw.install_cert(fx_crt, fx_key, "../坏域名")
+            ok("证书：手填的怪域名会被拌掉（用证书里的真域名）",
+               oki2 and dom2 == "shsp.pw"
+               and all(os.path.dirname(c["crt"]) == gw.paths()["cert_dir"] for c in gw.cert_pairs()),
+               "%s / %s" % (imsg2, dom2))
+            bad_ok, bad_msg = gw.check_pair(fx_crt, os.path.join(gw.paths()["cert_dir"], "shsp.pw.key") + ".nope")
+            ok("证书：错的私钥会被拦住", (not bad_ok), bad_msg)
+        else:
+            ok("证书：本机没有 shsp.pw 证书做样本（跳过）", True, "跳过")
+        ok("对外访问设置：status() 能跑出来",
+           isinstance(gw.status(), dict) and "frpc" in gw.status())
+
+        # 20) 「对外访问设置」窗口能不能建起来（建完就销毁）
+        try:
+            import kuaimai_gateway_ui as gwui
+            groot = tk.Tk()
+            groot.withdraw()
+            gapp = type("A", (), {})()
+            gapp.root = groot
+            gwui.open_gateway_dialog(gapp)
+            gwin = getattr(gapp, "_gw_win", None)
+            ok("对外访问设置窗口能建起来", gwin is not None)
+            try:
+                gwin.withdraw()
+                gwin.destroy()
+            except Exception:
+                pass
+            groot.destroy()
+        except Exception as e:
+            ok("对外访问设置窗口能建起来", False, repr(e)[:200])
     finally:
         for s in servers:
             try:
@@ -525,9 +595,9 @@ def main():
             except Exception:
                 pass
 
-    real_after = sha(REAL_USERS)
-    ok("真实账号文件没被碰过", real_before == real_after,
-       "%s → %s" % (real_before[:12], real_after[:12]))
+    real_after = {p: sha(p) for p in REAL_USERS}
+    ok("真实账号文件一个也没被碰过", real_before == real_after,
+       {k: (v[:10], real_after.get(k, "")[:10]) for k, v in real_before.items() if v != real_after.get(k)})
     n_fail = len(FAILS)
     print("\n==== %d 项检查，%d 项失败 ====" % (len(STEPS), n_fail))
     for name, _c, extra in STEPS:

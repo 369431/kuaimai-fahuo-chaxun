@@ -62,6 +62,14 @@ try:
     import kuaimai_admin_panel          # 主账号的「子客户端管理」面板
 except Exception:
     kuaimai_admin_panel = None
+try:
+    import kuaimai_gateway_ui           # 「对外访问设置」（域名 / frp / 证书）
+except Exception:
+    kuaimai_gateway_ui = None
+try:
+    import kuaimai_gateway as kmgw      # 对外访问配置 / 证书 / 隧道启停
+except Exception:
+    kmgw = None
 import kuaimai_db              # 订单缓存 SQLite 存储层（kuaimai_db.py）
 import traceback
 import collections
@@ -1702,7 +1710,7 @@ def play_alert_sound():
 # ============================ 内置手机网页服务 ============================
 WEB_PORT = 8790
 DISCOVER_PORT = 8791          # 子客户端「自动发现」的 UDP 广播端口
-APP_VER = "v1.10"
+APP_VER = "v1.11"
 # ---- 界面配色（macOS 风格扁平浅色）----
 UI_BG = "#f5f5f7"          # 窗口底
 UI_CARD = "#ffffff"        # 卡片
@@ -3009,8 +3017,14 @@ class ScanApp:
         if not urls:
             urls.append("http://127.0.0.1:%d/%s" % (port, qs))
         sub = []
-        if host:                                   # 客户那套：域名 + 9443（frp 转发到本机）
-            sub.append("https://%s:9443" % host)
+        _dom = ""
+        try:
+            _dom = str((kmgw.load_config() if kmgw else {}).get("domain") or "").strip()
+        except Exception:
+            _dom = ""
+        _dom = _dom or host                      # 对外域名：优光「对外访问设置」里填的
+        if _dom:
+            sub.append("https://%s:9443" % _dom)  # 客户那套：域名 + 9443（frp 转发到本机）
         _ips = lan_ips()
         if _ips:
             sub.append("%s:%d" % (_ips[0], port))
@@ -3964,6 +3978,7 @@ class ScanApp:
                      ("清空日志", self.on_clear_logs, "TButton", "__host"),
                      ("API 设置", self.on_api_settings, "TButton", "api.settings"),
                      ("子客户端管理", self.on_admin_panel, "Accent.TButton", "desktop.admin"),
+                     ("对外访问设置", self.on_gateway_settings, "TButton", "gateway.settings"),
                      ("重新登录", self.on_relogin, "TButton", "__any"))
         for i, (txt, cmd, sty, perm) in enumerate(_ops_list):
             _b = ttk.Button(ops, text=txt, command=cmd, style=sty)
@@ -4050,7 +4065,7 @@ class ScanApp:
             return True
         if key == "__host":                 # 只有主客户端才能做的事
             return not self.remote
-        if self.remote and key in ("data.refresh", "api.settings"):
+        if self.remote and key in ("data.refresh", "api.settings", "gateway.settings"):
             return False                    # 这些只能在主客户端那台上做
         s = self.session
         return True if s is None else bool(s.can(key))
@@ -4197,7 +4212,6 @@ class ScanApp:
         os._exit(0)
 
     def on_admin_panel(self):
-        """主账号：子客户端管理（账号 / 权限 / 在线设备）。"""
         if not self._need_perm("desktop.admin"):
             return
         if kuaimai_admin_panel is None:
@@ -4205,6 +4219,20 @@ class ScanApp:
             return
         try:
             kuaimai_admin_panel.open_admin_panel(self)
+        except Exception as e:
+            messagebox.showerror("打不开", str(e)[:200])
+
+    def on_gateway_settings(self):
+        """对外访问设置：域名 / frp 服务器与 token / HTTPS 证书 / 一键启动（原来在安装向导里填的）。"""
+        if self.remote:
+            return self._host_only("对外访问设置")
+        if not self._need_perm("gateway.settings"):
+            return
+        if kuaimai_gateway_ui is None:
+            messagebox.showerror("打不开", "缺少 kuaimai_gateway_ui.py")
+            return
+        try:
+            kuaimai_gateway_ui.open_gateway_dialog(self)
         except Exception as e:
             messagebox.showerror("打不开", str(e)[:200])
 

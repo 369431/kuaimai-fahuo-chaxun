@@ -41,6 +41,7 @@ CATALOG = [
     ("api.settings",    "API 设置（换账号 / 换网关）",                  "动作类（默认关闭）", False),
     ("stock.sent.clear", "现货可发 · 清空已发",                        "管理", False),
     ("desktop.admin",   "子客户端管理（账号 / 权限 / 在线设备）",       "管理", False),
+    ("gateway.settings", "对外访问设置（域名 / frp / 证书）",            "管理", False),
 ]
 
 KEYS = [c[0] for c in CATALOG]

@@ -103,6 +103,7 @@ python -m PyInstaller --noconfirm --onefile desktop/kuaimai_scan.py
 | `api.settings` | API 设置（换账号 / 换网关） | 关 |
 | `stock.sent.clear` | 现货可发 · 清空已发 | 关 |
 | `desktop.admin` | 子客户端管理（账号 / 权限 / 在线设备） | 关（仅管理员） |
+| `gateway.settings` | 对外访问设置（域名 / frp / 证书） | 关（仅管理员） |
 
 主客户端侧额外接口（子客户端 / 自动发现用，自带账号校验）：
 
@@ -119,6 +120,22 @@ UDP  8791                     广播应答（子客户端「自动发现」，�
 ```
 
 > 桌面端请求都用 `X-KM-Token` 头带会话 token（不依赖 Cookie），并且**不走系统代理**——否则客户电脑上装了代理/安全软件时，局域网请求会被拐跑。
+
+## 对外访问设置（域名 / frp / 证书）
+
+原来这些是**安装向导**里填的（frp 服务器地址/端口/token + 证书两个文件）。现在装完也能在软件里改：
+主界面「操作」区 → **对外访问设置**（仅管理员 / 主客户端可用，子客户端上直接置灰）。
+
+- **域名 / frp 服务器地址 / 服务器端口 / frp token / 对外 HTTPS 端口 / 是否同时映射 443**
+  → 存在 `kuaimai_gateway.json`，保存时按**与安装包同一套模板**重写 `frp\frpc.toml`
+- **证书**：「选择 .crt 和 .key 并安装…」→ 先用 `ssl.load_cert_chain` **真校验是不是一对**（不匹配直接拒），
+  再放成 `kuaimai_https\lego\certificates\<域名>.crt / .key`（域名从证书里读，Cloudflare 的 `_bundle` 后缀自动去掉）
+  · 状态区显示**当前证书到期日**；剩余 < 15 天会提示；换证书不用重装
+- **一键启动**：「只重启 HTTPS 中转」/「保存并重启隧道」（frpc + 中转）/「一键启动全部」/ **开机自启开关**
+  （frpc 有开机自启任务 `KuaimaiFrpc` 就走任务，否则直接起进程）
+- **状态区**一眼看：对外地址 `https://<域名>:9443/`、8790 / 9443 有没有在听、frpc 在不在跑、证书到期、frpc.toml 有没有
+
+对应文件：`desktop/kuaimai_gateway.py`（逻辑）、`desktop/kuaimai_gateway_ui.py`（窗口）。
 
 自检（无界面，临时目录 + 临时端口，不会动你的真账号/真数据库）：
 
