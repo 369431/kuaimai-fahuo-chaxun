@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 快麦扫码查待发货 + 可售库存（增强版）
@@ -31,7 +31,8 @@ import concurrent.futures
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 try:
-    from kuaimai_webui import WEB_INDEX_HTML, PICK_HTML, ORDER_HTML, STOCK_HTML, STOCKTAKE_HTML
+    from kuaimai_webui import (WEB_INDEX_HTML, PICK_HTML, ORDER_HTML, STOCK_HTML,
+                               STOCKTAKE_HTML, PERMS_HTML)
     from kuaimai_login_ui import LOGIN_HTML
 except Exception:
     WEB_INDEX_HTML = "<h1>缺少 kuaimai_webui.py</h1>"
@@ -39,11 +40,28 @@ except Exception:
     ORDER_HTML = WEB_INDEX_HTML
     STOCK_HTML = WEB_INDEX_HTML
     STOCKTAKE_HTML = WEB_INDEX_HTML
+    PERMS_HTML = WEB_INDEX_HTML
     LOGIN_HTML = WEB_INDEX_HTML
 try:
     import kuaimai_auth as auth
 except Exception:
     auth = None
+try:
+    import kuaimai_perms as perms      # 网页按钮权限清单（权限键的唯一来源）
+except Exception:
+    perms = None
+try:
+    import kuaimai_client as kmclient   # 桌面端登录 / 主-子客户端（会话、局域网发现、远程接口）
+except Exception:
+    kmclient = None
+try:
+    from kuaimai_login_window import ask_login   # 桌面端登录窗
+except Exception:
+    ask_login = None
+try:
+    import kuaimai_admin_panel          # 主账号的「子客户端管理」面板
+except Exception:
+    kuaimai_admin_panel = None
 import kuaimai_db              # 订单缓存 SQLite 存储层（kuaimai_db.py）
 import traceback
 import collections
@@ -936,12 +954,31 @@ def _rec_shipped(rec):
     return str(rec.get("status") or "").strip().upper() in SHIPPED_SYS_STATUS
 
 
+# 只统计这两家的加急（用户要求）
+URGENT_EXPRESS_KEYS = ("中通", "申通")
+URGENT_EXPRESS_CODES = ("ZTO", "STO", "ZHONGTONG", "SHENTONG")
+
+
+def _urgent_express(name):
+    """快递名 → 是否属于要统计的两家（返回规范名或 ""）。"""
+    s = str(name or "").upper()
+    for k in URGENT_EXPRESS_KEYS:
+        if k in str(name or ""):
+            return k
+    for c in URGENT_EXPRESS_CODES:
+        if c in s:
+            return "中通" if c in ("ZTO", "ZHONGTONG") else "申通"
+    return ""
+
+
 def _store_record(trade):
     """生成 store 记录（全量保留，含平台状态；剔除动作放到本地建索引时做）。"""
     count, pairs = _order_contribution(trade)
     return {"status": trade.get("sysStatus"),
             "us": trade.get("unifiedStatus"),
             "urgent": bool(trade.get("isUrgent")),
+            "ex": str(trade.get("expressCompanyName") or trade.get("logisticsCompanyName")
+                      or trade.get("expressCode") or ""),
             "count": count, "pairs": pairs}
 
 
@@ -1315,6 +1352,12 @@ def rebuild_index(store, relation="不限", n=0):
             if rec.get("urgent"):
                 e["uo"] += 1        # 加急订单数
                 e["up"] += qty      # 加急件数
+                # 一单一件的加急，按快递拆开（只统计中通/申通）
+                if int(rec.get("count") or 0) == 1:
+                    _ex = _urgent_express(rec.get("ex"))
+                    if _ex:
+                        ue = e.setdefault("ue", {})
+                        ue[_ex] = int(ue.get(_ex, 0)) + 1
     live = len(store) - shipped
     stat = {"total_orders": live, "store_orders": len(store),
             "shipped_excluded": shipped, "included_orders": included,
@@ -1658,6 +1701,8 @@ def play_alert_sound():
 
 # ============================ 内置手机网页服务 ============================
 WEB_PORT = 8790
+DISCOVER_PORT = 8791          # 子客户端「自动发现」的 UDP 广播端口
+APP_VER = "v1.10"
 # ---- 界面配色（macOS 风格扁平浅色）----
 UI_BG = "#f5f5f7"          # 窗口底
 UI_CARD = "#ffffff"        # 卡片
@@ -1694,6 +1739,19 @@ def lan_ips():
     except Exception:
         pass
     return ips
+
+
+class _Denied(Exception):
+    """没有权限：由 _need() 抛出，在 do_GET / do_POST 顶层统一转成 403。
+
+    不能直接把 _json(...) 的返回值当「拒绝标记」—— _json 会把响应立刻发出去并返回 None，
+    调用方就看不见拒绝、继续把动作执行完了（客户端看到 403，接口却真的变了）。
+    """
+
+    def __init__(self, key, label):
+        Exception.__init__(self, label)
+        self.perm = key
+        self.label = label
 
 
 class _WebHandler(BaseHTTPRequestHandler):
@@ -1755,7 +1813,15 @@ class _WebHandler(BaseHTTPRequestHandler):
         return ""
 
     def _token(self, qs):
-        return ((qs.get("sid") or [""])[0] or "").strip() or self._cookie_token()
+        """会话 token：查询串 sid / 请求头 X-KM-Token（桌面端用）/ Cookie。"""
+        hdr = (self.headers.get("X-KM-Token") or "").strip()
+        return ((qs.get("sid") or [""])[0] or "").strip() or hdr or self._cookie_token()
+
+    def _peer_ip(self):
+        try:
+            return str((self.client_address or [""])[0] or "")
+        except Exception:
+            return ""
 
     def _auth(self, qs):
         """返回 {'name','role'} 或 None；带旧访问口令 k 视为管理员（兼容老书签）。"""
@@ -1801,12 +1867,110 @@ class _WebHandler(BaseHTTPRequestHandler):
             return False
         return peer in ("127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost")
 
+    # ---------- 按钮权限（按账号） ----------
+    def _perms_of(self, me):
+        """当前登录账号的完整权限表（管理员全开；老账号缺字段按默认值）。"""
+        if not me or auth is None or perms is None:
+            return {}
+        try:
+            return perms.effective(auth.user_perms_raw(me.get("name")), me.get("role"))
+        except Exception:
+            return {}
+
+    def _can(self, me, key):
+        if not me:
+            return False
+        pf = self._perms_of(me)
+        if not pf:                      # 账号/权限模块不可用时不要把所有人锁死
+            return auth is None or perms is None
+        return bool(pf.get(key))
+
+    def _deny(self, key):
+        label = (perms.LABELS.get(key) if perms else None) or key
+        raise _Denied(key, label)
+
+    def _need(self, me, key):
+        """有权限就返回 None 继续跑；没权限则抛 _Denied（顶层转 403，后续动作一律不执行）。"""
+        if not self._can(me, key):
+            self._deny(key)
+        return None
+
+    def _need_any(self, me, keys):
+        for k in keys:
+            if self._can(me, k):
+                return None
+        self._deny(keys[0])
+        return None
+
+    def _page(self, html, me):
+        """把当前账号的权限表塞进页面：左上角入口和按钮显隐都由它决定。"""
+        try:
+            me_json = json.dumps({"name": (me or {}).get("name") or "",
+                                  "role": (me or {}).get("role") or ""}, ensure_ascii=False)
+            p_json = json.dumps(self._perms_of(me), ensure_ascii=False)
+            inject = ("<script>window.KM_ME=%s;window.KM_PERMS=%s;"
+                      "window.KM_CAN=function(k){var p=window.KM_PERMS;"
+                      "if(!p)return true;return p[k]!==false;};"
+                      "window.KM_APPLY=function(){var p=window.KM_PERMS;if(!p)return;"
+                      "var els=document.querySelectorAll('[data-perm]');"
+                      "for(var i=0;i<els.length;i++){"
+                      "if(p[els[i].getAttribute('data-perm')]===false)els[i].style.display='none';}};"
+                      "if(document.readyState==='loading')"
+                      "{document.addEventListener('DOMContentLoaded',window.KM_APPLY);}"
+                      "else{window.KM_APPLY();}</script>") % (me_json, p_json)
+            # 左上角：管理员是可点的「权限管理」入口，普通账号显示账号名（服务端直接渲染）
+            name = str((me or {}).get("name") or "")
+            if str((me or {}).get("role") or "") == "admin":
+                title = '<a href="/perms" style="color:inherit;text-decoration:none">权限管理</a>'
+            else:
+                title = (name.replace("&", "&amp;").replace("<", "&lt;")
+                             .replace(">", "&gt;").replace('"', "&quot;"))
+            html = html.replace('<span id="hdrTitle"></span>',
+                                '<span id="hdrTitle">' + title + '</span>', 1)
+            if "</head>" in html:
+                return html.replace("</head>", inject + "</head>", 1).encode("utf-8")
+            return (inject + html).encode("utf-8")
+        except Exception:
+            return html.encode("utf-8")
+
+    def _forbidden_page(self, msg):
+        body = ("<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>"
+                "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                "<title>无权访问</title></head>"
+                "<body style='font-family:-apple-system,sans-serif;padding:28px;line-height:1.8'>"
+                "<h3>无权访问</h3><p>%s</p>"
+                "<p style='color:#666'>这是账号权限设置，请联系管理员。</p>"
+                "<p><a href='/'>返回首页</a></p></body></html>") % (msg or "没有权限")
+        return self._send(body.encode("utf-8"), "text/html; charset=utf-8", 403)
+
+    def _perms_payload(self):
+        """权限管理页面的数据：清单 + 每个账号当前的完整权限表。"""
+        out = []
+        for u in (auth.list_users() if auth else []):
+            name = u.get("name")
+            role = u.get("role") or "user"
+            out.append({"name": name, "role": role, "device": u.get("device") or "",
+                        "perms": self._perms_of({"name": name, "role": role})})
+        return {"catalog": (perms.catalog() if perms else []),
+                "groups": ([{"name": g, "keys": ks} for g, ks in perms.groups()] if perms else []),
+                "users": out}
+
+    def _devices_payload(self):
+        """子客户端管理：本机（主机）信息 + 每个账号的登录设备/最后活跃。"""
+        return {"host": _web_host_info(), "devices": (auth.list_users() if auth else []),
+                "server_time": now_gmt8(), "ver": APP_VER,
+                "port": int(_WEB_STATE.get("port") or WEB_PORT),
+                "ips": lan_ips()}
+
     def _auth_state(self, qs):
         u = self._auth(qs)
         return {"need_setup": bool(auth and auth.need_setup()),
                 "local": self._client_is_local(),
                 "user": (u or {}).get("name"), "role": (u or {}).get("role"),
                 "users": (auth.list_users() if (auth and u and u.get("role") == "admin") else []),
+                "perms": self._perms_of(u),
+                "app": "kuaimai-fahuo-chaxun", "ver": APP_VER,
+                "host": _web_host_info().get("pc") or "",
                 "open": (u is not None)}
 
     def do_GET(self):
@@ -1819,6 +1983,9 @@ class _WebHandler(BaseHTTPRequestHandler):
                 return self._send(LOGIN_HTML.encode("utf-8"), "text/html; charset=utf-8")
             if path == "/api/auth/state":
                 return self._json(self._auth_state(qs))
+            if path == "/api/ping":
+                # 子客户端「测试连接 / 自动发现」用：不需要登录，只说“我是谁、能不能登录”
+                return self._json(discovery_payload())
             me = self._auth(qs)
             if not me:
                 if path.startswith("/api/"):
@@ -1826,20 +1993,89 @@ class _WebHandler(BaseHTTPRequestHandler):
                 # 没登录时直接返回登录页（不靠 302，中转/任何客户端都能看到）
                 return self._send(LOGIN_HTML.encode("utf-8"), "text/html; charset=utf-8")
             if parsed.path in ("/", "/index.html"):
-                return self._send(WEB_INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
+                return self._send(self._page(WEB_INDEX_HTML, me), "text/html; charset=utf-8")
+            if parsed.path in ("/perms", "/perms.html"):        # 权限管理页：只有管理员进得去
+                if not self._can(me, "admin.perms"):
+                    return self._forbidden_page("权限管理只有管理员能打开")
+                return self._send(self._page(PERMS_HTML, me), "text/html; charset=utf-8")
             if parsed.path in ("/pick", "/pick.html"):
-                return self._send(PICK_HTML.encode("utf-8"), "text/html; charset=utf-8")
+                if not self._can(me, "pick.view"):
+                    return self._forbidden_page("这个账号没有拣货权限")
+                return self._send(self._page(PICK_HTML, me), "text/html; charset=utf-8")
             if parsed.path in ("/stocktake", "/stocktake.html"):
-                return self._send(STOCKTAKE_HTML.encode("utf-8"), "text/html; charset=utf-8")
+                if not self._can(me, "stocktake.view"):
+                    return self._forbidden_page("这个账号没有库存盘点权限")
+                return self._send(self._page(STOCKTAKE_HTML, me), "text/html; charset=utf-8")
             if parsed.path in ("/order", "/order.html"):
-                return self._send(ORDER_HTML.encode("utf-8"), "text/html; charset=utf-8")
+                if not self._can(me, "order.query"):
+                    return self._forbidden_page("这个账号没有订单查询权限")
+                return self._send(self._page(ORDER_HTML, me), "text/html; charset=utf-8")
             if parsed.path in ("/stock", "/stock.html"):
-                return self._send(STOCK_HTML.encode("utf-8"), "text/html; charset=utf-8")
+                if not self._can(me, "stock.view"):
+                    return self._forbidden_page("这个账号没有现货可发权限")
+                return self._send(self._page(STOCK_HTML, me), "text/html; charset=utf-8")
+            if parsed.path == "/api/perms":
+                if not self._can(me, "admin.perms"):
+                    return self._deny("admin.perms")
+                return self._json(self._perms_payload())
+            if parsed.path == "/api/devices":
+                # 子客户端管理：在线设备（主账号看）
+                if not self._can(me, "desktop.admin"):
+                    return self._deny("desktop.admin")
+                return self._json(self._devices_payload())
+            if parsed.path == "/api/scans":
+                deny = self._need(me, "scan.record")
+                if deny:
+                    return deny
+                try:
+                    lim = int((qs.get("limit") or ["300"])[0] or 300)
+                except Exception:
+                    lim = 300
+                return self._json(app.web_scans(lim, (qs.get("who") or [""])[0],
+                                                (qs.get("kw") or [""])[0]))
+            if parsed.path == "/api/scans/export":
+                deny = self._need(me, "export.excel")
+                if deny:
+                    return deny
+                try:
+                    lim = int((qs.get("limit") or ["0"])[0] or 0)
+                except Exception:
+                    lim = 0
+                data = app.scans_xlsx(lim, (qs.get("who") or [""])[0], (qs.get("kw") or [""])[0])
+                if not data:
+                    return self._json({"error": "没有可导出的扫码记录"}, 400)
+                return self._send_file(data,
+                                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                       "saoma_jilu.xlsx")
+            if parsed.path == "/api/batch":
+                deny = self._need(me, "batch.query")
+                if deny:
+                    return deny
+                try:
+                    bdays = int((qs.get("days") or ["3"])[0] or 3)
+                except Exception:
+                    bdays = 3
+                batch = (qs.get("batch") or [""])[0].strip()
+                if not batch:
+                    return self._json({"error": "缺少 batch"}, 400)
+                out = app.web_batch(batch, bdays)
+                return self._json(out, 200 if not out.get("error") else 400)
+            if parsed.path == "/api/stock/bins":
+                deny = self._need_any(me, ("stock.edit", "stock.zero"))
+                if deny:
+                    return deny
+                code = (qs.get("code") or [""])[0].strip()
+                if not code:
+                    return self._json({"error": "缺少 code"}, 400)
+                return self._json(app.stock_bins_of(code))
             if parsed.path == "/api/status":
                 return self._json(app.web_status())
             if parsed.path == "/api/index":
                 return self._json(app.web_index_payload())
             if parsed.path == "/api/pick/list":
+                deny = self._need(me, "pick.view")
+                if deny:
+                    return deny
                 try:
                     pdays = int((qs.get("days") or ["3"])[0] or 3)
                 except Exception:
@@ -1847,8 +2083,14 @@ class _WebHandler(BaseHTTPRequestHandler):
                 return self._json(app.web_pick_list((qs.get("batch") or [""])[0], pdays,
                                                     (qs.get("refresh") or ["0"])[0] in ("1", "true")))
             if parsed.path == "/api/pick/current":
+                deny = self._need(me, "pick.view")
+                if deny:
+                    return deny
                 return self._json(app.web_pick_current())
             if parsed.path == "/api/pick/mark":
+                deny = self._need(me, "pick.mark")
+                if deny:
+                    return deny
                 try:
                     gidx = int((qs.get("g") or ["-1"])[0])
                 except Exception:
@@ -1861,8 +2103,14 @@ class _WebHandler(BaseHTTPRequestHandler):
                 return self._json(app.web_pick_mark((qs.get("batch") or [""])[0], gidx,
                                                     (qs.get("state") or ["pending"])[0], lidx))
             if parsed.path == "/api/pick/end":
+                deny = self._need(me, "pick.end")
+                if deny:
+                    return deny
                 return self._json(app.web_pick_end((qs.get("batch") or [""])[0]))
             if parsed.path == "/api/lookup":
+                deny = self._need(me, "scan.query")
+                if deny:
+                    return deny
                 code = (qs.get("code") or [""])[0].strip()
                 rel = (qs.get("rel") or ["any"])[0] or "any"
                 try:
@@ -1878,17 +2126,29 @@ class _WebHandler(BaseHTTPRequestHandler):
                     pass
                 return self._json(out)
             if parsed.path == "/api/order":
+                deny = self._need(me, "order.query")
+                if deny:
+                    return deny
                 return self._json(app.web_order((qs.get("no") or [""])[0]))
             if parsed.path == "/api/order/img":
+                deny = self._need(me, "order.query")
+                if deny:
+                    return deny
                 ctype, data = app.web_order_image((qs.get("u") or [""])[0])
                 if not data:
                     return self._json({"error": "图片地址不允许或取不到"}, 400)
                 return self._send(data, ctype)
             if parsed.path == "/api/stock":
+                deny = self._need_any(me, ("stock.view", "stocktake.view"))
+                if deny:
+                    return deny
                 return self._json(app.web_stock((qs.get("kw") or [""])[0],
                                                 (qs.get("only") or ["all"])[0],
                                                 (qs.get("sort") or ["free"])[0]))
             if parsed.path == "/api/stock/export":
+                deny = self._need(me, "stock.export")
+                if deny:
+                    return deny
                 data = app.stock_xlsx((qs.get("kw") or [""])[0],
                                       (qs.get("only") or ["all"])[0],
                                       (qs.get("sort") or ["free"])[0])
@@ -1898,6 +2158,9 @@ class _WebHandler(BaseHTTPRequestHandler):
                                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                        "xianhuo_kefa.xlsx")
             return self._json({"error": "not found"}, 404)
+        except _Denied as d:
+            return self._json({"error": "没有这个功能的权限：" + d.label,
+                               "denied": True, "perm": d.perm}, 403)
         except Exception as e:
             return self._json({"error": str(e)[:200]}, 500)
 
@@ -1933,20 +2196,32 @@ class _WebHandler(BaseHTTPRequestHandler):
                     err = auth.add_user(name, body.get("pw"), "admin")
                 if err:
                     return self._json({"error": err}, 400)
-                tok, err = auth.login(name, body.get("pw"), dev, body.get("dev_id"), body.get("model"))
+                tok, err = auth.login(name, body.get("pw"), dev, body.get("dev_id"), body.get("model"),
+                                      pc=body.get("pc") or "", win_user=body.get("win_user") or "",
+                                      ip=self._peer_ip(), kind=body.get("kind") or "desktop")
                 if err:
                     return self._json({"error": err}, 400)
                 self._set_cookie(tok)
-                return self._json({"ok": True, "token": tok, "name": name, "role": "admin"})
+                _note_login(name, "admin", "host")
+                return self._json({"ok": True, "token": tok, "name": name, "role": "admin",
+                                   "perms": self._perms_of({"name": name, "role": "admin"}),
+                                   "ver": APP_VER})
             if path == "/api/auth/login":
                 if not auth:
                     return self._json({"error": "账号模块不可用"}, 400)
-                tok, err = auth.login(body.get("name"), body.get("pw"), dev, body.get("dev_id"), body.get("model"))
+                tok, err = auth.login(body.get("name"), body.get("pw"), dev, body.get("dev_id"),
+                                      body.get("model"), pc=body.get("pc") or "",
+                                      win_user=body.get("win_user") or "", ip=self._peer_ip(),
+                                      kind=body.get("kind") or "web")
                 if err:
                     return self._json({"error": err}, 400)
                 self._set_cookie(tok)
                 role = (auth.users().get(str(body.get("name")).strip()) or {}).get("role") or "user"
-                return self._json({"ok": True, "token": tok, "name": body.get("name"), "role": role})
+                _note_login(str(body.get("name")).strip(), role,
+                            body.get("mode") or ("host" if body.get("kind") == "desktop" else "web"))
+                return self._json({"ok": True, "token": tok, "name": body.get("name"), "role": role,
+                                   "perms": self._perms_of({"name": body.get("name"), "role": role}),
+                                   "ver": APP_VER})
             me = self._auth(qs)
             if not me:
                 return self._json({"error": "请先登录", "login": True}, 401)
@@ -1955,10 +2230,40 @@ class _WebHandler(BaseHTTPRequestHandler):
                     auth.logout(self._token(qs))
                 self._set_cookie("")
                 return self._json({"ok": True})
+            if path == "/api/client/info":
+                # 子客户端心跳：刷新“最后活跃”和设备信息，供「在线设备」列表用
+                if auth:
+                    try:
+                        auth.touch(me.get("name"), ip=self._peer_ip(),
+                                   pc=str(body.get("pc") or ""),
+                                   win_user=str(body.get("win_user") or ""),
+                                   kind=str(body.get("kind") or "desktop"))
+                    except Exception:
+                        pass
+                return self._json({"ok": True, "name": me.get("name"), "role": me.get("role"),
+                                   "server_time": now_gmt8(), "ver": APP_VER})
+            if path == "/api/scans/printed":
+                # 桌面端/子客户端把某条扫码记录标「已打」
+                deny = self._need(me, "scan.printed")
+                if deny:
+                    return deny
+                try:
+                    rid = int(body.get("id"))
+                except Exception:
+                    return self._json({"error": "缺少 id"}, 400)
+                flag = 1 if (body.get("flag") is None or body.get("flag")) else 0
+                okw = set_printed(rid, flag)
+                return self._json({"ok": bool(okw), "id": rid, "printed": flag})
             if path == "/api/stock/sent":
                 # 现货可发：标记/撤回「已发」（存在程序里，所有账号共用；拉新数据后自动清空）
+                deny = self._need(me, "stock.canprint")
+                if deny:
+                    return deny
                 app = self.app
                 if body.get("clear"):
+                    deny2 = self._need(me, "stock.sent.clear")
+                    if deny2:
+                        return deny2
                     app.clear_sent()
                     return self._json({"ok": True, "sent": 0})
                 left = app.mark_sent(body.get("codes") or body.get("code") or [],
@@ -1966,6 +2271,9 @@ class _WebHandler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, "sent": len(left)})
             if path == "/api/stock/canprint":
                 # 网页现货可发点「可发」并输入数量 → 写一条扫码日志（可打单数量 = 输入值）
+                deny = self._need(me, "stock.canprint")
+                if deny:
+                    return deny
                 code = str(body.get("code") or "").strip()
                 try:
                     qty = int(body.get("qty"))
@@ -1980,6 +2288,13 @@ class _WebHandler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, "code": code, "qty": qty})
             if path == "/api/stock/adjust":
                 # 改库存（盘点接口，按货位）。必须带 confirm 二次确认，改完写操作日志。
+                try:
+                    _qty = int(body.get("qty"))
+                except Exception:
+                    _qty = None
+                deny = self._need(me, "stock.zero" if _qty == 0 else "stock.edit")
+                if deny:
+                    return deny
                 app = self.app
                 if not body.get("confirm"):
                     return self._json({"error": "缺少二次确认"}, 400)
@@ -1987,7 +2302,28 @@ class _WebHandler(BaseHTTPRequestHandler):
                                        who=str((me or {}).get("name") or ""))
                 return self._json(out, 200 if out.get("ok") else 400)
             if path == "/api/stock/adjust/log":
+                deny = self._need_any(me, ("stock.edit", "stock.zero"))
+                if deny:
+                    return deny
                 return self._json({"list": self.app.adjust_logs(int(body.get("limit") or 30))})
+            if path == "/api/perms":
+                # 保存某账号的按钮权限：只有管理员能调（非管理员连清单都拿不到）
+                if not self._can(me, "admin.perms"):
+                    return self._deny("admin.perms")
+                if not (auth and perms):
+                    return self._json({"error": "账号/权限模块不可用"}, 400)
+                if str(body.get("action") or "save") == "list":
+                    return self._json(self._perms_payload())
+                target = str(body.get("name") or "").strip()
+                if not target:
+                    return self._json({"error": "缺少账号"}, 400)
+                if (auth.users().get(target) or {}).get("role") == "admin":
+                    return self._json({"error": "管理员始终拥有全部权限，不用配置"}, 400)
+                err = auth.set_user_perms(target, perms.sanitize(body.get("perms") or {}))
+                if err:
+                    return self._json({"error": err}, 400)
+                return self._json({"ok": True, "name": target,
+                                   "perms": self._perms_of({"name": target, "role": "user"})})
             if path == "/api/users":
                 if not auth:
                     return self._json({"error": "账号模块不可用"}, 400)
@@ -2009,31 +2345,193 @@ class _WebHandler(BaseHTTPRequestHandler):
                     return self._json({"error": err}, 400)
                 return self._json({"ok": True, "users": auth.list_users()})
             return self._json({"error": "not found"}, 404)
+        except _Denied as d:
+            return self._json({"error": "没有这个功能的权限：" + d.label,
+                               "denied": True, "perm": d.perm}, 403)
         except Exception as e:
             return self._json({"error": str(e)[:200]}, 500)
+
+
+# ==================== 内置服务 / 子客户端发现（主客户端那一侧） ====================
+_WEB_STATE = {"servers": [], "port": 0, "app": None, "user": "", "role": "",
+              "mode": "", "login_at": "", "udp": False, "udp_stop": False, "lan": False}
+
+
+class _NullHost:
+    """登录阶段的内置服务“占位 app”：只给登录/状态接口用，不提供数据页。"""
+    web_key = ""
+    require_key = False
+
+    def __getattr__(self, item):
+        def _no(*_a, **_k):
+            raise RuntimeError("还没登录：请先在程序里登录")
+        return _no
+
+
+def _web_host_info():
+    """本机（主机侧）的登录信息，给「在线设备」列表用。"""
+    try:
+        host = socket.gethostname()
+    except Exception:
+        host = ""
+    return {"name": _WEB_STATE.get("user") or "", "role": _WEB_STATE.get("role") or "",
+            "pc": host, "win_user": (os.environ.get("USERNAME") or os.environ.get("USER") or ""),
+            "mode": _WEB_STATE.get("mode") or "host", "login": _WEB_STATE.get("login_at") or "",
+            "ver": APP_VER}
+
+
+def _note_login(name, role, mode=""):
+    _WEB_STATE["user"] = str(name or "")
+    _WEB_STATE["role"] = str(role or "")
+    _WEB_STATE["mode"] = str(mode or "")
+    _WEB_STATE["login_at"] = now_gmt8()
+
+
+def discovery_payload():
+    """广播/接口告诉外面“我是主客户端”：子客户端自动发现和测试连接都看这个。"""
+    info = _web_host_info()
+    ips = []
+    try:
+        ips = lan_ips()
+    except Exception:
+        pass
+    return {"app": "kuaimai-fahuo-chaxun",
+            "name": ("快麦主客户端 · " + info["pc"]) if info.get("pc") else "快麦主客户端",
+            "pc": info.get("pc") or "", "ip": (ips[0] if ips else ""),
+            "ips": ips,
+            "port": int(_WEB_STATE.get("port") or WEB_PORT),
+            "need_setup": bool(auth and auth.need_setup()),
+            "logged_in": bool(_WEB_STATE.get("user")),
+            "user": _WEB_STATE.get("user") or "", "ver": APP_VER,
+            "time": now_gmt8()}
+
+
+def start_discovery_responder():
+    """UDP 广播应答：子客户端的「自动发现」靠它（只在本机服务已起来时开）。"""
+    if _WEB_STATE.get("udp"):
+        return
+    _WEB_STATE["udp"] = True
+    _WEB_STATE["udp_stop"] = False
+
+    def loop():
+        s = None
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            except Exception:
+                pass
+            s.bind(("0.0.0.0", int(DISCOVER_PORT)))
+            s.settimeout(0.5)
+        except Exception:
+            if s is not None:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+            _WEB_STATE["udp"] = False
+            return
+        while not _WEB_STATE.get("udp_stop"):
+            try:
+                data, peer = s.recvfrom(1024)
+            except socket.timeout:
+                continue
+            except Exception:
+                time.sleep(0.3)
+                continue
+            try:
+                if not data or not data.startswith(b"KUIMAI-SCAN-DISCOVER"):
+                    continue
+                s.sendto(json.dumps(discovery_payload(), ensure_ascii=False).encode("utf-8"), peer)
+            except Exception:
+                pass
+        try:
+            s.close()
+        except Exception:
+            pass
+        _WEB_STATE["udp"] = False
+
+    threading.Thread(target=loop, daemon=True).start()
+
+
+def ensure_web_server(app=None, lan=False, port=None):
+    """保证内置 HTTP 服务在跑；返回端口。
+
+    · lan=False（登录阶段）：只在 127.0.0.1 上起，不对外暴露；
+    · lan=True（主客户端模式）：对外（0.0.0.0 + IPv6）并开始广播应答，让子客户端能发现。
+    模式变了就重建（先停再起），否则同一个端口会同时被两个监听占上。
+    """
+    start_port = int(port or WEB_PORT)
+    want_lan = bool(lan)
+    if _WEB_STATE.get("servers") and bool(_WEB_STATE.get("lan")) == want_lan:
+        if app is not None:
+            _WebHandler.app = app
+            _WEB_STATE["app"] = app
+        return int(_WEB_STATE.get("port") or 0)
+    if _WEB_STATE.get("servers"):
+        stop_web_server(clear_login=False)      # 只是换监听方式 → 保留“谁登录了”
+    servers, p = start_web_server(app if app is not None else _NullHost(),
+                                  port=start_port, host=("0.0.0.0" if want_lan else "127.0.0.1"))
+    if servers:
+        _WEB_STATE["servers"] = servers
+        _WEB_STATE["port"] = int(p or 0)
+        _WEB_STATE["app"] = app
+        _WEB_STATE["lan"] = want_lan
+        if want_lan:
+            start_discovery_responder()
+        return int(p or 0)
+    return 0
+
+
+def stop_web_server(clear_login=True):
+    """关掉本机服务（选“子客户端”模式时用：这台只当终端，不对外服务）。
+
+    clear_login=False：只是换监听方式（回环 → 对外）重建服务，别把“谁登录了”抹掉。
+    """
+    _WEB_STATE["udp_stop"] = True
+    for s in (_WEB_STATE.get("servers") or []):
+        try:
+            s.shutdown()
+        except Exception:
+            pass
+        try:
+            s.server_close()
+        except Exception:
+            pass
+    _WEB_STATE["servers"] = []
+    _WEB_STATE["port"] = 0
+    _WEB_STATE["app"] = None
+    if clear_login:
+        _WEB_STATE["user"] = ""
 
 
 class _V6Server(ThreadingHTTPServer):
     address_family = socket.AF_INET6
 
 
-def start_web_server(app):
-    """启动内置手机网页服务（同时监听 IPv4 和 IPv6，端口被占用就顺延）。"""
+def start_web_server(app, port=None, host="0.0.0.0"):
+    """启动内置服务（默认 IPv4+IPv6 都监听，端口被占用就顺延）。
+
+    host="127.0.0.1" = 只在回环上起（登录阶段用，不对外暴露、也不占用局域网端口）。
+    """
     _WebHandler.app = app
-    for port in range(WEB_PORT, WEB_PORT + 10):
+    start = int(port or WEB_PORT)
+    for p in range(start, start + 10):
         servers = []
         try:
-            servers.append(ThreadingHTTPServer(("0.0.0.0", port), _WebHandler))
+            servers.append(ThreadingHTTPServer((host, p), _WebHandler))
         except OSError:
             pass
-        try:
-            servers.append(_V6Server(("::", port), _WebHandler))
-        except OSError:
-            pass
+        if host == "0.0.0.0":
+            try:
+                servers.append(_V6Server(("::", p), _WebHandler))
+            except OSError:
+                pass
         if servers:
             for s in servers:
                 threading.Thread(target=s.serve_forever, daemon=True).start()
-            return servers, port
+            return servers, p
     return None, 0
 
 
@@ -2376,17 +2874,25 @@ class ScanApp:
     GREY = "#555555"
     GREY_BG = "#f2f2f7"
 
-    def __init__(self, root):
+    def __init__(self, root, session=None):
         self.root = root
-        self.root.title("快麦扫码查询")
+        self.session = session                 # kuaimai_client.Session（登录会话）
+        self.remote = bool(kmclient and session is not None and session.is_remote)
+        self.gated = {}                        # 权限键 → [(控件, 处理方式, 说明)]
+        self._locked = False                   # 被踢下线后锁界面
+        self.root.title("快麦扫码查询" + ("（子客户端）" if self.remote else ""))
         self.root.geometry("1080x760")
         self.root.minsize(920, 620)
         try:
             self.root.configure(bg=UI_BG)
         except Exception:
             pass
+        if session is not None:
+            try:
+                session.on_kicked = self._on_kicked
+            except Exception:
+                pass
 
-        self.session = None
         self.index = {}                 # 编码 → {"qty","orders","main"}
         self.stat = {"total_orders": 0, "included_orders": 0}
         self.loaded_at = "未加载"
@@ -2435,20 +2941,25 @@ class ScanApp:
         self.autosubmit_on = tk.BooleanVar(value=bool(settings.get("auto_submit", False)))
 
         self._build_ui()
-        init_db()
-        self._init_orders_db()
-        self.reload_records()
-        self._restore_pending_cache()
-        self._restore_shelf_cache()
-        self._restore_lock_cache()
-        self._start_web()          # 数据恢复完再对外服务，避免手机端拿到半成品
+        if self.remote:
+            self._remote_startup()          # 子客户端：一个本地库都不碰，全走主端接口
+        else:
+            init_db()
+            self._init_orders_db()
+            self.reload_records()
+            self._restore_pending_cache()
+            self._restore_shelf_cache()
+            self._restore_lock_cache()
+            self._start_web()          # 数据恢复完再对外服务，避免手机端拿到半成品
+        self._apply_perms()
         self.root.after(100, self._drain_queue)
-        self.root.after(1200, self._first_run_api_hint)    # 新电脑首次装：提示填 API
+        if not self.remote:
+            self.root.after(1200, self._first_run_api_hint)    # 新电脑首次装：提示填 API
+            self.root.after(300, lambda: self.sync_pending(background=True))
+            self.root.after(600, lambda: self.reload_shelf(background=True))
+            self.root.after(900, lambda: self.reload_lock(background=True))
+            self.root.after(1000 * 60 * self.auto_refresh_min, self._auto_tick)
         self.root.after(1500, self._init_scan_hook)      # 后台扫码监听（最小化也能扫）
-        self.root.after(300, lambda: self.sync_pending(background=True))
-        self.root.after(600, lambda: self.reload_shelf(background=True))
-        self.root.after(900, lambda: self.reload_lock(background=True))
-        self.root.after(1000 * 60 * self.auto_refresh_min, self._auto_tick)
 
     def _init_orders_db(self):
         """建订单库；库为空而 JSON 缓存还在就先导入一次（JSON 保留不删）。"""
@@ -2472,10 +2983,12 @@ class ScanApp:
             save_settings(settings)
         self.require_key = self._key_saved
         try:
-            _servers, port = start_web_server(self)
+            port = ensure_web_server(self, lan=True)   # 登录阶段可能已在回环上起过 → 换成对外监听
         except Exception as e:
             self.web_label.config(text="手机网页服务启动失败：%s" % str(e)[:60])
             return
+        if port and self.session is not None:
+            _note_login(self.session.name, self.session.role, self.session.mode)
         if not port:
             self.web_label.config(text="手机网页服务启动失败（端口被占用）")
             return
@@ -2563,6 +3076,7 @@ class ScanApp:
                 "l": int(lk.get("lock", 0) or 0),
                 "uo": int(e.get("uo", 0) or 0),
                 "up": int(e.get("up", 0) or 0),
+                "ue": {k: int(v or 0) for k, v in (e.get("ue") or {}).items()},
                 "b": "、".join(str(b[0]) for b in (sh.get("bins") or [])[:6]),
                 "bl": [[str(b[0]), int(b[1] or 0)] for b in (sh.get("bins") or [])],
             }
@@ -2895,6 +3409,14 @@ class ScanApp:
         return self._sent
 
     def mark_sent(self, codes, undo=False):
+        if self.remote:                       # 子客户端：已发标记存在主端（所有账号共用）
+            ok, res = self._remote_api("/api/stock/sent", "POST",
+                                       body={"codes": list(codes or []) if not isinstance(codes, str) else [codes],
+                                             "undo": bool(undo)})
+            if not ok or not isinstance(res, dict):
+                self._remote_err(res)
+                return []
+            return []
         s = self._sent_set()
         if isinstance(codes, str):
             codes = [codes]
@@ -2909,6 +3431,12 @@ class ScanApp:
         return sorted(s)
 
     def clear_sent(self):
+        if self.remote:
+            ok, res = self._remote_api("/api/stock/sent", "POST", body={"clear": True})
+            if not ok or not isinstance(res, dict):
+                self._remote_err(res)
+                return []
+            return []
         self._sent_set().clear()
         return []
 
@@ -2922,6 +3450,13 @@ class ScanApp:
         return conn
 
     def adjust_logs(self, limit=30):
+        if self.remote:
+            ok, res = self._remote_api("/api/stock/adjust/log", "POST", body={"limit": int(limit)},
+                                       timeout=25)
+            if not ok or not isinstance(res, dict):
+                self._remote_err(res)
+                return []
+            return res.get("list") or []
         try:
             conn = self._adjust_conn()
             rows = conn.execute("SELECT ts,who,code,bin,old_num,new_num,ok,msg FROM stock_adjust_log"
@@ -2934,6 +3469,12 @@ class ScanApp:
 
     def stock_bins_of(self, code):
         """该编码本地（程序维护的）各货位数量，用于二次确认与对照。"""
+        if self.remote:
+            ok, res = self._remote_api("/api/stock/bins", params={"code": code}, timeout=25)
+            if not ok or not isinstance(res, dict):
+                return {"code": code, "found": False, "shelf": 0, "bins": [],
+                        "msg": self._remote_err(res, "")}
+            return res
         sh, key = dict_get_ci(self.shelf_map or {}, code)
         if not sh:
             return {"code": code, "found": False, "shelf": 0, "bins": []}
@@ -2978,6 +3519,15 @@ class ScanApp:
             return {"ok": False, "msg": "编码和货位都不能为空"}
         if qty < 0:
             return {"ok": False, "msg": "数量不能为负数"}
+        if self.remote:                       # 子客户端：改库存也走主端接口（含权限/日志）
+            ok, out = self._remote_api("/api/stock/adjust", "POST",
+                                       body={"code": code, "bin": bin_code, "qty": qty,
+                                             "confirm": True}, timeout=90)
+            if not isinstance(out, dict):
+                return {"ok": False, "msg": "主客户端没返回结果"}
+            if not ok:
+                return {"ok": False, "msg": str(out.get("error") or "改库存失败")}
+            return out
         before = self.stock_bins_of(code)
         old = None
         for b in (before.get("bins") or []):
@@ -3018,6 +3568,14 @@ class ScanApp:
 
     def stock_rows(self, kw="", only="all", sort="free"):
         """编码级现货可发列表（数据来自本地索引 + 货位在架，不联网）。"""
+        if self.remote:                       # 子客户端：让主端算好再给我
+            ok, res = self._remote_api("/api/stock", params={"kw": kw, "only": only, "sort": sort},
+                                       timeout=90)
+            if not ok or not isinstance(res, dict):
+                raise RuntimeError(kmclient.human_err(res, self.session.base) if kmclient else "读取失败")
+            self.shelf_at = str(res.get("shelf_at") or self.shelf_at)
+            self.loaded_at = str(res.get("loaded_at") or self.loaded_at)
+            return res.get("rows") or []
         items = (self.web_index_payload().get("items") or {})
         try:
             sent = self._sent_set()
@@ -3032,6 +3590,7 @@ class ScanApp:
             ones = int(v.get("n") or 0)
             uo = int(v.get("uo") or 0)
             up = int(v.get("up") or 0)
+            _ue_any = sum(int(x or 0) for x in (v.get("ue") or {}).values())
             if kw and kw not in str(code).upper():
                 continue
             if _pick_group_excluded(code):        # 1166 / 买家秀 / 圆虹包 等占位、补偿商品：不显示
@@ -3046,14 +3605,15 @@ class ScanApp:
                 continue
             if only == "orders" and pieces <= 0:
                 continue
-            if only == "urgent" and up <= 0 and uo <= 0:
+            if only == "urgent" and _ue_any <= 0:
                 continue
-            prio = 1 if ((uo > 0 or up > 0) and free > 0 and shelf > 0) else 0   # 加急且有货可发
+            prio = 1 if (_ue_any > 0 and free > 0 and shelf > 0) else 0   # 加急且有货可发
             if only == "urg_free" and not prio:
                 continue
             rows.append({"c": str(code), "s": shelf, "p": pieces, "o": orders,
                          "n": ones, "m": max(0, orders - ones), "mp": multi_pieces,
                          "uo": uo, "up": up, "p1": prio,
+                         "ue": {k: int(v2 or 0) for k, v2 in ((v.get("ue") or {}).items())},
                          "sent": 1 if str(code) in sent else 0,
                          "b": str(v.get("b") or ""),
                          "bl": v.get("bl") or [],
@@ -3104,6 +3664,81 @@ class ScanApp:
             except Exception:
                 pass
         return out
+
+    def web_scans(self, limit=300, who="", kw=""):
+        """扫码记录（给桌面端/子客户端用）：最新在前；limit<=0 = 全部。"""
+        try:
+            rows = fetch_all_scans()
+        except Exception:
+            rows = []
+        kw = str(kw or "").strip().upper()
+        who = str(who or "").strip()
+        out = []
+        for r in reversed(rows):                     # 最新的排最前
+            rid, st, bc, pq, sh, oc, light = r[:7]
+            w = r[7] if len(r) > 7 else ""
+            pnum = r[8] if len(r) > 8 else ""
+            prn = int(r[9] or 0) if len(r) > 9 else 0
+            if who and who != "全部" and (w or "") != who:
+                continue
+            if kw and kw not in str(bc or "").upper():
+                continue
+            out.append({"id": rid, "time": st, "code": bc, "pending": pq or 0, "shelf": sh or 0,
+                        "orders": oc or 0, "ok": (light == "绿"), "who": w or "",
+                        "print_num": pnum or "", "printed": prn})
+            if limit and len(out) >= int(limit):
+                break
+        whos = sorted({((r[7] if len(r) > 7 else "") or "") for r in rows})
+        whos = [w for w in whos if w]
+        return {"rows": out, "count": len(rows), "who": whos,
+                "loaded_at": self.loaded_at, "shelf_at": self.shelf_at}
+
+    def scans_xlsx(self, limit=0, who="", kw=""):
+        """扫码记录 → Excel（子客户端导出用）。返回 bytes（没数据返回 b""）。"""
+        data = self.web_scans(limit, who, kw).get("rows") or []
+        if not data:
+            return b""
+        headers = ["扫码时间", "商家编码", "待发货订单数", "货架在架数", "件数", "扫码账号",
+                   "可打单数量", "已打"]
+        rows = [[d["time"], d["code"], d["pending"], d["shelf"], d["orders"], d["who"],
+                 d["print_num"], "已打" if d["printed"] else "打单"] for d in data]
+        path = os.path.join(os.environ.get("TEMP", "."),
+                            "扫码记录_%s.xlsx" % datetime.now().strftime("%Y%m%d_%H%M%S"))
+        write_xlsx(path, headers, rows)
+        try:
+            with open(path, "rb") as fp:
+                return fp.read()
+        finally:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+
+    def web_batch(self, batch, days=3, progress=None):
+        """批次查询（给桌面端/子客户端用）：orders + rows（rows 只带订单下标 i）。"""
+        orders, err = fetch_print_batch(batch, int(days or 3), progress=progress)
+        if err:
+            return {"error": err, "orders": [], "rows": []}
+        out_orders = []
+        rows = []
+        for idx, o in enumerate(orders):
+            out_orders.append({"seq": o.get("seq") or 0, "sid": o.get("sid") or "",
+                               "short_id": o.get("short_id") or "",
+                               "express": o.get("express") or "",
+                               "urgent": bool(o.get("urgent")),
+                               "sys_status": o.get("sys_status")})
+            items = o.get("items") or []
+            if not items:
+                rows.append({"i": idx, "code": "", "num": 0, "shelf": 0, "bins": "（未取到明细）"})
+                continue
+            for code, num in items:
+                sh, _k = dict_get_ci(self.shelf_map, code)
+                sh = sh or {}
+                bins = "、".join(b[0] for b in (sh.get("bins") or [])) or "无在架货位"
+                rows.append({"i": idx, "code": code, "num": int(num or 0),
+                             "shelf": int(sh.get("shelf", 0) or 0), "bins": bins})
+        return {"orders": out_orders, "rows": rows, "count_orders": len(out_orders),
+                "count_rows": len(rows), "batch": batch, "shelf_at": self.shelf_at}
 
     def record_web_scan(self, out, who=""):
         """把手机/网页的扫码写进扫码记录（和电脑版同一张表，带账号）。"""
@@ -3160,6 +3795,7 @@ class ScanApp:
             "orders": int(e.get("orders", 0) or 0),
             "pieces": int(e.get("qty", 0) or 0),
             "ones": int(e.get("ones", 0) or 0),
+            "ue": {k: int(v or 0) for k, v in (e.get("ue") or {}).items()},
             "shelf": int(sh.get("shelf", 0) or 0),
             "bins": (sh.get("bins") or [])[:6],
             "lock": int(lk.get("lock", 0) or 0),
@@ -3261,12 +3897,22 @@ class ScanApp:
         self.scan_entry.grid(row=0, column=1, padx=6, pady=8, sticky="ew")
         self.scan_entry.bind("<Return>", lambda e: self.on_scan())
         self.scan_entry.bind("<KeyRelease>", self._on_scan_key)   # 扫码枪不回车时按停顿自动查
-        ttk.Button(scan_box, text="查询", command=self.on_scan).grid(row=0, column=2, padx=6, pady=8)
-        ttk.Checkbutton(scan_box, text="声音提示", variable=self.sound_on).grid(row=0, column=3, padx=6)
+        _qbtn = ttk.Button(scan_box, text="查询", command=self.on_scan)
+        _qbtn.grid(row=0, column=2, padx=6, pady=8)
+        self._gate("scan.query", _qbtn)
+        self.scan_entry.bind("<Return>", lambda e: self.on_scan())
+        self.scan_entry.bind("<KeyRelease>", self._on_scan_key)   # 扫码枪不回车时按停顿自动查
+        _snd = ttk.Checkbutton(scan_box, text="声音提示", variable=self.sound_on)
+        _snd.grid(row=0, column=3, padx=6)
+        self._gate("ui.sound", _snd)
+        self.id_label = ttk.Label(scan_box, text="", foreground="#7a4f01")
+        self.id_label.grid(row=1, column=0, columnspan=4, sticky="w", padx=6, pady=(0, 2))
         self.web_label = ttk.Label(scan_box, text="", foreground="#0b5394")
-        self.web_label.grid(row=1, column=0, columnspan=4, sticky="w", padx=6, pady=(0, 6))
-        ttk.Checkbutton(scan_box, text="手机访问需口令", variable=self.key_on,
-                        command=self.on_key_toggle).grid(row=2, column=0, columnspan=4, sticky="w", padx=6, pady=(0, 6))
+        self.web_label.grid(row=2, column=0, columnspan=4, sticky="w", padx=6, pady=(0, 6))
+        _key_chk = ttk.Checkbutton(scan_box, text="手机访问需口令", variable=self.key_on,
+                                   command=self.on_key_toggle)
+        _key_chk.grid(row=3, column=0, columnspan=4, sticky="w", padx=6, pady=(0, 6))
+        self._gate("__host", _key_chk, "grid")            # 「__host」= 只有主客户端才有
 
         # 结果面板：第一行=编码（黑色加粗），下面三行=一单一件/一单多件/货位
         self.result = tk.Label(
@@ -3293,33 +3939,44 @@ class ScanApp:
         ttk.Entry(flt, textvariable=self.filter_n, width=6).grid(row=0, column=2, padx=4)
         ttk.Label(flt, text="件").grid(row=0, column=3)
         ttk.Button(flt, text="按条件筛选(本地)", command=self.apply_filter).grid(row=0, column=4, padx=10)
+        self._gate("scan.filter", flt.winfo_children()[-1])
+        self._gate("__host", flt, "grid")            # 件数筛选靠本地订单库，子客户端没有
 
         # 操作按钮（网格排布：窄窗口/小屏也不会被切掉）
         ops = ttk.LabelFrame(main, text="操作")
         ops.grid(row=6, column=0, sticky="ew", pady=6)
         for c in range(5):
             ops.columnconfigure(c, weight=1)
-        for i, (txt, cmd, sty) in enumerate((
-                ("现货可发", self.on_stock_dialog, "Accent.TButton"),
-                ("增量刷新", lambda: self.sync_pending(background=True), "TButton"),
-                ("全量重拉", lambda: self.full_reload(background=True), "TButton"),
-                ("刷新货位库存", lambda: self.reload_shelf(background=True), "TButton"),
-                ("刷新锁定数", lambda: self.reload_lock(background=True), "TButton"),
-                ("导出扫码日志 Excel", self.on_export, "TButton"),
-                ("清空日志", self.on_clear_logs, "TButton"),
-                ("API 设置", self.on_api_settings, "TButton"))):
-            ttk.Button(ops, text=txt, command=cmd, style=sty).grid(
-                row=i // 5, column=i % 5, sticky="ew", padx=5, pady=5)
+        _ops_list = (("现货可发", self.on_stock_dialog, "Accent.TButton", "stock.view"),
+                     ("批次查询", self.on_batch_dialog, "Accent.TButton", "batch.query"),
+                     ("增量刷新", lambda: self.sync_pending(background=True), "TButton", "data.refresh"),
+                     ("全量重拉", lambda: self.full_reload(background=True), "TButton", "data.refresh"),
+                     ("刷新货位库存", lambda: self.reload_shelf(background=True), "TButton", "data.refresh"),
+                     ("刷新锁定数", lambda: self.reload_lock(background=True), "TButton", "data.refresh"),
+                     ("导出扫码日志 Excel", self.on_export, "TButton", "export.excel"),
+                     ("清空日志", self.on_clear_logs, "TButton", "__host"),
+                     ("API 设置", self.on_api_settings, "TButton", "api.settings"),
+                     ("子客户端管理", self.on_admin_panel, "Accent.TButton", "desktop.admin"),
+                     ("重新登录", self.on_relogin, "TButton", "__any"))
+        for i, (txt, cmd, sty, perm) in enumerate(_ops_list):
+            _b = ttk.Button(ops, text=txt, command=cmd, style=sty)
+            _b.grid(row=i // 5, column=i % 5, sticky="ew", padx=5, pady=5)
+            self._gate(perm, _b)
         chk = ttk.Frame(ops)
         chk.grid(row=3, column=0, columnspan=5, sticky="w", padx=5, pady=(2, 4))
-        ttk.Checkbutton(chk, text="后台扫码监听（最小化也能扫）", variable=self.hook_on,
-                        command=self.on_hook_toggle).pack(side=tk.LEFT, padx=(0, 14))
-        ttk.Checkbutton(chk, text="不回车的扫码枪：停顿时自动查", variable=self.autosubmit_on,
-                        command=self.on_autosubmit_toggle).pack(side=tk.LEFT)
+        _hk = ttk.Checkbutton(chk, text="后台扫码监听（最小化也能扫）", variable=self.hook_on,
+                              command=self.on_hook_toggle)
+        _hk.pack(side=tk.LEFT, padx=(0, 14))
+        self._gate("scan.query", _hk)
+        _as = ttk.Checkbutton(chk, text="不回车的扫码枪：停顿时自动查", variable=self.autosubmit_on,
+                              command=self.on_autosubmit_toggle)
+        _as.pack(side=tk.LEFT)
+        self._gate("scan.query", _as)
 
         # 刷新周期
         itv = ttk.LabelFrame(main, text="刷新周期（分钟）")
         itv.grid(row=7, column=0, sticky="ew", pady=4)
+        self._gate("data.refresh", itv, "grid")      # 周期刷新是主机那边的事
         ttk.Label(itv, text="增量刷新").grid(row=0, column=0, padx=6, pady=6)
         ttk.Spinbox(itv, from_=1, to=180, width=5, textvariable=self.auto_min_var).grid(row=0, column=1)
         ttk.Label(itv, text="全量重拉").grid(row=0, column=2, padx=6)
@@ -3340,6 +3997,7 @@ class ScanApp:
         # 扫码记录
         log = ttk.LabelFrame(main, text="扫码记录")
         log.grid(row=3, column=0, sticky="nsew")          # 扫码记录：紧跟在「扫码后显示编码」下面
+        self._gate("scan.record", log, "grid")
         main.rowconfigure(3, weight=1)
         cols = ("time", "barcode", "pending", "shelf", "orders", "who", "print_num", "printed")
         self.tree = ttk.Treeview(log, columns=cols, show="headings", height=16)
@@ -3377,6 +4035,206 @@ class ScanApp:
             self.root.bind("<FocusIn>", lambda e: self._poll_records(force=True))
         except Exception:
             pass
+
+    # ---------- 登录身份 / 按钮权限 ----------
+    def can(self, key):
+        """当前账号能不能用这个功能。未登录（老代码路径）= 全开。"""
+        if key == "__any":
+            return True
+        if key == "__host":                 # 只有主客户端才能做的事
+            return not self.remote
+        if self.remote and key in ("data.refresh", "api.settings"):
+            return False                    # 这些只能在主客户端那台上做
+        s = self.session
+        return True if s is None else bool(s.can(key))
+
+    def _gate(self, key, widget, mode="disable"):
+        """把控件登记进权限表：mode = disable（置灰）/ grid（整块收起）。"""
+        try:
+            self.gated.setdefault(key, []).append((widget, mode))
+        except Exception:
+            pass
+        return widget
+
+    def _apply_perms(self):
+        """按当前账号权限表置灰/收起控件（只是体验；真正的拦在 _need_perm）。"""
+        for key, items in (self.gated or {}).items():
+            allowed = self.can(key)
+            for w, mode in items:
+                try:
+                    if mode == "grid":
+                        if allowed:
+                            w.grid()
+                        else:
+                            w.grid_remove()
+                    elif mode == "pack":
+                        if allowed:
+                            w.pack()
+                        else:
+                            w.pack_forget()
+                    else:
+                        w.state(["!disabled"] if allowed else ["disabled"])
+                except Exception:
+                    pass
+        self._update_identity()
+
+    def _update_identity(self):
+        s = self.session
+        if s is None or not hasattr(self, "id_label"):
+            return
+        try:
+            who = "管理员（主账号）" if s.is_admin else "子账号"
+            off = sum(1 for k, items in (self.gated or {}).items()
+                      if not self.can(k) for _ in items)
+            self.id_label.config(
+                text="登录：%s（%s）· %s　·　无权限按钮 %d 个%s"
+                     % (s.name, who, s.label(), off,
+                        "　【已被踢下线，界面已锁定】" if getattr(s, "kicked", False) else ""))
+        except Exception:
+            pass
+
+    def _perm_label(self, key=None, note=""):
+        if note:
+            return note
+        try:
+            if perms and key:
+                return perms.LABELS.get(key) or key
+        except Exception:
+            pass
+        return key or "这个功能"
+
+    def _no_perm(self, key=None, note=""):
+        label = self._perm_label(key, note)
+        self.status_text.set("没有权限：%s（请联系主账号管理员）" % label)
+        try:
+            messagebox.showwarning("没有权限",
+                                   "当前账号没有「%s」权限。\n请让主账号在「子客户端管理 → 权限」里给你开。" % label)
+        except Exception:
+            pass
+        return False
+
+    def _need_perm(self, key, note=""):
+        """动作前兜底校验：按钮置灰只是体验，这里才是拦住的地方。"""
+        if self._locked:
+            self.status_text.set("已被管理员踢下线，请重新登录")
+            return False
+        if self.can(key):
+            return True
+        return self._no_perm(key, note)
+
+    def _guard(self, key, fn, note=""):
+        def run(*_a, **_k):
+            if self._need_perm(key, note):
+                return fn()
+            return None
+        return run
+
+    def _need_perm_any(self, keys, note=""):
+        """几个权限里有一个就行（例如改库存：改→stock.edit，改成 0→stock.zero）。"""
+        if self._locked:
+            self.status_text.set("已被管理员踢下线，请重新登录")
+            return False
+        for k in (keys or ()):
+            if self.can(k):
+                return True
+        return self._no_perm((keys or [""])[0], note)
+
+    def _on_kicked(self):
+        """会话失效 / 被主账号踢下线：锁界面并提示。"""
+        if self._locked:
+            return
+        self._locked = True
+
+        def apply():
+            try:
+                for items in (self.gated or {}).values():
+                    for w, _m in items:
+                        try:
+                            w.state(["disabled"])
+                        except Exception:
+                            pass
+                self.status_text.set("已被管理员踢下线：10 分钟后可重新登录")
+                self._update_identity()
+                messagebox.showwarning(
+                    "已下线",
+                    "这个账号已被主账号踢下线（或会话已失效）。\n"
+                    "界面已锁定；关闭程序重新登录即可（那台设备 10 分钟内不能再登录）。")
+            except Exception:
+                pass
+        try:
+            self.root.after(0, apply)
+        except Exception:
+            pass
+
+    def _host_only(self, what="这个功能"):
+        self.status_text.set("%s只能在主客户端上操作" % what)
+        try:
+            messagebox.showinfo("只能在主客户端上操作",
+                                "%s只能在主客户端（跑着程序、持有数据和快麦凭据的那台电脑）上做。" % what)
+        except Exception:
+            pass
+
+    def on_relogin(self):
+        """换账号 / 被踢下线后重新登录：退出当前进程，由启动器弹登录窗。"""
+        if not messagebox.askyesno("重新登录", "退出当前窗口并重新登录？"):
+            return
+        try:
+            if self.session is not None:
+                self.session.stop_heartbeat()
+        except Exception:
+            pass
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+        os._exit(0)
+
+    def on_admin_panel(self):
+        """主账号：子客户端管理（账号 / 权限 / 在线设备）。"""
+        if not self._need_perm("desktop.admin"):
+            return
+        if kuaimai_admin_panel is None:
+            messagebox.showerror("打不开", "缺少 kuaimai_admin_panel.py")
+            return
+        try:
+            kuaimai_admin_panel.open_admin_panel(self)
+        except Exception as e:
+            messagebox.showerror("打不开", str(e)[:200])
+
+    # ---------- 子客户端（远程模式） ----------
+    def _remote_startup(self):
+        s = self.session
+        self.loaded_at = self.shelf_at = self.lock_at = "（主客户端）"
+        try:
+            self.web_label.config(
+                text="子客户端模式：数据实时来自主客户端 %s（本机不存快麦凭据、不对外服务）"
+                     % (s.base if s else ""))
+        except Exception:
+            pass
+        self.reload_records()
+        self.root.after(400, self._remote_status)
+        self.root.after(1000 * 60 * max(1, int(self.auto_refresh_min or 5)), self._auto_tick)
+
+    def _remote_api(self, path, method="GET", params=None, body=None, timeout=40):
+        return self.session.api(path, method, params=params, body=body, timeout=timeout)
+
+    def _remote_err(self, obj, prefix=""):
+        msg = kmclient.human_err(obj, getattr(self.session, "base", "")) if kmclient else str(obj)
+        self.status_text.set((prefix or "主客户端请求失败：") + msg)
+        return msg
+
+    def _remote_status(self):
+        """子客户端顶部状态：主端的订单数 / 编码数 / 更新时间。"""
+        ok, st = self._remote_api("/api/status", timeout=20)
+        if not ok or not isinstance(st, dict):
+            self._remote_err(st)
+            return
+        self.loaded_at = str(st.get("loaded_at") or "未加载")
+        self.shelf_at = str(st.get("shelf_at") or "未加载")
+        self.lock_at = str(st.get("lock_at") or "未加载")
+        self.status_text.set("主客户端数据：待发货 %s 单 / %s 个编码（订单库 %s　货位 %s）"
+                             % (st.get("live_orders", 0), st.get("codes", 0),
+                                self.loaded_at, self.shelf_at))
 
     # ---------- 后台线程 / 队列 ----------
     def _run_bg(self, fn, *args):
@@ -3445,6 +4303,8 @@ class ScanApp:
             self.shelf_stat = {}
 
     def reload_shelf(self, background=True):
+        if self.remote:
+            return
         if background:
             self.status_text.set("正在拉取货位库存…")
             self._run_bg(self._worker_shelf)
@@ -3485,6 +4345,8 @@ class ScanApp:
         self._lock_version = getattr(self, "_lock_version", 0) + 1
 
     def reload_lock(self, background=True):
+        if self.remote:
+            return
         if background:
             self._run_bg(self._worker_lock)
         else:
@@ -3819,14 +4681,18 @@ class ScanApp:
         btn = ttk.Button(top, text="查询")
         btn.pack(side=tk.LEFT, padx=6)
         ttk.Button(top, text="导出 Excel",
-                   command=lambda: self._export_stock(rows)).pack(side=tk.LEFT, padx=4)
+                   command=self._guard("stock.export", lambda: self._export_stock(rows))).pack(side=tk.LEFT, padx=4)
         ttk.Button(top, text="标记已发",
-                   command=lambda: mark_sel(True)).pack(side=tk.LEFT, padx=4)
-        ttk.Button(top, text="撤回", command=lambda: mark_sel(False)).pack(side=tk.LEFT, padx=3)
-        ttk.Button(top, text="清空已发", command=lambda: clear_all()).pack(side=tk.LEFT, padx=3)
-        ttk.Button(top, text="改库存", command=lambda: adjust_one()).pack(side=tk.LEFT, padx=4)
+                   command=self._guard("stock.canprint", lambda: mark_sel(True))).pack(side=tk.LEFT, padx=4)
+        ttk.Button(top, text="撤回",
+                   command=self._guard("stock.canprint", lambda: mark_sel(False))).pack(side=tk.LEFT, padx=3)
+        ttk.Button(top, text="清空已发",
+                   command=self._guard("stock.sent.clear", clear_all)).pack(side=tk.LEFT, padx=3)
+        ttk.Button(top, text="改库存",
+                   command=self._guard("stock.edit", adjust_one, "改库存")).pack(side=tk.LEFT, padx=4)
         ttk.Button(top, text="操作日志",
-                   command=lambda: self.on_adjust_log_dialog()).pack(side=tk.LEFT, padx=4)
+                   command=self._guard("stock.edit", lambda: self.on_adjust_log_dialog(), "操作日志")
+                   ).pack(side=tk.LEFT, padx=4)
         hide_sent = tk.BooleanVar(value=True)
         ttk.Checkbutton(top, text="隐藏已发", variable=hide_sent,
                         command=lambda: refresh()).pack(side=tk.LEFT, padx=6)
@@ -3870,6 +4736,8 @@ class ScanApp:
 
         def adjust_one():
             """按货位改库存（盘点接口，绝对值）：选中行 → 填货位/数量 → 二次确认。"""
+            if not self._need_perm_any(("stock.edit", "stock.zero"), "改库存"):
+                return
             sel = tree.selection()
             if not sel:
                 messagebox.showinfo("提示", "先在表格里选中要改库存的编码")
@@ -3959,6 +4827,8 @@ class ScanApp:
 
     def _export_stock(self, rows):
         """现货可发 → Excel。"""
+        if not self._need_perm("stock.export"):
+            return
         rows = list(rows or [])
         if not rows:
             messagebox.showinfo("提示", "没有数据可导出（先点「查询」）")
@@ -4223,6 +5093,9 @@ class ScanApp:
 
     def _worker_batch(self, batch, days, btn, exp, info, tree, sumtxt):
         try:
+            if self.remote:                       # 子客户端：让主端去查，这边只渲染
+                self._remote_batch(batch, days, btn, exp, info, tree, sumtxt)
+                return
             def prog(n, page, got):
                 self.q.put(lambda: info.set("查询中…已找到 %d 单（第 %d 页，本页 %d 条）" % (n, page, got)))
 
@@ -4244,6 +5117,41 @@ class ScanApp:
             self.q.put(lambda: self._apply_batch(batch, orders, rows, btn, exp, info, tree, sumtxt,
                                                 getattr(self, "_batch_ui", {}).get("pick"),
                                                 getattr(self, "_batch_ui", {}).get("zone")))
+        except Exception as e:
+            msg = str(e)[:160]
+            self.q.put(lambda: (info.set("查询失败：%s" % msg), btn.config(state=tk.NORMAL)))
+
+    def _remote_batch(self, batch, days, btn, exp, info, tree, sumtxt):
+        """子客户端批次查询：主端 /api/batch 返回 orders + rows，这里照旧渲染。"""
+        try:
+            self.q.put(lambda: info.set("向主客户端查询批次 %s …" % batch))
+            ok, res = self._remote_api("/api/batch", params={"batch": batch, "days": days}, timeout=240)
+            if not ok or not isinstance(res, dict) or res.get("error"):
+                msg = ""
+                if isinstance(res, dict):
+                    msg = str(res.get("error") or "")
+                if not msg and kmclient:
+                    msg = kmclient.human_err(res, self.session.base)
+                self.q.put(lambda: (info.set("查询失败：%s" % (msg or "未知错误")),
+                                    btn.config(state=tk.NORMAL)))
+                return
+            orders = []
+            for o in (res.get("orders") or []):
+                orders.append({"seq": o.get("seq"), "sid": o.get("sid"),
+                               "short_id": o.get("short_id"), "express": o.get("express"),
+                               "urgent": bool(o.get("urgent")), "sys_status": o.get("sys_status"),
+                               "items": []})
+            rows = []
+            for r in (res.get("rows") or []):
+                try:
+                    o = orders[int(r.get("i") or 0)]
+                except Exception:
+                    continue
+                rows.append([o, r.get("code") or "", r.get("num") or 0,
+                             r.get("shelf") or 0, r.get("bins") or ""])
+            ui = getattr(self, "_batch_ui", {}) or {}
+            self.q.put(lambda: self._apply_batch(batch, orders, rows, btn, exp, info, tree, sumtxt,
+                                                ui.get("pick"), ui.get("zone")))
         except Exception as e:
             msg = str(e)[:160]
             self.q.put(lambda: (info.set("查询失败：%s" % msg), btn.config(state=tk.NORMAL)))
@@ -4326,7 +5234,7 @@ class ScanApp:
             exp.config(state=tk.NORMAL)
             info.set("完成：批次 %s 共 %d 单 / %d 行商品" % (batch, len(orders), len(rows)))
             # 货位数据旧了就顺手刷一次，下次查批次/扫码就是新的
-            if time.time() - getattr(self, "shelf_at_ts", 0) > 120:
+            if (not self.remote) and time.time() - getattr(self, "shelf_at_ts", 0) > 120:
                 self.reload_shelf(background=True)
         except Exception as e:
             info.set("渲染失败：%s" % str(e)[:120])
@@ -4335,6 +5243,10 @@ class ScanApp:
 
     def on_pick_file(self):
         """从 ERP 导出的「批次打印记录」Excel/CSV 出拣货清单（不依赖接口）。"""
+        if not self._need_perm("batch.file"):
+            return
+        if self.remote:
+            return self._host_only("读取 ERP 导出文件")
         path = filedialog.askopenfilename(
             title="选择 ERP 导出的批次文件",
             filetypes=[("Excel / CSV", "*.xlsx *.xls *.csv *.txt"), ("所有文件", "*.*")])
@@ -4404,6 +5316,8 @@ class ScanApp:
         self.status_text.set("已从文件出拣货清单：%s（%d 行）" % (os.path.basename(path), len(rows)))
 
     def _export_batch(self):
+        if not self._need_perm("export.excel"):
+            return
         rows = getattr(self, "_batch_rows", None) or []
         if not rows:
             return
@@ -4424,6 +5338,10 @@ class ScanApp:
     # ---------- API 设置 ----------
     def on_api_settings(self):
         """改 appKey/appSecret/refreshToken/session/网关/版本 —— 换账号不用重新打包。"""
+        if self.remote:
+            return self._host_only("API 设置")
+        if not self._need_perm("api.settings"):
+            return
         win = tk.Toplevel(self.root)
         win.title("API 设置（换账号 / 换网关 / 换版本）")
         win.transient(self.root)
@@ -4554,6 +5472,8 @@ class ScanApp:
 
     def sync_pending(self, background=True):
         """增量刷新（按修改时间）。"""
+        if self.remote:
+            return
         if self._syncing:
             return
         self._syncing = True
@@ -4565,6 +5485,8 @@ class ScanApp:
 
     def full_reload(self, background=True):
         """全量重拉（首次或需要重建时用，耗时约 20 分钟）。"""
+        if self.remote:
+            return
         if self._syncing:
             return
         self._syncing = True
@@ -4648,6 +5570,11 @@ class ScanApp:
 
     def _auto_tick(self):
         """定时：到点跑全量（每 full_refresh_min 分钟），其余时候跑增量；并定期刷新锁定数、货位。"""
+        if self.remote:                       # 子客户端：只需刷新状态与扫码记录
+            self._remote_status()
+            self._poll_records(force=True)
+            self.root.after(1000 * 60 * max(1, int(self.auto_refresh_min or 5)), self._auto_tick)
+            return
         if not self._syncing:
             if (time.time() - self.last_full_ts) >= self.full_refresh_min * 60:
                 self.full_reload(background=True)
@@ -4715,6 +5642,9 @@ class ScanApp:
 
     def _worker_scan(self, code, from_hook=False):
         try:
+            if self.remote:                       # 子客户端：让主端算（含权限校验 + 写扫码记录）
+                self._remote_scan(code, from_hook)
+                return
             # 主编码/系列查询：输入 9687 就列全部 9687-* 规格的货位
             keys, is_series = series_matches(self.index, code)
             if is_series:
@@ -4749,6 +5679,38 @@ class ScanApp:
         except Exception as e:
             msg = str(e)[:200]
             self.q.put(lambda: self._finish_scan("扫码查询失败：%s" % msg))
+
+    def _remote_scan(self, code, from_hook=False):
+        """子客户端扫码：主端 /api/lookup 算好（含权限校验与写扫码记录），这边只负责显示。"""
+        rel_cn, n = self._filter_values()
+        rel = {"大于": "gt", "小于": "lt", "等于": "eq"}.get(str(rel_cn), "any")
+        ok, out = self._remote_api("/api/lookup", params={"code": code, "rel": rel, "n": n}, timeout=45)
+        if not ok or not isinstance(out, dict) or out.get("error"):
+            msg = kmclient.human_err(out, self.session.base) if kmclient else "查询失败"
+            self.q.put(lambda: self._finish_scan("扫码查询失败：%s" % msg))
+            return
+        if out.get("series"):
+            lines = []
+            for it in (out.get("items") or []):
+                lines.append("%-22s 货位 %-16s 在架 %-6s 待发货 %-5s 锁定 %s"
+                             % (it.get("code"), it.get("bins") or "无货位", it.get("shelf"),
+                                "%s件/%s单" % (it.get("qty"), it.get("orders")), it.get("lock")))
+            total = int(out.get("total") or len(lines))
+            self.q.put(lambda: self._apply_series(out.get("code") or code, lines, total,
+                                                  max(0, total - len(lines))))
+            return
+        canon = str(out.get("code") or code)
+        pending = int(out.get("pieces") or 0)
+        orders_count = int(out.get("orders") or 0)
+        ones = int(out.get("ones") or 0)
+        shelf = int(out.get("shelf") or 0)
+        bins = out.get("bins") or []
+        self.shelf_at = str(out.get("shelf_at") or self.shelf_at)
+        self.lock_at = str(out.get("lock_at") or self.lock_at)
+        note = "主客户端货位缓存 %s" % out.get("shelf_at")
+        self.q.put(lambda: self._apply_scan(canon, orders_count, pending, ones, shelf, note, bins,
+                                            int(out.get("lock") or 0), int(out.get("sellable") or 0),
+                                            int(out.get("avail") or 0), from_hook))
 
     def _worker_series(self, code, keys):
         """主编码查询：列出该主编码下所有规格的货位/在架/待发货/锁定。"""
@@ -4811,6 +5773,27 @@ class ScanApp:
 
     # ---------- 导出 / 清理 ----------
     def on_export(self):
+        if not self._need_perm("export.excel"):
+            return
+        if self.remote:                       # 子客户端：让主端生成 Excel，这边只负责存盘
+            ok, data = self._remote_api("/api/scans/export", timeout=180)
+            if not ok or not isinstance(data, (bytes, bytearray)):
+                messagebox.showerror("导出失败",
+                                     kmclient.human_err(data, self.session.base) if kmclient else "导出失败")
+                return
+            path = filedialog.asksaveasfilename(defaultextension=".xlsx", initialfile="扫码日志.xlsx",
+                                               filetypes=[("Excel 文件", "*.xlsx")], title="导出扫码日志")
+            if not path:
+                return
+            try:
+                with open(path, "wb") as f:
+                    f.write(bytes(data))
+            except Exception as e:
+                messagebox.showerror("导出失败", str(e)[:200])
+                return
+            self.status_text.set("已导出扫码日志：%s" % path)
+            messagebox.showinfo("导出成功", "已导出到：\n%s" % path)
+            return
         try:
             path, n = export_scans_to_excel()
             self.status_text.set("已导出 %d 条扫码日志：%s" % (n, path))
@@ -4819,6 +5802,8 @@ class ScanApp:
             messagebox.showerror("导出失败", str(e))
 
     def on_clear_logs(self):
+        if self.remote:
+            return self._host_only("清空扫码日志")
         if not messagebox.askyesno("确认", "确定清空全部扫码日志吗？此操作不可撤销。"):
             return
         conn = get_conn()
@@ -4832,12 +5817,20 @@ class ScanApp:
         """手机/网页扫的码也会写进扫码记录表：定时看条数变没变，变了就刷新（不打断输入）。
         刷新失败不推进计数，下次继续重试。"""
         n = None
-        try:
-            conn = get_conn()
-            n = int(conn.cursor().execute("SELECT COUNT(*) FROM scan_record").fetchone()[0])
-            conn.close()
-        except Exception:
-            n = None
+        if self.remote:
+            ok, res = self._remote_api("/api/scans", params={"limit": 1}, timeout=20)
+            if ok and isinstance(res, dict):
+                try:
+                    n = int(res.get("count") or 0)
+                except Exception:
+                    n = None
+        else:
+            try:
+                conn = get_conn()
+                n = int(conn.cursor().execute("SELECT COUNT(*) FROM scan_record").fetchone()[0])
+                conn.close()
+            except Exception:
+                n = None
         if (force or (n is not None and n != getattr(self, "_log_count", -1))):
             if (not force) and (time.time() - getattr(self, "_touch_ts", 0)) < 3:
                 pass                      # 刚点过「已打」，先别重建行
@@ -4849,7 +5842,7 @@ class ScanApp:
                 except Exception:
                     pass
         try:
-            self.root.after(2000, self._poll_records)
+            self.root.after(2000 if not self.remote else 10000, self._poll_records)
         except Exception:
             pass
 
@@ -4875,6 +5868,8 @@ class ScanApp:
     def _mark_printed(self, row):
         """单向：打单 → 已打。已打后锁定（再点无效），整行保持黄色。"""
         try:
+            if not self._need_perm("scan.printed"):
+                return
             vals = list(self.tree.item(row, "values"))
             if len(vals) >= 8 and "已打" in str(vals[7]):
                 self.status_text.set("这条已经是「已打」，已锁定")
@@ -4886,7 +5881,12 @@ class ScanApp:
                 return
             self._touch_ts = time.time()   # 3 秒内不让定时刷新重建行
             self._apply_printed(row, 1)
-            if set_printed(rid, 1):
+            if self.remote:
+                okw, res = self._remote_api("/api/scans/printed", "POST", body={"id": rid, "flag": 1})
+                wrote = bool(okw and isinstance(res, dict) and res.get("ok"))
+            else:
+                wrote = bool(set_printed(rid, 1))
+            if wrote:
                 self.status_text.set("已标记：已打（该条已锁定）")
             else:
                 self._apply_printed(row, 0)     # 写失败回滚成打单，可再点
@@ -4906,7 +5906,18 @@ class ScanApp:
     def reload_records(self):
         for item in self.tree.get_children():
             self.tree.delete(item)
-        all_rows = fetch_all_scans()
+        if self.remote:
+            ok, res = self._remote_api("/api/scans", params={"limit": 500}, timeout=45)
+            if not ok or not isinstance(res, dict):
+                self.status_text.set("读取扫码记录失败：%s"
+                                     % (kmclient.human_err(res, self.session.base) if kmclient else "错误"))
+                return
+            all_rows = [(r.get("id"), r.get("time"), r.get("code"), r.get("pending"),
+                         r.get("shelf"), r.get("orders"), ("绿" if r.get("ok") else "红"),
+                         r.get("who") or "", r.get("print_num") or "", int(r.get("printed") or 0))
+                        for r in (res.get("rows") or [])]
+        else:
+            all_rows = fetch_all_scans()
         try:
             acc = (self.acc_var.get() if getattr(self, "acc_var", None) else "") or "全部"
         except Exception:
@@ -4997,23 +6008,59 @@ def main():
     if "--selftest" in sys.argv:
         run_selftest()
         return
-    if _single_instance_guard() is False:
+    if ask_login is None or kmclient is None:
         try:
-            tip = tk.Tk()
-            tip.withdraw()
-            messagebox.showwarning(
-                "已经在运行",
-                "快麦扫码查询已经在运行了。\n\n"
-                "请直接用屏幕上已经开着的那个窗口；不要开两个，\n"
-                "两个窗口会抢同一个数据库，扫码会没反应。")
-            tip.destroy()
+            messagebox.showerror("启动失败", "缺少桌面端登录模块（kuaimai_client.py / kuaimai_login_window.py），请重新安装。")
         except Exception:
             pass
         return
+    root = tk.Tk()
+    root.withdraw()
+    session = None
     try:
-        init_db()
-        root = tk.Tk()
-        ScanApp(root)
+        session = ask_login(root, lambda: ensure_web_server(None, lan=False), default_port=WEB_PORT)
+    except Exception:
+        detail = traceback.format_exc()
+        try:
+            sys.stderr.write(detail)
+        except Exception:
+            pass
+        try:
+            messagebox.showerror("登录窗打不开", detail)
+        except Exception:
+            pass
+    if session is None:
+        try:
+            root.destroy()
+        except Exception:
+            pass
+        return
+    if session.mode == "host":
+        if _single_instance_guard() is False:
+            try:
+                messagebox.showwarning(
+                    "已经在运行",
+                    "快麦扫码查询（主客户端）已经在运行了。\n\n"
+                    "请直接用屏幕上已经开着的那个窗口；不要开两个，\n"
+                    "两个窗口会抢同一个数据库，扫码会没反应。")
+            except Exception:
+                pass
+            try:
+                root.destroy()
+            except Exception:
+                pass
+            return
+    else:
+        stop_web_server()      # 子客户端：本机不对外服务，也不广播
+    try:
+        session._port = int(_WEB_STATE.get("port") or WEB_PORT)
+        root.deiconify()
+        ScanApp(root, session)
+        try:
+            session.start_heartbeat()
+        except Exception:
+            pass
+        _note_login(session.name, session.role, session.mode)
         root.mainloop()
     except Exception:
         detail = traceback.format_exc()

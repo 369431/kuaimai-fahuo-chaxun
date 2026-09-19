@@ -161,12 +161,62 @@ def need_setup():
 
 def list_users():
     out = []
+    now = time.time()
     for name, u in users().items():
+        seen = float(u.get("seen_ts") or 0)
         out.append({"name": name, "role": u.get("role") or "user",
                     "created": u.get("created") or "", "last_login": u.get("last_login") or "",
                     "online": bool(u.get("token")), "device": u.get("device") or "",
-                    "kicked_at": u.get("kicked_at") or ""})
+                    "kicked_at": u.get("kicked_at") or "",
+                    "pc": u.get("pc") or "", "win_user": u.get("win_user") or "",
+                    "ip": u.get("ip") or "", "kind": u.get("kind") or "",
+                    "seen_at": u.get("seen_at") or "",
+                    "alive": (bool(u.get("token")) and (now - seen) < 180) if seen else False})
     return sorted(out, key=lambda x: (x["role"] != "admin", x["name"]))
+
+
+def touch(name, ip="", pc="", win_user="", kind=""):
+    """子客户端心跳：只刷新「最后活跃」和设备信息，不动会话 token。"""
+    d = _load()
+    u = (d.get("users") or {}).get(str(name or ""))
+    if not u or not u.get("token"):
+        return False
+    u["seen_ts"] = time.time()
+    u["seen_at"] = _now()
+    if ip:
+        u["ip"] = str(ip)[:45]
+    if pc:
+        u["pc"] = str(pc)[:64]
+    if win_user:
+        u["win_user"] = str(win_user)[:64]
+    if kind:
+        u["kind"] = str(kind)[:16]
+    _save(d)
+    return True
+
+
+def user_perms_raw(name):
+    """账号里存的原始权限表（可能是 None / 缺字段 —— 老数据）。
+
+    只有真正保存过权限的账号才有这个字段；算成完整权限表由 kuaimai_perms.effective 负责。
+    """
+    u = users().get(str(name or ""))
+    if not u:
+        return None
+    p = u.get("perms")
+    return p if isinstance(p, dict) else None
+
+
+def set_user_perms(name, values):
+    """保存某账号的按钮权限（只写 perms 字段，不动口令/会话）。"""
+    d = _load()
+    us = d.setdefault("users", {})
+    u = us.get(str(name or ""))
+    if not u:
+        return "账号不存在"
+    u["perms"] = dict(values or {})
+    _save(d)
+    return ""
 
 
 def add_user(name, pw, role="user"):
@@ -235,7 +285,7 @@ def set_password(name, pw, block_minutes=10):
     return ""
 
 
-def login(name, pw, device="", dev_id="", model=""):
+def login(name, pw, device="", dev_id="", model="", pc="", win_user="", ip="", kind=""):
     """成功 → (token, '')；失败 → (None, 原因)。同一账号只保留最新会话（旧设备被踢下线）。"""
     name = str(name or "").strip()
     dev_id = str(dev_id or "").strip()
@@ -252,6 +302,12 @@ def login(name, pw, device="", dev_id="", model=""):
     u["last_login"] = _now()
     u["device"] = device_label(device, model)
     u["ua"] = str(device or "")[:160]
+    u["pc"] = str(pc or "")[:64]
+    u["win_user"] = str(win_user or "")[:64]
+    u["ip"] = str(ip or "")[:45]
+    u["kind"] = str(kind or "")[:16]
+    u["seen_ts"] = time.time()
+    u["seen_at"] = _now()
     if dev_id:
         u["dev"] = dev_id
         (d.get("blocked") or {}).pop(dev_id, None)
