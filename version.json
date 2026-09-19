@@ -1,9 +1,9 @@
 {
-  "version": "v1.11",
-  "notes": "桌面端登录 + 主/子客户端；对外访问设置（域名/frp/证书）；扫码记录加中通/申通加急列；检查更新；修登录窗不显示/卡在检查本机服务的坑",
+  "version": "v1.12",
+  "notes": "主账号规则（主客户端只能用主账号登录）；账号可开电脑端+网页端同时登录；子账号可被授予管理权限去管别的子账号；子客户端请求全部后台化（修域名/frp 慢导致的假死）；登录后索引后台加载不再卡一下",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.11/kuaimai-scan-setup-v1.11.exe",
-  "sha256": "882f7e0fba660b842ee8a1c4f520ebbf7638846bf59bb26931f977ef86278711",
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.12/kuaimai-scan-setup-v1.12.exe",
+  "sha256": "f4e952471359a5f814b7ed557e04c8b0bce17faa4518ee45d3d60541650d602f",
   "mandatory": false,
-  "published_at": "2026-09-20 01:37"
+  "published_at": "2026-09-20 01:58"
 }
