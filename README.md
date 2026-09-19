@@ -137,6 +137,37 @@ UDP  8791                     广播应答（子客户端「自动发现」，�
 
 对应文件：`desktop/kuaimai_gateway.py`（逻辑）、`desktop/kuaimai_gateway_ui.py`（窗口）。
 
+## 检查更新
+
+登录窗左下角、主界面「操作」区都有「**检查更新**」（开机 6 秒后也会悄悄查一次，**只有真有新版才弹窗**）。
+
+它读仓库根目录的 **`version.json`**：
+
+```json
+{
+  "version": "v1.11",
+  "notes": "这版改了什么（弹窗里显示）",
+  "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
+  "setup_url": "https://github.com/…/releases/download/v1.11/kuaimai-scan-setup-v1.11.exe",
+  "sha256": "安装包的 sha256（下载完客户端会校验）",
+  "mandatory": false
+}
+```
+
+发现新版 → 弹窗可「**下载并安装**」（先下到临时目录、校验 sha256、再启动安装向导；Inno 安装器自己会处理“程序正在运行”）、也能「打开发布页」；
+点「稍后」会记住不再为这一版弹窗（下次真出新版再提醒）。
+
+**发新版只要一条命令**（仓库是 Public，客户端免密钥就能拉）：
+
+```bash
+# 自动：改名成 ASCII 资源名 → 算 sha256 → 建/更新 Release → 写 version.json → 提交推送
+python release.py --version v1.12 --installer "C:\Users\Kerwin\Desktop\发布\快麦扫码查询_安装版_v1.12.exe" --notes "新增 XXX；修复 YYY"
+```
+
+> 清单地址可在 `kuaimai_client.json` 里用 `update_url` 改成自己的（例：以后放自己服务器上）；
+> `version.json` 只放版本号与下载地址，**不放任何凭据**。
+> 客户端跑的是 exe，不依赖 `.py` 文件。
+
 自检（无界面，临时目录 + 临时端口，不会动你的真账号/真数据库）：
 
 ```bash
