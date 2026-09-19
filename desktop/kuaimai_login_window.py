@@ -422,6 +422,14 @@ class LoginWindow:
             return
         sess._port = int(self.cfg.get("port") or self.default_port)
         self.session = sess
+        # 主客户端只能用主账号：子账号（哪怕被授予了管理权限）在本机登录也只是子客户端，
+        # 走本机主客户端的接口取数，不碰本地库、不对外服务。
+        if mode == "host" and not getattr(sess, "owner", False):
+            _port = int(self.cfg.get("port") or self.default_port)
+            sess.mode = "remote"
+            sess.base = "http://127.0.0.1:%d" % _port
+            sess.local_sub = True
+            self._set_msg("这个账号不是主账号 → 以【子客户端】登录本机主客户端（主客户端只能用主账号）", ok=True)
         if self.memo.get():
             cfg = {"remember": True, "mode": mode}
             if mode == "host":

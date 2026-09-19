@@ -126,8 +126,40 @@ def _load():
         d = {"users": {}}
     now = time.time()
     b = d.get("blocked") or {}
-    d["blocked"] = {k: v for k, v in b.items() if float(v or 0) > now}   # 过期的踢下线记录顺手清掉
+    d["blocked"] = {k: v for k, v in b.items() if float(v or 0) > now}
+    us = d.get("users") or {}
+    if us:
+        for _n, _u in us.items():
+            if not isinstance(_u, dict):
+                continue
+            _u.setdefault("owner", False)
+            _u.setdefault("allow_multi_device", False)
+        # 迁移：一个主账号都没有时，把最早建的管理员当主账号
+        if not any(u.get("owner") for u in us.values() if isinstance(u, dict)):
+            adm = sorted([(u.get("created") or "", n) for n, u in us.items()
+                          if isinstance(u, dict) and (u.get("role") or "") == "admin"])
+            if adm:
+                us[adm[0][1]]["owner"] = True
     return d
+
+
+def _tokens(u):
+    """一个账号当前的会话表 {kind: token}（老数据只有单个 token 也能读）。"""
+    if not isinstance(u, dict):
+        return {}
+    t = u.get("tokens")
+    if isinstance(t, dict) and t:
+        return {str(k or "desktop"): str(v) for k, v in t.items() if v}
+    if u.get("token"):
+        return {str(u.get("kind") or "desktop"): str(u["token"])}
+    return {}
+
+
+def _set_tokens(u, toks):
+    toks = {str(k or "desktop"): str(v) for k, v in (toks or {}).items() if v}
+    u["tokens"] = toks
+    u["token"] = list(toks.values())[-1] if toks else ""     # 兼容旧字段
+    return toks
 
 
 def _save(d):
@@ -159,27 +191,53 @@ def need_setup():
     return not any((u.get("role") == "admin") for u in us.values())
 
 
+def owner_names():
+    """主账号（这台电脑的主客户端只能用它登录）。"""
+    return [n for n, u in users().items() if isinstance(u, dict) and u.get("owner")]
+
+
+def is_owner(name):
+    u = users().get(str(name or ""))
+    return bool(isinstance(u, dict) and u.get("owner"))
+
+
+def set_multi_device(name, flag):
+    """是否允许同一账号电脑端 + 网页端同时在线。"""
+    d = _load()
+    u = (d.get("users") or {}).get(str(name or ""))
+    if not u:
+        return "账号不存在"
+    u["allow_multi_device"] = bool(flag)
+    if not flag:
+        _set_tokens(u, {})            # 关掉后只留一个：下次登录会踢掉其它
+    _save(d)
+    return ""
+
+
 def list_users():
     out = []
     now = time.time()
     for name, u in users().items():
         seen = float(u.get("seen_ts") or 0)
         out.append({"name": name, "role": u.get("role") or "user",
+                    "owner": bool(u.get("owner")),
+                    "allow_multi_device": bool(u.get("allow_multi_device")),
+                    "kinds": sorted(_tokens(u).keys()),
                     "created": u.get("created") or "", "last_login": u.get("last_login") or "",
-                    "online": bool(u.get("token")), "device": u.get("device") or "",
+                    "online": bool(_tokens(u)), "device": u.get("device") or "",
                     "kicked_at": u.get("kicked_at") or "",
                     "pc": u.get("pc") or "", "win_user": u.get("win_user") or "",
                     "ip": u.get("ip") or "", "kind": u.get("kind") or "",
                     "seen_at": u.get("seen_at") or "",
-                    "alive": (bool(u.get("token")) and (now - seen) < 180) if seen else False})
-    return sorted(out, key=lambda x: (x["role"] != "admin", x["name"]))
+                    "alive": (bool(_tokens(u)) and (now - seen) < 180) if seen else False})
+    return sorted(out, key=lambda x: (not x["owner"], x["role"] != "admin", x["name"]))
 
 
 def touch(name, ip="", pc="", win_user="", kind=""):
     """子客户端心跳：只刷新「最后活跃」和设备信息，不动会话 token。"""
     d = _load()
     u = (d.get("users") or {}).get(str(name or ""))
-    if not u or not u.get("token"):
+    if not u or not _tokens(u):
         return False
     u["seen_ts"] = time.time()
     u["seen_at"] = _now()
@@ -231,7 +289,8 @@ def add_user(name, pw, role="user"):
         return "账号已存在"
     salt = secrets.token_hex(8)
     us[name] = {"salt": salt, "hash": _hash(pw, salt), "role": role, "created": _now(),
-                "token": "", "last_login": "", "device": ""}
+                "token": "", "tokens": {}, "owner": False, "allow_multi_device": False,
+                "last_login": "", "device": ""}
     _save(d)
     return ""
 
@@ -259,7 +318,7 @@ def kick(name, minutes=10):
     if not u:
         return "账号不存在"
     dev = str(u.get("dev") or "").strip()
-    u["token"] = ""                 # 旧会话立即失效（那台设备下次请求被踢回登录页）
+    _set_tokens(u, {})               # 旧会话全部立即失效
     u["kicked_at"] = _now()
     if dev:
         d.setdefault("blocked", {})[dev] = time.time() + max(1, int(minutes)) * 60
@@ -277,7 +336,7 @@ def set_password(name, pw, block_minutes=10):
         return "账号不存在"
     u["salt"] = secrets.token_hex(8)
     u["hash"] = _hash(pw, u["salt"])
-    u["token"] = ""                     # 改密码后旧登录失效
+    _set_tokens(u, {})               # 改密码后旧登录全部失效
     dev = str(u.get("dev") or "").strip()
     if block_minutes and dev:            # 管理员改别人的密码：那台设备 10 分钟内不能再登录
         d.setdefault("blocked", {})[dev] = time.time() + max(1, int(block_minutes)) * 60
@@ -286,7 +345,11 @@ def set_password(name, pw, block_minutes=10):
 
 
 def login(name, pw, device="", dev_id="", model="", pc="", win_user="", ip="", kind=""):
-    """成功 → (token, '')；失败 → (None, 原因)。同一账号只保留最新会话（旧设备被踢下线）。"""
+    """成功 → (token, '')；失败 → (None, 原因)。
+
+    会话规则：默认一个账号只有一个会话（新登录把旧的踢掉）；
+    allow_multi_device=True 时允许「电脑端 + 网页端」各一个（同端再登录会顶掉同端的旧会话）。
+    """
     name = str(name or "").strip()
     dev_id = str(dev_id or "").strip()
     left = blocked_left(dev_id)
@@ -298,7 +361,14 @@ def login(name, pw, device="", dev_id="", model="", pc="", win_user="", ip="", k
     if not u or _hash(pw, u.get("salt") or "") != u.get("hash"):
         return None, "账号或密码不对"
     tok = secrets.token_urlsafe(24)
-    u["token"] = tok
+    k = str(kind or "desktop")[:16]
+    toks = _tokens(u)
+    if not u.get("allow_multi_device"):
+        toks = {}                       # 只保留最新一个会话
+    else:
+        toks.pop(k, None)                # 同一端只留最新，另一端保持在线
+    toks[k] = tok
+    _set_tokens(u, toks)
     u["last_login"] = _now()
     u["device"] = device_label(device, model)
     u["ua"] = str(device or "")[:160]
@@ -316,13 +386,19 @@ def login(name, pw, device="", dev_id="", model="", pc="", win_user="", ip="", k
 
 
 def check(token):
-    """校验会话 token → {'name','role'} 或 None。"""
+    """校验会话 token → {'name','role','owner','kind','allow_multi_device'} 或 None。"""
     token = str(token or "").strip()
     if not token:
         return None
     for name, u in users().items():
-        if u.get("token") and u["token"] == token:
-            return {"name": name, "role": u.get("role") or "user"}
+        if not isinstance(u, dict):
+            continue
+        for _k, t in _tokens(u).items():
+            if t == token:
+                return {"name": name, "role": u.get("role") or "user",
+                        "owner": bool(u.get("owner")),
+                        "kind": _k,
+                        "allow_multi_device": bool(u.get("allow_multi_device"))}
     return None
 
 
@@ -330,8 +406,14 @@ def logout(token):
     d = _load()
     changed = False
     for _name, u in (d.get("users") or {}).items():
-        if u.get("token") and u["token"] == str(token or ""):
-            u["token"] = ""
+        if not isinstance(u, dict):
+            continue
+        toks = _tokens(u)
+        hit = [k for k, t in toks.items() if t == str(token or "")]
+        if hit:
+            for k in hit:
+                toks.pop(k, None)
+            _set_tokens(u, toks)
             changed = True
     if changed:
         _save(d)

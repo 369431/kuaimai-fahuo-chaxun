@@ -22,7 +22,7 @@ import urllib.parse
 import urllib.request
 
 APP = "kuaimai-fahuo-chaxun"
-APP_VER = "v1.11"              # 版本号（登录窗/主窗口都显示它，一眼能看出是不是新版）
+APP_VER = "v1.12"              # 版本号（登录窗/主窗口都显示它，一眼能看出是不是新版）
 DISCOVER_PORT = 8791
 DISCOVER_REQ = b"KUIMAI-SCAN-DISCOVER/1"
 DEFAULT_PORT = 8790
@@ -316,12 +316,15 @@ class Session:
     """一次登录会话：本机主客户端（mode=host）或子客户端（mode=remote）。"""
 
     def __init__(self, mode="host", base="", token="", name="", role="user",
-                 perms=None, server_name="", user_agent=""):
+                 perms=None, server_name="", user_agent="", owner=False,
+                 allow_multi_device=False):
         self.mode = mode
         self.base = str(base or "").rstrip("/")
         self.token = token or ""
         self.name = name or ""
         self.role = role or "user"
+        self.owner = bool(owner)                    # 主账号（本机主客户端只能用主账号登录）
+        self.allow_multi_device = bool(allow_multi_device)
         self.perms = dict(perms or {})
         self.server_name = server_name or ""
         self.user_agent = user_agent or ""
@@ -418,14 +421,20 @@ def _after_login(mode, base, res, server_name=""):
     role = str(res.get("role") or "user")
     token = str(res.get("token") or "")
     perms = res.get("perms") if isinstance(res.get("perms"), dict) else None
-    if perms is None:
+    a = res.get("perms") if isinstance(res.get("perms"), dict) else None
+    owner = bool(res.get("owner"))
+    multi = bool(res.get("allow_multi_device"))
+    if a is None:
         ok, st = http_json(base, "/api/auth/state", token=token, timeout=10)
         if ok and isinstance(st, dict):
-            perms = st.get("perms") or {}
+            a = st.get("perms") or {}
             name = name or str(st.get("user") or "")
             role = str(st.get("role") or role)
+            owner = bool(st.get("owner"))
+            multi = bool(st.get("allow_multi_device"))
     s = Session(mode=mode, base=base, token=token, name=name, role=role,
-                perms=perms or {}, server_name=server_name)
+                perms=a or {}, server_name=server_name, owner=owner,
+                allow_multi_device=multi)
     return s, ""
 
 

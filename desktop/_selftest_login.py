@@ -300,8 +300,8 @@ def main():
             "export.excel": True, "stock.canprint": True, "stock.sent.clear": True,
             "stock.edit": True, "desktop.admin": True, "垃圾键": True}})
         ok("管理员保存 u1 权限", okk and res.get("ok"), res.get("error"))
-        ok("管理员权限不能被写（desktop.admin 不进子账号）", not bool((res.get("perms") or {}).get("desktop.admin")),
-           res.get("perms"))
+        ok("管理权限现在可以授给子账号（admin.perms / desktop.admin 能保存）",
+           bool((res.get("perms") or {}).get("desktop.admin")), res.get("perms"))
         sub2, err = kmc.login(base, "u1", "u1pass", mode="remote")
         ok("重新登录拿到新权限", bool(sub2 and sub2.can("export.excel") and sub2.can("stock.sent.clear")), err)
         before = app.calls["export"]
@@ -444,6 +444,12 @@ def main():
                 root2 = tk.Tk()
                 root2.withdraw()
                 app2 = km.ScanApp(root2, s2)
+                for _ in range(40):          # 等 after(80) 的启动任务 + 后台索引跑完
+                    try:
+                        root2.update()
+                    except Exception:
+                        pass
+                    time.sleep(0.05)
 
                 def dis(key):
                     items = (app2.gated or {}).get(key) or []
@@ -542,6 +548,12 @@ def main():
             host_root = tk.Tk()
             host_root.withdraw()
             apph = km.ScanApp(host_root, hs)
+            for _ in range(40):
+                try:
+                    host_root.update()
+                except Exception:
+                    pass
+                time.sleep(0.05)
             ok("主机模式：桌面主界面能建起来（管理员）", True)
             ok("主机模式：管理员所有按钮都可用（没有一个被灰）",
                all(not (m == "disable" and "disabled" in w.state())
@@ -569,6 +581,71 @@ def main():
                    row0.get("ue"))
             except Exception as e:
                 ok("主端 /api/scans 每行带上中通/申通加急数", False, repr(e)[:160])
+
+            # 主账号 / 同时登录 / 子账号管理权限（本轮新规则）
+            try:
+                us0 = km.auth.list_users()
+                own = [u for u in us0 if u.get("owner")]
+                ok("主账号：正好一个（最早的管理员）", len(own) == 1, [u.get("name") for u in us0])
+                ok("主账号：账号列表带 owner / allow_multi_device字段",
+                   all(("owner" in u and "allow_multi_device" in u) for u in us0), us0[:1])
+                owner_name = own[0]["name"]
+                km.auth.add_user("submgr", "pw12345", "user")
+                import kuaimai_perms as _pm
+                _pv = {_k: False for _k in _pm.KEYS}
+                _pv["admin.perms"] = True
+                km.auth.set_user_perms("submgr", _pv)
+                # 1) 默认单会话
+                tok_a, _e1 = km.auth.login("submgr", "pw12345", kind="desktop")
+                tok_b, _e2 = km.auth.login("submgr", "pw12345", kind="web")
+                ok("单会话：同账号第二次登录把第一次顶掉",
+                   km.auth.check(tok_a) is None and km.auth.check(tok_b) is not None)
+                ok("会话里带 kind 与 owner（子账号 owner=False）",
+                   (km.auth.check(tok_b) or {}).get("kind") == "web"
+                   and (km.auth.check(tok_b) or {}).get("owner") is False,
+                   km.auth.check(tok_b))
+                # 2) 开「电脑端 + 网页端同时登录」
+                km.auth.set_multi_device("submgr", True)
+                t1, _ = km.auth.login("submgr", "pw12345", kind="desktop")
+                t2, _ = km.auth.login("submgr", "pw12345", kind="web")
+                ok("同时登录：电脑端 + 网页端两个会话同时在",
+                   km.auth.check(t1) is not None and km.auth.check(t2) is not None)
+                t3, _ = km.auth.login("submgr", "pw12345", kind="desktop")
+                ok("同时登录：同端再登录只顶掉同端旧会话（网页端不受影响）",
+                   km.auth.check(t1) is None and km.auth.check(t3) is not None
+                   and km.auth.check(t2) is not None)
+                # 3) 子账号（有 admin.perms）能管账号，但动不了主账号
+                okk, r1 = kmc.http_json(hbase2, "/api/users", "POST",
+                                        body={"action": "list"}, token=t3, timeout=6)
+                ok("子账号（被授予 admin.perms）能管理账号：能列",
+                   okk and r1.get("ok") and len(r1.get("users") or []) >= 2, r1.get("ok"))
+                okk2, r2 = kmc.http_json(hbase2, "/api/users", "POST",
+                                         body={"action": "kick", "name": owner_name},
+                                         token=t3, timeout=6)
+                ok("子账号动不了主账号（被拦下）",
+                   (not r2.get("ok")) and ("主账号" in str(r2.get("error") or "")), r2)
+                okk3, r3 = kmc.http_json(hbase2, "/api/users", "POST",
+                                         body={"action": "multi", "name": "submgr", "flag": False},
+                                         token=t3, timeout=6)
+                ok("「电脑端+网页端同时登录」开关能存下来",
+                   okk3 and r3.get("ok") and any(
+                       (not u.get("allow_multi_device")) for u in (r3.get("users") or [])
+                       if u.get("name") == "submgr"), r3.get("ok"))
+                # 4) 子账号在本机登录 → 只能当子客户端（login 响应里 owner=False）
+                okk4, r4 = kmc.http_json(hbase2, "/api/auth/login", "POST",
+                                         body={"name": "submgr", "pw": "pw12345",
+                                               "kind": "desktop", "dev_id": "selftest-sub"},
+                                         timeout=8)
+                ok("子账号登录响应里 owner=False（登录窗据此不让它当主客户端）",
+                   okk4 and r4.get("ok") and r4.get("owner") is False, r4.get("owner"))
+                okk5, r5 = kmc.http_json(hbase2, "/api/auth/login", "POST",
+                                         body={"name": owner_name, "pw": "pw12345",
+                                               "kind": "desktop", "dev_id": "selftest-own"},
+                                         timeout=8)
+                ok("主账号登录响应里 owner=True", (not okk5) or r5.get("owner") is True,
+                   r5.get("owner"))
+            except Exception as e:
+                ok("主账号/同时登录/子账号管理权限规则", False, repr(e)[:200])
             try:
                 host_root.destroy()
             except Exception:

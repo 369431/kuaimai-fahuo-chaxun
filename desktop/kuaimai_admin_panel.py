@@ -159,19 +159,22 @@ class AdminPanel:
         ttk.Button(bar, text="改密码", command=self._passwd_account).pack(side=tk.LEFT)
         ttk.Button(bar, text="删除", command=self._del_account).pack(side=tk.LEFT, padx=6)
         ttk.Button(bar, text="踢下线", command=self._kick_account).pack(side=tk.LEFT)
+        ttk.Button(bar, text="同时登录 开/关", command=self._toggle_multi).pack(side=tk.LEFT, padx=6)
         self.acc_info = tk.Label(bar, text="", bg=BG, fg=BLUE, font=("Microsoft YaHei", 9))
         self.acc_info.pack(side=tk.LEFT, padx=8)
-        cols = ("name", "role", "online", "device", "pc", "win_user", "ip", "last", "created")
-        heads = (("name", "账号", 110), ("role", "角色", 110), ("online", "在线", 60),
-                 ("device", "登录设备", 190), ("pc", "电脑名", 130), ("win_user", "Windows 用户", 100),
-                 ("ip", "来源 IP", 110), ("last", "最后登录", 150), ("created", "创建时间", 150))
+        cols = ("name", "role", "multi", "online", "device", "pc", "win_user", "ip", "last", "created")
+        heads = (("name", "账号", 100), ("role", "角色", 80), ("multi", "同时登录", 70),
+                 ("online", "在线", 55), ("device", "登录设备", 170), ("pc", "电脑名", 130),
+                 ("win_user", "Windows 用户", 100), ("ip", "来源 IP", 110),
+                 ("last", "最后登录", 140), ("created", "创建时间", 140))
         self.acc_tree = ttk.Treeview(t, columns=cols, show="headings", height=16)
         for c, txt, w in heads:
             self.acc_tree.heading(c, text=txt)
             self.acc_tree.column(c, width=w, anchor="center")
         self.acc_tree.pack(fill=tk.BOTH, expand=True)
-        tk.Label(t, text="同一账号同时只能在一处登录：新登录会把旧设备顶下线。",
-                 bg=BG, fg="#6e6e73", font=("Microsoft YaHei", 9)).pack(anchor="w", pady=(4, 0))
+        tk.Label(t, text="主账号：主客户端只能用主账号登录（子账号就算有管理权限也是子账号）。\n"
+                        "同一账号默认只能一处登录；选中账号点「同时登录 开/关」可允许电脑端 + 网页端各一个。",
+                 bg=BG, fg="#6e6e73", font=("Microsoft YaHei", 9), justify="left").pack(anchor="w", pady=(4, 0))
 
     def refresh_accounts(self):
         res = self._ask("/api/users", "POST", body={"action": "list"})
@@ -183,13 +186,13 @@ class AdminPanel:
             return
         for u in res.get("users") or []:
             self.acc_tree.insert("", tk.END, values=(
-                u.get("name"), ROLE_TXT.get(u.get("role"), u.get("role")),
+                u.get("name"),
+                "主账号" if u.get("owner") else ROLE_TXT.get(u.get("role"), u.get("role")),
+                "开" if u.get("allow_multi_device") else "关",
                 "是" if u.get("online") else "否", u.get("device") or "-",
                 u.get("pc") or "-", u.get("win_user") or "-", u.get("ip") or "-",
                 u.get("last_login") or "-", u.get("created") or "-"))
-        self.acc_info.config(text="共 %d 个账号（主账号 %d 个）"
-                             % (len(res.get("users") or []),
-                                sum(1 for u in (res.get("users") or []) if u.get("role") == "admin")))
+        self.acc_info.config(text="共 %d 个账号" % len(res.get("users") or []))
 
     def _sel_account(self, need=True):
         sel = self.acc_tree.selection()
@@ -246,6 +249,21 @@ class AdminPanel:
         res = self._ask("/api/users", "POST", body={"action": "kick", "name": name})
         if res is not None:
             self._say("已踢下线：%s" % name)
+            self.refresh_accounts()
+
+    def _toggle_multi(self):
+        """开关「电脑端 + 网页端同时登录」（选中账号）。"""
+        sel = self.acc_tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "先在列表里选一个账号", parent=self.win)
+            return
+        vals = list(self.acc_tree.item(sel[0], "values"))
+        name = str(vals[0])
+        cur = (len(vals) > 2 and str(vals[2]) == "开")
+        res = self._ask("/api/users", "POST",
+                        body={"action": "multi", "name": name, "flag": (not cur)})
+        if res is not None:
+            self._say("%s：电脑端+网页端同时登录已%s" % (name, "关闭" if cur else "打开"))
             self.refresh_accounts()
 
     # ---------------- 权限 ----------------

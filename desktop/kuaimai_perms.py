@@ -30,7 +30,7 @@ CATALOG = [
     ("pick.end",       "拣货 · 结束批次",                         "动作类（默认关闭）", False),
     ("pick.zone",      "拣货 · 按分区拣货",                       "动作类（默认关闭）", False),
     ("pick.speak",     "拣货 · 语音播报",                         "动作类（默认关闭）", False),
-    ("admin.perms",    "权限管理（仅管理员）",                     "管理", False),
+    ("admin.perms",    "权限管理（账号 / 权限，可授给子账号）",     "管理", False),
     # ---- 桌面端（电脑版）用到的权限点 ----
     ("scan.record",     "扫码记录（查看 / 刷新）",                    "查询类（默认开放）", True),
     ("scan.printed",    "扫码记录 · 标记「已打」",                     "查询类（默认开放）", True),
@@ -48,8 +48,9 @@ KEYS = [c[0] for c in CATALOG]
 LABELS = {c[0]: c[1] for c in CATALOG}
 GROUPS = {c[0]: c[2] for c in CATALOG}
 DEFAULTS = {c[0]: bool(c[3]) for c in CATALOG}
-# 只有管理员拿得到的权限点（普通账号一律 False，且不可被勾选配置）
-ADMIN_ONLY = ("admin.perms", "desktop.admin")
+# 保留常量：以前普通账号一律拿不到这两项；按需求放开了（子账号也能被授予管理权限，
+# 主账号保护改在服务端做）。留空 = effective() 里不再强制置 False。
+ADMIN_ONLY = ()
 
 
 def defaults():
@@ -77,8 +78,8 @@ def effective(stored, role="user"):
     """把账号里存的 perms 算成一张完整权限表（缺字段按默认值）。
 
     · 管理员：一律全开（管理员始终全量可见，不可被限制）；
-    · 普通账号：先取默认值，再用账号里显式存的值覆盖（含显式的 False）；
-    · admin.perms 永远只给管理员。
+    · 子账号：先取默认值，再用账号里显式存的值覆盖（含显式的 False）；
+      被授予 admin.perms / desktop.admin 的子账号可以管理别的子账号（主账号仍只能主账号本人动）。
     """
     out = defaults()
     if str(role or "") == "admin":

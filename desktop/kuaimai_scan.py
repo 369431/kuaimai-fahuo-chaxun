@@ -79,6 +79,10 @@ try:
 except Exception:
     kmgw = None
 import kuaimai_db              # 订单缓存 SQLite 存储层（kuaimai_db.py）
+try:
+    import kuaimai_uikit as uikit       # 后台线程安全地刷界面
+except Exception:
+    uikit = None
 import traceback
 import collections
 import re
@@ -1983,7 +1987,10 @@ class _WebHandler(BaseHTTPRequestHandler):
         return {"need_setup": bool(auth and auth.need_setup()),
                 "local": self._client_is_local(),
                 "user": (u or {}).get("name"), "role": (u or {}).get("role"),
-                "users": (auth.list_users() if (auth and u and u.get("role") == "admin") else []),
+                "owner": bool((u or {}).get("owner")),
+                "allow_multi_device": bool((u or {}).get("allow_multi_device")),
+                "host_kind": (u or {}).get("kind") or "",
+                "users": (auth.list_users() if (auth and u and self._can(u, "admin.perms")) else []),
                 "perms": self._perms_of(u),
                 "app": "kuaimai-fahuo-chaxun", "ver": APP_VER,
                 "host": _web_host_info().get("pc") or "",
@@ -2220,6 +2227,9 @@ class _WebHandler(BaseHTTPRequestHandler):
                 self._set_cookie(tok)
                 _note_login(name, "admin", "host")
                 return self._json({"ok": True, "token": tok, "name": name, "role": "admin",
+                                   "owner": bool(auth.is_owner(name)),
+                                   "allow_multi_device": bool((auth.users().get(name) or {})
+                                                              .get("allow_multi_device")),
                                    "perms": self._perms_of({"name": name, "role": "admin"}),
                                    "ver": APP_VER})
             if path == "/api/auth/login":
@@ -2236,6 +2246,9 @@ class _WebHandler(BaseHTTPRequestHandler):
                 _note_login(str(body.get("name")).strip(), role,
                             body.get("mode") or ("host" if body.get("kind") == "desktop" else "web"))
                 return self._json({"ok": True, "token": tok, "name": body.get("name"), "role": role,
+                                   "owner": bool(auth.is_owner(str(body.get("name")).strip())),
+                                   "allow_multi_device": bool((auth.users().get(str(body.get("name")).strip())
+                                                              or {}).get("allow_multi_device")),
                                    "perms": self._perms_of({"name": body.get("name"), "role": role}),
                                    "ver": APP_VER})
             me = self._auth(qs)
@@ -2343,23 +2356,39 @@ class _WebHandler(BaseHTTPRequestHandler):
             if path == "/api/users":
                 if not auth:
                     return self._json({"error": "账号模块不可用"}, 400)
-                if me.get("role") != "admin":
-                    return self._json({"error": "只有管理员能管理账号"}, 403)
+                # 管理权限：管理员，或被授予 admin.perms 的子账号（子账号也能管别的子账号）
+                if not self._can(me, "admin.perms"):
+                    return self._deny("admin.perms")
                 act = str(body.get("action") or "list")
+                target = str(body.get("name") or "").strip()
+                i_am_owner = bool((me or {}).get("owner"))
+                if act in ("del", "passwd", "kick", "multi") and target \
+                        and auth.is_owner(target) and not i_am_owner:
+                    return self._json({"error": "主账号只能由主账号本人管理"}, 403)
                 err = ""
                 if act == "add":
-                    err = auth.add_user(body.get("name"), body.get("pw"), body.get("role") or "user")
+                    role = str(body.get("role") or "user")
+                    if role == "admin" and not i_am_owner:
+                        return self._json({"error": "只有主账号能新建管理员账号"}, 403)
+                    err = auth.add_user(target, body.get("pw"), role)
                 elif act == "del":
-                    err = auth.del_user(body.get("name"))
+                    if auth.is_owner(target):
+                        return self._json({"error": "主账号不能删"}, 400)
+                    err = auth.del_user(target)
                 elif act == "passwd":
                     # 改自己的密码：不踢自己、不锁自己；改别人的：旧会话失效 + 那台设备 10 分钟不能再登录
-                    mine = (str(body.get("name") or "").strip() == str(me.get("name") or ""))
-                    err = auth.set_password(body.get("name"), body.get("pw"), 0 if mine else 10)
+                    mine = (target == str(me.get("name") or ""))
+                    err = auth.set_password(target, body.get("pw"), 0 if mine else 10)
                 elif act == "kick":
-                    err = auth.kick(body.get("name"))
+                    if target == str(me.get("name") or ""):
+                        return self._json({"error": "不能踢自己下线"}, 400)
+                    err = auth.kick(target)
+                elif act == "multi":
+                    err = auth.set_multi_device(target, bool(body.get("flag")))
                 if err:
                     return self._json({"error": err}, 400)
-                return self._json({"ok": True, "users": auth.list_users()})
+                return self._json({"ok": True, "users": auth.list_users(),
+                                   "owner": auth.owner_names(), "me": str(me.get("name") or "")})
             return self._json({"error": "not found"}, 404)
         except _Denied as d:
             return self._json({"error": "没有这个功能的权限：" + d.label,
@@ -2957,16 +2986,24 @@ class ScanApp:
         self.autosubmit_on = tk.BooleanVar(value=bool(settings.get("auto_submit", False)))
 
         self._build_ui()
+        self.index_ready = False
+        try:
+            if uikit is not None:
+                uikit.start(self.root)      # 后台加载完成后靠它安全地刷界面
+        except Exception:
+            pass
         if self.remote:
-            self._remote_startup()          # 子客户端：一个本地库都不碰，全走主端接口
+            self.status_text.set("正在从主客户端取数…")
+            self.root.after(80, self._remote_startup)   # 子客户端：一个本地库都不碰，全走主端接口
         else:
             init_db()
             self._init_orders_db()
             self.reload_records()
-            self._restore_pending_cache()
+            self._start_web()               # 先对外服务（手机能连），索引随后台加载
             self._restore_shelf_cache()
             self._restore_lock_cache()
-            self._start_web()          # 数据恢复完再对外服务，避免手机端拿到半成品
+            # 索引在后台建（51MB 的库聚合要几秒），界面先出来 —— 登录后不再“卡一下”
+            self.root.after(80, self._load_index_async)
         self._apply_perms()
         self.root.after(100, self._drain_queue)
         if not self.remote:
@@ -3944,7 +3981,11 @@ class ScanApp:
         _snd.grid(row=0, column=3, padx=6)
         self._gate("ui.sound", _snd)
         self.id_label = ttk.Label(scan_box, text="", foreground="#7a4f01")
-        self.id_label.grid(row=1, column=0, columnspan=4, sticky="w", padx=6, pady=(0, 2))
+        self.id_label.grid(row=1, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 2))
+        # 接口状态常驻显示（放扫描框右上角）：未配置时不用等弹窗也知道
+        self.api_state_lbl = tk.Label(scan_box, text="", bg=UI_BG, fg="#6e6e73",
+                                      font=("Microsoft YaHei", 9))
+        self.api_state_lbl.grid(row=1, column=2, columnspan=2, sticky="e", padx=6, pady=(0, 2))
         self.web_label = ttk.Label(scan_box, text="", foreground="#0b5394")
         self.web_label.grid(row=2, column=0, columnspan=4, sticky="w", padx=6, pady=(0, 6))
         _key_chk = ttk.Checkbutton(scan_box, text="手机访问需口令", variable=self.key_on,
@@ -4298,9 +4339,14 @@ class ScanApp:
         s = self.session
         self.loaded_at = self.shelf_at = self.lock_at = "（主客户端）"
         try:
-            self.web_label.config(
-                text="子客户端模式：数据实时来自主客户端 %s（本机不存快麦凭据、不对外服务）"
-                     % (s.base if s else ""))
+            if getattr(s, "local_sub", False):
+                self.web_label.config(
+                    text="本机子客户端模式：数据来自本机主客户端 %s（这台电脑的主客户端只能用主账号登录）"
+                         % (s.base if s else ""))
+            else:
+                self.web_label.config(
+                    text="子客户端模式：数据实时来自主客户端 %s（本机不存快麦凭据、不对外服务）"
+                         % (s.base if s else ""))
         except Exception:
             pass
         self.reload_records()
@@ -4316,17 +4362,15 @@ class ScanApp:
         return msg
 
     def _remote_status(self):
-        """子客户端顶部状态：主端的订单数 / 编码数 / 更新时间。"""
-        ok, st = self._remote_api("/api/status", timeout=20)
-        if not ok or not isinstance(st, dict):
-            self._remote_err(st)
-            return
-        self.loaded_at = str(st.get("loaded_at") or "未加载")
-        self.shelf_at = str(st.get("shelf_at") or "未加载")
-        self.lock_at = str(st.get("lock_at") or "未加载")
-        self.status_text.set("主客户端数据：待发货 %s 单 / %s 个编码（订单库 %s　货位 %s）"
-                             % (st.get("live_orders", 0), st.get("codes", 0),
-                                self.loaded_at, self.shelf_at))
+        """子客户端顶部状态：主端的订单数 / 编码数 / 更新时间（后台取，不卡界面）。"""
+        def on_ok(st):
+            self.loaded_at = str(st.get("loaded_at") or "未加载")
+            self.shelf_at = str(st.get("shelf_at") or "未加载")
+            self.lock_at = str(st.get("lock_at") or "未加载")
+            self.status_text.set("主客户端数据：待发货 %s 单 / %s 个编码（订单库 %s　货位 %s）"
+                                 % (st.get("live_orders", 0), st.get("codes", 0),
+                                    self.loaded_at, self.shelf_at))
+        self._remote_bg("/api/status", None, 20, on_ok=on_ok)
 
     # ---------- 后台线程 / 队列 ----------
     def _run_bg(self, fn, *args):
@@ -4545,6 +4589,55 @@ class ScanApp:
         self.index, self.stat = build_index_db(relation, n)
         self.store_orders = int(self.stat.get("store_orders", 0) or 0)
 
+    def _load_index_async(self):
+        """后台建索引（登录后不再“卡一下”）：窗口先画出来，索引好了再刷状态。"""
+        try:
+            relation, n = self._filter_values()
+        except Exception:
+            relation, n = ("any", 0)
+        try:
+            self.status_text.set("正在加载订单索引…（首次打开要几秒，扫码会稍等一下）")
+        except Exception:
+            pass
+
+        def work():
+            err = ""
+            try:
+                if db_orders_total() <= 0:
+                    err = "empty"
+                else:
+                    self.index, self.stat = build_index_db(relation, n)
+                    self.store_orders = int(self.stat.get("store_orders", 0) or 0)
+                    self._pending_meta = load_orders_meta(
+                        ("loaded_at", "last_sync_ts", "last_full_ts", "total_estimate"))
+            except Exception as e:
+                err = str(e)[:150]
+            uikit.post(self.root, self._index_loaded, err)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _index_loaded(self, err):
+        """索引建完了：在 UI 线程里补上状态显示。"""
+        if err == "empty":
+            self.status_text.set("订单库为空，等待首次全量拉取…")
+            return
+        if err:
+            self.status_text.set("订单索引加载失败：%s" % err)
+            return
+        self.index_ready = True
+        try:
+            meta = getattr(self, "_pending_meta", {}) or {}
+            self.last_sync_ts = float(meta.get("last_sync_ts") or 0)
+            self.last_full_ts = float(meta.get("last_full_ts") or 0)
+            self.total_est = int(float(meta.get("total_estimate") or 0))
+            self.loaded_at = meta.get("loaded_at") or "未知"
+        except Exception:
+            pass
+        try:
+            self._show_load_status(from_cache=True)
+        except Exception:
+            pass
+
     def apply_filter(self):
         """改件数筛选：纯本地重建索引，不联网。"""
         if db_orders_total() <= 0:
@@ -4555,19 +4648,40 @@ class ScanApp:
 
     # ---------- 首次使用（未配置 API）----------
     def _first_run_api_hint(self):
-        """没配置 API 参数时（新电脑首次装）：提示并直接打开设置窗口。"""
+        """API 参数不完整时的提示：状态行常驻说明，弹窗只弹一次（不再每次启动都烦人）。"""
         if API_CONF.get("appKey") and API_CONF.get("sessionId"):
+            self._api_state_text("已配置")
             return
-        self.status_text.set("还没配置 API 参数：点「API 设置」填 appKey / appSecret / refreshToken / sessionId")
+        missing = [k for k in ("appKey", "appSecret", "refreshToken", "sessionId")
+                   if not API_CONF.get(k)]
+        self._api_state_text("未配置（缺 %s）" % "、".join(missing))
+        if not self.can("api.settings"):
+            self.status_text.set("快麦接口未配置：请让主客户端那台在「API 设置」里填好")
+            return
+        s = load_settings()
+        if not s.get("api_hint_shown"):
+            s["api_hint_shown"] = 1
+            save_settings(s)
+            try:
+                messagebox.showinfo("需要配置快麦接口参数",
+                                    "还没有配置快麦接口参数（缺 %s）。\n\n"
+                                    "点主界面的「API 设置」填 appKey / appSecret / refreshToken / sessionId，\n"
+                                    "可以点「测试连接」验证，然后「保存并应用」。\n\n"
+                                    "（这条提示只会提醒一次，以后在状态栏右侧看接口状态即可）"
+                                    % "、".join(missing), parent=self.root)
+            except Exception:
+                pass
+        self.status_text.set("快麦接口未配置（缺 %s）：点「API 设置」填写" % "、".join(missing))
+
+    def _api_state_text(self, state):
+        """状态栏右侧常驻显示接口状态：快麦接口：已配置 / 未配置（缺 xx）。"""
         try:
-            messagebox.showinfo("首次使用",
-                                "还没有配置快麦接口参数。\n\n"
-                                "请在接下来的窗口里填写 appKey / appSecret / refreshToken / sessionId，\n"
-                                "可以点「测试连接」验证，然后「保存并应用」——之后会自动开始拉取数据。",
-                                parent=self.root)
+            if getattr(self, "api_state_lbl", None) is not None:
+                self.api_state_lbl.config(
+                    text="快麦接口：%s" % state,
+                    fg=("#1B7F35" if state.startswith("已配置") else "#d70015"))
         except Exception:
             pass
-        self.on_api_settings()
 
     # ---------- 后台扫码监听（最小化 / 不在前台也能扫） ----------
     def _init_scan_hook(self):
@@ -5733,6 +5847,10 @@ class ScanApp:
         self._run_bg(self._worker_scan, code)
 
     def _worker_scan(self, code, from_hook=False):
+        """扫码查询的干活线程（本地索引）。"""
+        if not getattr(self, "index_ready", True):
+            self.q.put(lambda: self._finish_scan("订单索引还在加载，等几秒再扫一下"))
+            return
         try:
             if self.remote:                       # 子客户端：让主端算（含权限校验 + 写扫码记录）
                 self._remote_scan(code, from_hook)
@@ -5909,22 +6027,39 @@ class ScanApp:
 
     def _poll_records(self, force=False):
         """手机/网页扫的码也会写进扫码记录表：定时看条数变没变，变了就刷新（不打断输入）。
-        刷新失败不推进计数，下次继续重试。"""
-        n = None
+        刷新失败不推进计数，下次继续重试。子客户端：查条数也走后台（不能卡界面）。"""
         if self.remote:
-            ok, res = self._remote_api("/api/scans", params={"limit": 1}, timeout=20)
-            if ok and isinstance(res, dict):
-                try:
-                    n = int(res.get("count") or 0)
-                except Exception:
+            def work():
+                ok, res = self._remote_api("/api/scans", params={"limit": 1}, timeout=20)
+
+                def done():
                     n = None
-        else:
-            try:
-                conn = get_conn()
-                n = int(conn.cursor().execute("SELECT COUNT(*) FROM scan_record").fetchone()[0])
-                conn.close()
-            except Exception:
-                n = None
+                    if ok and isinstance(res, dict):
+                        try:
+                            n = int(res.get("count") or 0)
+                        except Exception:
+                            n = None
+                    self._after_poll_count(n, force)
+
+                if uikit is not None:
+                    uikit.post(self.root, done)
+                else:
+                    try:
+                        self.root.after(0, done)
+                    except Exception:
+                        pass
+
+            threading.Thread(target=work, daemon=True).start()
+            return
+        try:
+            conn = get_conn()
+            n = int(conn.cursor().execute("SELECT COUNT(*) FROM scan_record").fetchone()[0])
+            conn.close()
+        except Exception:
+            n = None
+        self._after_poll_count(n, force)
+
+    def _after_poll_count(self, n, force=False):
         if (force or (n is not None and n != getattr(self, "_log_count", -1))):
             if (not force) and (time.time() - getattr(self, "_touch_ts", 0)) < 3:
                 pass                      # 刚点过「已打」，先别重建行
@@ -5997,41 +6132,51 @@ class ScanApp:
         except Exception:
             pass
 
-    def reload_records(self):
+    def reload_records(self, background=True):
+        """刷新扫码记录。子客户端的 HTTP 全走后台线程（域名/frp 慢，绝不卡界面）。"""
+        if self.remote:
+            self._remote_bg("/api/scans", {"limit": 500}, 30,
+                            on_ok=lambda res: self._render_records(self._rows_from_remote(res)),
+                            label="正在读取扫码记录…")
+            return
+        self._render_records(self._rows_from_local())
+
+    def _rows_from_local(self):
+        """本地库 → 行列表（含中通/申通加急，按编码从本地索引取）。"""
+        rows = []
+        for r in fetch_all_scans():
+            pid, st, bc, pq, sh, _oc, light = r[:7]
+            who = r[7] if len(r) > 7 else ""
+            pnum = r[8] if len(r) > 8 else ""
+            prn = int(r[9] or 0) if len(r) > 9 else 0
+            e, _k = dict_get_ci(self.index or {}, bc)
+            ue = (e or {}).get("ue") or {}
+            rows.append({"id": pid, "time": st, "code": bc, "pending": pq or 0,
+                         "shelf": sh or 0, "ok": (light == "绿"), "who": who,
+                         "pnum": pnum, "prn": prn,
+                         "zt": int(ue.get("中通") or 0), "st": int(ue.get("申通") or 0)})
+        return rows
+
+    def _rows_from_remote(self, res):
+        """主端 /api/scans 的返回 → 行列表。"""
+        rows = []
+        for r in ((res or {}).get("rows") or []):
+            ue = r.get("ue") or {}
+            rows.append({"id": r.get("id"), "time": r.get("time"), "code": r.get("code"),
+                         "pending": r.get("pending") or 0, "shelf": r.get("shelf") or 0,
+                         "ok": bool(r.get("ok")), "who": r.get("who") or "",
+                         "pnum": r.get("print_num") or "", "prn": int(r.get("printed") or 0),
+                         "zt": int(ue.get("中通") or 0), "st": int(ue.get("申通") or 0)})
+        return rows
+
+    def _render_records(self, rows):
+        """把行列表画到表上（UI 线程）。"""
         for item in self.tree.get_children():
             self.tree.delete(item)
-        rows = []
-        if self.remote:
-            ok, res = self._remote_api("/api/scans", params={"limit": 500}, timeout=45)
-            if not ok or not isinstance(res, dict):
-                self.status_text.set("读取扫码记录失败：%s"
-                                     % (kmclient.human_err(res, self.session.base) if kmclient else "错误"))
-                return
-            for r in (res.get("rows") or []):
-                ue = r.get("ue") or {}
-                rows.append({"id": r.get("id"), "time": r.get("time"), "code": r.get("code"),
-                             "pending": r.get("pending") or 0, "shelf": r.get("shelf") or 0,
-                             "ok": bool(r.get("ok")), "who": r.get("who") or "",
-                             "pnum": r.get("print_num") or "", "prn": int(r.get("printed") or 0),
-                             "zt": int(ue.get("中通") or 0), "st": int(ue.get("申通") or 0)})
-        else:
-            for r in fetch_all_scans():
-                pid, st, bc, pq, sh, _oc, light = r[:7]
-                who = r[7] if len(r) > 7 else ""
-                pnum = r[8] if len(r) > 8 else ""
-                prn = int(r[9] or 0) if len(r) > 9 else 0
-                # 中通/申通加急：按编码从本地索引取（只算一单一件的加急单）
-                e, _k = dict_get_ci(self.index or {}, bc)
-                ue = (e or {}).get("ue") or {}
-                rows.append({"id": pid, "time": st, "code": bc, "pending": pq or 0,
-                             "shelf": sh or 0, "ok": (light == "绿"), "who": who,
-                             "pnum": pnum, "prn": prn,
-                             "zt": int(ue.get("中通") or 0), "st": int(ue.get("申通") or 0)})
         try:
             acc = (self.acc_var.get() if getattr(self, "acc_var", None) else "") or "全部"
         except Exception:
             acc = "全部"
-        # 账号下拉：列出记录里出现过的扫码账号
         accs = ["全部"]
         for r in rows:
             w = r.get("who") or ""
@@ -6059,6 +6204,37 @@ class ScanApp:
             self.tree.yview_moveto(0)      # 刷新后停在顶部，最新那条一眼能看到
         except Exception:
             pass
+
+    def _remote_bg(self, path, params=None, timeout=25, on_ok=None, label=""):
+        """子客户端：所有主端请求都丢后台线程，回来再用 uikit 刷界面（不卡）。"""
+        if label:
+            try:
+                self.status_text.set(label)
+            except Exception:
+                pass
+
+        def work():
+            ok, res = self._remote_api(path, params=params, timeout=timeout)
+
+            def done():
+                if ok and isinstance(res, dict) and not res.get("error"):
+                    if on_ok:
+                        try:
+                            on_ok(res)
+                        except Exception:
+                            pass
+                else:
+                    self._remote_err(res)
+
+            if uikit is not None:
+                uikit.post(self.root, done)
+            else:
+                try:
+                    self.root.after(0, done)
+                except Exception:
+                    pass
+
+        threading.Thread(target=work, daemon=True).start()
 
 
 def run_selftest():
