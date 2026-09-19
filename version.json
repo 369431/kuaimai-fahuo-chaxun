@@ -1,9 +1,9 @@
 {
-  "version": "v1.12",
-  "notes": "主账号规则（主客户端只能用主账号登录）；账号可开电脑端+网页端同时登录；子账号可被授予管理权限去管别的子账号；子客户端请求全部后台化（修域名/frp 慢导致的假死）；登录后索引后台加载不再卡一下",
+  "version": "v1.13",
+  "notes": "网页端权限管理改手机友好（选账号→开关列表）；网页端也能设「电脑端+网页端同时登录」；修最小化再打开窗口闪屏；取消「配置 API」弹窗（只在状态栏显示接口状态）",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.12/kuaimai-scan-setup-v1.12.exe",
-  "sha256": "f4e952471359a5f814b7ed557e04c8b0bce17faa4518ee45d3d60541650d602f",
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.13/kuaimai-scan-setup-v1.13.exe",
+  "sha256": "a1ee10fec602ffd58748a5af42b85273974b365f3674c1b2a78169945eaa7458",
   "mandatory": false,
-  "published_at": "2026-09-20 01:58"
+  "published_at": "2026-09-20 02:16"
 }
