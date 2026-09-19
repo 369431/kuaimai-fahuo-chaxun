@@ -3694,6 +3694,10 @@ class ScanApp:
             rows = []
         kw = str(kw or "").strip().upper()
         who = str(who or "").strip()
+        try:                                   # 中通/申通加急（按编码，只算一单一件的加急单）
+            _items = (self.web_index_payload().get("items") or {})
+        except Exception:
+            _items = {}
         out = []
         for r in reversed(rows):                     # 最新的排最前
             rid, st, bc, pq, sh, oc, light = r[:7]
@@ -3704,9 +3708,13 @@ class ScanApp:
                 continue
             if kw and kw not in str(bc or "").upper():
                 continue
+            _e, _k = dict_get_ci(_items, bc)
+            _ue = ((_e or {}).get("ue") or {})
             out.append({"id": rid, "time": st, "code": bc, "pending": pq or 0, "shelf": sh or 0,
                         "orders": oc or 0, "ok": (light == "绿"), "who": w or "",
-                        "print_num": pnum or "", "printed": prn})
+                        "print_num": pnum or "", "printed": prn,
+                        "ue": {"中通": int(_ue.get("中通") or 0),
+                               "申通": int(_ue.get("申通") or 0)}})
             if limit and len(out) >= int(limit):
                 break
         whos = sorted({((r[7] if len(r) > 7 else "") or "") for r in rows})
@@ -4021,12 +4029,13 @@ class ScanApp:
         log.grid(row=3, column=0, sticky="nsew")          # 扫码记录：紧跟在「扫码后显示编码」下面
         self._gate("scan.record", log, "grid")
         main.rowconfigure(3, weight=1)
-        cols = ("time", "barcode", "pending", "shelf", "orders", "who", "print_num", "printed")
+        cols = ("time", "barcode", "pending", "shelf", "who", "print_num", "ue_zt", "ue_st", "printed")
         self.tree = ttk.Treeview(log, columns=cols, show="headings", height=16)
-        for c, t, w in (("time", "扫码时间", 155), ("barcode", "商家编码", 210),
-                        ("pending", "待发货订单数", 100), ("shelf", "货架在架数", 90),
-                        ("orders", "件数", 60), ("who", "扫码账号", 125),
-                        ("print_num", "可打单数量", 95), ("printed", "已打", 80)):
+        for c, t, w in (("time", "扫码时间", 150), ("barcode", "商家编码", 200),
+                        ("pending", "待发货订单数", 100), ("shelf", "在架数", 80),
+                        ("who", "扫码账号", 120), ("print_num", "可打单数量", 95),
+                        ("ue_zt", "中通加急", 85), ("ue_st", "申通加急", 85),
+                        ("printed", "已打", 80)):
             self.tree.heading(c, text=t)
             self.tree.column(c, width=w, anchor="center")
         _bar = tk.Frame(log)
@@ -5710,7 +5719,8 @@ class ScanApp:
             insert_scan(canon, orders_count, shelf, pending, light,
                         who="桌面版·%s" % (os.environ.get("USERNAME") or "本机"))
             self.q.put(lambda: self._apply_scan(canon, orders_count, pending, ones, shelf, shelf_note,
-                                               bins, lock_n, sell_n, avail_n, from_hook))
+                                               bins, lock_n, sell_n, avail_n, from_hook,
+                                               (entry or {}).get("ue")))
         except Exception as e:
             msg = str(e)[:200]
             self.q.put(lambda: self._finish_scan("扫码查询失败：%s" % msg))
@@ -5745,7 +5755,7 @@ class ScanApp:
         note = "主客户端货位缓存 %s" % out.get("shelf_at")
         self.q.put(lambda: self._apply_scan(canon, orders_count, pending, ones, shelf, note, bins,
                                             int(out.get("lock") or 0), int(out.get("sellable") or 0),
-                                            int(out.get("avail") or 0), from_hook))
+                                            int(out.get("avail") or 0), from_hook, out.get("ue")))
 
     def _worker_series(self, code, keys):
         """主编码查询：列出该主编码下所有规格的货位/在架/待发货/锁定。"""
@@ -5773,7 +5783,7 @@ class ScanApp:
         self._scanning = False
 
     def _apply_scan(self, code, orders_count, pending, ones, shelf, shelf_note, bins,
-                    lock_n=0, sell_n=0, avail_n=0, from_hook=False):
+                    lock_n=0, sell_n=0, avail_n=0, from_hook=False, ue=None):
         self._scanning = False
         ok = orders_count > 0
         # 一单一件：整单只有一件的单（每单正好 1 件）；剩下的就是“一单多件”
@@ -5791,9 +5801,10 @@ class ScanApp:
             text="待发货一单一件：%d\n待发货一单多件：%d\n货位：%s（在架 %d）"
             % (one_piece, multi_piece, bin_txt, int(shelf or 0)))
         self.warn_label.config(text="需补货" if short else "")
-        self.tree.insert("", 0, values=(now_gmt8(), code, orders_count, shelf, pending,
+        self.tree.insert("", 0, values=(now_gmt8(), code, orders_count, shelf,
                                         "桌面版·%s" % (os.environ.get("USERNAME") or "本机"),
-                                        "", "【打单】"),
+                                        "", int((ue or {}).get("中通") or 0),
+                                        int((ue or {}).get("申通") or 0), "【打单】"),
                          tags=("ok",) if ok else ("alert",))
         self.status_text.set("查询完成：%s（一单一件 %d / 一单多件 %d；在架 %d）%s"
                              % (code, one_piece, multi_piece, int(shelf or 0),
@@ -5884,7 +5895,7 @@ class ScanApp:
     def _on_record_click(self, event):
         """点「已打」那一格 → 标记为已打（单向，之后锁定不可再点）；双击整行也可以。"""
         try:
-            if self.tree.identify_column(event.x) != "#8":
+            if self.tree.identify_column(event.x) != "#9":
                 return
             row = self.tree.identify_row(event.y)
             if row:
@@ -5906,7 +5917,7 @@ class ScanApp:
             if not self._need_perm("scan.printed"):
                 return
             vals = list(self.tree.item(row, "values"))
-            if len(vals) >= 8 and "已打" in str(vals[7]):
+            if len(vals) >= 9 and "已打" in str(vals[8]):
                 self.status_text.set("这条已经是「已打」，已锁定")
                 return
             try:
@@ -5932,8 +5943,8 @@ class ScanApp:
     def _apply_printed(self, iid, flag):
         try:
             vals = list(self.tree.item(iid, "values"))
-            if len(vals) > 7:
-                vals[7] = "【已打】" if flag else "【打单】"
+            if len(vals) > 8:
+                vals[8] = "【已打】" if flag else "【打单】"
                 self.tree.item(iid, values=vals, tags=("printed",) if flag else ())
         except Exception:
             pass
@@ -5941,26 +5952,41 @@ class ScanApp:
     def reload_records(self):
         for item in self.tree.get_children():
             self.tree.delete(item)
+        rows = []
         if self.remote:
             ok, res = self._remote_api("/api/scans", params={"limit": 500}, timeout=45)
             if not ok or not isinstance(res, dict):
                 self.status_text.set("读取扫码记录失败：%s"
                                      % (kmclient.human_err(res, self.session.base) if kmclient else "错误"))
                 return
-            all_rows = [(r.get("id"), r.get("time"), r.get("code"), r.get("pending"),
-                         r.get("shelf"), r.get("orders"), ("绿" if r.get("ok") else "红"),
-                         r.get("who") or "", r.get("print_num") or "", int(r.get("printed") or 0))
-                        for r in (res.get("rows") or [])]
+            for r in (res.get("rows") or []):
+                ue = r.get("ue") or {}
+                rows.append({"id": r.get("id"), "time": r.get("time"), "code": r.get("code"),
+                             "pending": r.get("pending") or 0, "shelf": r.get("shelf") or 0,
+                             "ok": bool(r.get("ok")), "who": r.get("who") or "",
+                             "pnum": r.get("print_num") or "", "prn": int(r.get("printed") or 0),
+                             "zt": int(ue.get("中通") or 0), "st": int(ue.get("申通") or 0)})
         else:
-            all_rows = fetch_all_scans()
+            for r in fetch_all_scans():
+                pid, st, bc, pq, sh, _oc, light = r[:7]
+                who = r[7] if len(r) > 7 else ""
+                pnum = r[8] if len(r) > 8 else ""
+                prn = int(r[9] or 0) if len(r) > 9 else 0
+                # 中通/申通加急：按编码从本地索引取（只算一单一件的加急单）
+                e, _k = dict_get_ci(self.index or {}, bc)
+                ue = (e or {}).get("ue") or {}
+                rows.append({"id": pid, "time": st, "code": bc, "pending": pq or 0,
+                             "shelf": sh or 0, "ok": (light == "绿"), "who": who,
+                             "pnum": pnum, "prn": prn,
+                             "zt": int(ue.get("中通") or 0), "st": int(ue.get("申通") or 0)})
         try:
             acc = (self.acc_var.get() if getattr(self, "acc_var", None) else "") or "全部"
         except Exception:
             acc = "全部"
         # 账号下拉：列出记录里出现过的扫码账号
         accs = ["全部"]
-        for r in all_rows:
-            w = (r[7] if len(r) > 7 else "") or ""
+        for r in rows:
+            w = r.get("who") or ""
             if w and w not in accs:
                 accs.append(w)
         try:
@@ -5971,18 +5997,16 @@ class ScanApp:
                     self.acc_var.set("全部")
         except Exception:
             pass
-        for r in all_rows:                 # 由旧到新逐个插到第一行 → 最新的排在最上面
-            pid, st, bc, pq, sh, oc, light = r[:7]
-            who = r[7] if len(r) > 7 else ""
-            pnum = r[8] if len(r) > 8 else ""
-            prn = int(r[9] or 0) if len(r) > 9 else 0
-            if acc != "全部" and (who or "") != acc:
+        for r in rows:                     # 由旧到新逐个插到第一行 → 最新的排在最上面
+            if acc != "全部" and (r.get("who") or "") != acc:
                 continue
-            ok = (light == "绿")
-            self.tree.insert("", 0, iid=str(pid),
-                             values=(st, bc, pq or 0, sh or 0, oc or 0, who or "（本机扫码）",
-                                     pnum, "【已打】" if prn else "【打单】"),
-                             tags=("printed",) if prn else (("ok",) if ok else ("alert",)))
+            self.tree.insert("", 0, iid=str(r.get("id")),
+                             values=(r.get("time"), r.get("code"), r.get("pending"),
+                                     r.get("shelf"), r.get("who") or "（本机扫码）",
+                                     r.get("pnum") or "", r.get("zt") or 0, r.get("st") or 0,
+                                     "【已打】" if r.get("prn") else "【打单】"),
+                             tags=("printed",) if r.get("prn")
+                             else (("ok",) if r.get("ok") else ("alert",)))
         try:
             self.tree.yview_moveto(0)      # 刷新后停在顶部，最新那条一眼能看到
         except Exception:

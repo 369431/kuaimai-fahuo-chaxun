@@ -82,7 +82,8 @@ class StubApp:
                       "printed": 0, "adjust": 0, "record": 0}
         self.scan_rows = [{"id": 1, "time": "2026-09-20 00:10:00", "code": "9681-黑色S",
                            "pending": 3, "shelf": 5, "orders": 3, "ok": True,
-                           "who": "u1", "print_num": "", "printed": 0}]
+                           "who": "u1", "print_num": "", "printed": 0,
+                           "ue": {"中通": 2, "申通": 1}}]
 
     def web_status(self):
         return {"live_orders": 11, "codes": 7, "loaded_at": self.loaded_at,
@@ -435,6 +436,20 @@ def main():
                    "子客户端" in str(app2.web_label.cget("text")), app2.web_label.cget("text"))
                 ok("子客户端模式：身份行显示账号/角色",
                    "u2" in str(app2.id_label.cget("text")), app2.id_label.cget("text"))
+                cols = tuple(app2.tree["columns"])
+                want_cols = ("time", "barcode", "pending", "shelf", "who",
+                             "print_num", "ue_zt", "ue_st", "printed")
+                ok("扫码记录列顺序 = 时间/编码/待发货订单数/在架数/账号/可打单数量/中通加急/申通加急/已打",
+                   cols == want_cols, cols)
+                heads = [app2.tree.heading(c, "text") for c in cols]
+                ok("扫码记录列标题也一致",
+                   heads == ["扫码时间", "商家编码", "待发货订单数", "在架数", "扫码账号",
+                             "可打单数量", "中通加急", "申通加急", "已打"], heads)
+                kids = app2.tree.get_children()
+                vals = list(app2.tree.item(kids[0], "values")) if kids else []
+                ok("子客户端记录行带中通/申通加急数（共 9 列）",
+                   len(vals) == 9 and str(vals[6]) == "2" and str(vals[7]) == "1" and "打单" in str(vals[8]),
+                   vals)
                 try:
                     app2.root.destroy()
                 except Exception:
@@ -513,6 +528,19 @@ def main():
             okk, res = kmc.http_json(hbase2, "/api/users", "POST", body={"action": "list"},
                                      token=hs.token, timeout=5)
             ok("主机模式：管理员能管账号", okk and res.get("ok"), res)
+            # 扫码记录接口要带上中通/申通加急（桌面端表格新列）
+            try:
+                km.insert_scan("9681-黑色S", 3, 5, 3, "绿", who="boss")
+                real_wi = apph.web_index_payload
+                apph.web_index_payload = lambda: {"items": {"9681-黑色S": {"ue": {"中通": 3, "申通": 1}}}}
+                payload = apph.web_scans(10, "", "")
+                apph.web_index_payload = real_wi
+                row0 = (payload.get("rows") or [{}])[0]
+                ok("主端 /api/scans 每行带上中通/申通加急数",
+                   (row0.get("ue") or {}).get("中通") == 3 and (row0.get("ue") or {}).get("申通") == 1,
+                   row0.get("ue"))
+            except Exception as e:
+                ok("主端 /api/scans 每行带上中通/申通加急数", False, repr(e)[:160])
             try:
                 host_root.destroy()
             except Exception:
