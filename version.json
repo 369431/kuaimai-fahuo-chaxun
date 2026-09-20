@@ -1,9 +1,9 @@
 {
-  "version": "v1.17",
-  "notes": "修网页点可发报保存失败；宽限期改 10 秒（10 秒内撤回则电脑端不显示）；撤回会删掉那条记录；网页查询不再写电脑端记录",
+  "version": "v1.15",
+  "notes": "网页扫码结果新增可发按钮（可手动填数量并联动电脑端）；含 v1.14 闪屏修复与手机版权限页",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.17/kuaimai-scan-setup-v1.17.exe",
-  "sha256": "3a256f93f5b8d46a6219dd9adf493a52b69965c54d5ab154c5355fcab2321a2f",
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.15/kuaimai-scan-setup-v1.15.exe",
+  "sha256": "ed92184e635025a913074a492370e3e005c94eeeed769d6962746b8508825f01",
   "mandatory": false,
-  "published_at": "2026-09-20 20:16"
+  "published_at": "2026-09-20 19:50"
 }
