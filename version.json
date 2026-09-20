@@ -1,8 +1,8 @@
 {
-  "version": "v1.19",
-  "notes": "网页可发撤回宽限改成电脑端设置（网页跟随）；扫码记录点商家编码即复制并提示复制成功；安装包不再要求填 frp/证书（都在软件里设）",
+  "version": "v1.20",
+  "notes": "修网页右上角一直「连接中…」（v1.19 的网页脚本括号写错导致整段 JS 失效）；其余同 v1.19",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.19/kuaimai-scan-setup-v1.19.exe",
-  "sha256": "2ff38d5d4c3130d02abeaf4f6d3cebea52da11940693dbb4703e882badec644c",
-  "size": 28100515
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.20/kuaimai-scan-setup-v1.20.exe",
+  "sha256": "2b5bd50a4b68c517917806c3bb12767e591925b00179fc74e643ac982ff8d4fc",
+  "size": 28098147
 }
