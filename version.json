@@ -1,9 +1,9 @@
 {
-  "version": "v1.14",
-  "notes": "修「最小化再打开闪屏」（去掉焦点强制刷新、Configure 只在尺寸变化时重排、浮窗取消置顶）；网页版权限管理手机友好 + 同时登录开关；取消配置 API 弹窗",
+  "version": "v1.15",
+  "notes": "网页扫码结果新增可发；含 v1.14 闪屏修复",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.14/kuaimai-scan-setup-v1.14.exe",
-  "sha256": "2fd0c2c2ceeddb2c113a0f08cef87f051c19d4f70c944b0270aeeed2cb50d9a9",
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.15/kuaimai-scan-setup-v1.15.exe",
+  "sha256": "ed92184e635025a913074a492370e3e005c94eeeed769d6962746b8508825f01",
   "mandatory": false,
-  "published_at": "2026-09-20 02:21"
+  "published_at": "2026-09-20 19:52"
 }
