@@ -686,7 +686,8 @@ def main():
                        bool(_j3.get("ok")) and int(_j3.get("qty") or -1) == 7, _j3)
                     # 网页查询不该再写扫码记录（只「可发」才写）
                     _n0 = len(km.fetch_all_scans())
-                    _op3.open(hbase2 + "/api/lookup?code=9681-黑色S&sid=" + _sid, timeout=8).read()
+                    import urllib.parse as _up
+                    _op3.open(hbase2 + "/api/lookup?code=" + _up.quote("9681-黑色S") + "&sid=" + _sid, timeout=8).read()
                     _n1 = len(km.fetch_all_scans())
                     ok("网页查询不再写电脑端扫码记录", _n1 == _n0, (_n0, _n1))
                     # 可发后 10 秒内撤回 → 电脑端根本不出现
