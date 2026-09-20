@@ -133,6 +133,15 @@ WEB_INDEX_HTML = r"""<!DOCTYPE html>
     <div id="rcode">就绪</div>
     <div id="rmain">扫码后显示</div>
     <div id="rdetail"></div>
+    <!-- 可发：像「现货可发」页那样就地填数量，写一条扫码记录 → 电脑端立刻能看到 -->
+    <div id="rfree" style="display:none;align-items:center;gap:8px;margin-top:12px;flex-wrap:wrap" data-perm="stock.canprint">
+      <span style="font-size:14px;color:#3a3a3c">可发数量</span>
+      <input id="rqty" type="number" inputmode="numeric" min="0" step="1"
+             style="width:96px;font-size:21px;font-weight:800;padding:8px;text-align:center">
+      <button id="btnFree" class="ghost" style="font-weight:800;padding:10px 18px">可发</button>
+      <button id="btnFreeUndo" class="ghost" style="display:none">撤回</button>
+      <span id="rfreeMsg" style="font-size:13px;color:#1e9e4a"></span>
+    </div>
   </div>
   <div class="card" data-perm="scan.filter">
     <div class="row" style="flex-wrap:wrap">
@@ -184,6 +193,7 @@ async function loadStatus(){
 async function query(code){
   code=(code||'').trim(); if(!code) return;
   CUR = code;
+  showFree(false);                       // 每次新查询先收起「可发」，查到单编码再弹出来
   const rel=$('rel').value, n=Number($('num').value||0);
   $('rcode').textContent=code; $('rmain').textContent='查询中…';
   let d;
@@ -219,6 +229,9 @@ async function query(code){
 $('rmain').innerHTML = `待发货一单一件：${onePiece}<br>待发货一单多件：${multiPiece}` + urgentLine(d.ue);
   $('rdetail').innerHTML = `货位：${bins}（在架 ${d.shelf}）`
     + (short ? '<br><span style="color:#c62828;font-weight:800;font-size:22px">需补货</span>' : '');
+  // 可发：默认值 = min(在架, 待发) − 一单多件；填多少就写多少（和「现货可发」页同一个接口）
+  LAST = {code:d.code, bins:bins, pieces:d.pieces||0, shelf:d.shelf||0, multi:multiPiece};
+  showFree(true);
   const hint = d.orders===0 ? '没有待发货订单' : (short ? '需补货' : '可以拣货');
   hist.push({t:fmtTime(new Date()), code:d.code, orders:d.orders, shelf:d.shelf, pieces:d.pieces, hint});
   saveHist(); renderHistory(); beep(ok);
@@ -255,6 +268,50 @@ async function startCam(){
 }
 function stopCam(){ clearInterval(scanTimer); if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; } $('camBox').classList.add('hidden'); }
 $('btnCam').onclick=startCam; $('btnCamStop').onclick=stopCam;
+/* ---------------- 查询结果里的「可发」：就地填数量 → 写一条扫码记录（和电脑端联动） ---------------- */
+let LAST=null;
+const SID=(function(){ try { return localStorage.getItem('km_sid') || ''; } catch(e){ return ''; } })();
+function postq(){ return '?k=' + encodeURIComponent(K) + (SID ? ('&sid=' + encodeURIComponent(SID)) : ''); }
+function freeDefault(){
+  if(!LAST) return 0;
+  return Math.max(0, Math.min(LAST.shelf||0, LAST.pieces||0) - (LAST.multi||0));
+}
+function showFree(on){
+  const box=$('rfree'); if(!box) return;
+  const can=(!window.KM_CAN) || window.KM_CAN('stock.canprint');
+  box.style.display=(on&&can)?'flex':'none';
+  if(on&&can){
+    if($('rqty')) $('rqty').value=String(freeDefault());
+    if($('rfreeMsg')) $('rfreeMsg').textContent='';
+    if($('btnFreeUndo')) $('btnFreeUndo').style.display='none';
+  }
+}
+async function sendFree(undo){
+  if(!LAST) return;
+  const code=LAST.code;
+  try{
+    let url, body;
+    if(undo){ url='/api/stock/sent'+postq(); body={code:code, undo:true}; }
+    else{
+      const q=parseInt($('rqty').value,10);
+      if(isNaN(q)||q<0){ alert('可发数量要填 0 或正整数'); return; }
+      url='/api/stock/canprint'+postq();
+      body={code:code, qty:q, bins:LAST.bins||'', pending:LAST.pieces||0, shelf:LAST.shelf||0};
+    }
+    const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    let j={}; try{ j=await r.json(); }catch(e){}
+    if(!r.ok||!j.ok){ alert('保存失败：'+((j&&j.error)||('HTTP '+r.status))); return; }
+    if($('rfreeMsg')){
+      $('rfreeMsg').textContent = undo ? ('已撤回：'+code)
+        : ('已联动到电脑端：'+code+' 可发 '+$('rqty').value+' 件');
+    }
+    if($('btnFreeUndo')) $('btnFreeUndo').style.display = undo ? 'none' : '';
+    beep(!undo);
+  }catch(e){ alert('网络错误：'+e.message); }
+}
+if($('btnFree')) $('btnFree').onclick=()=>sendFree(false);
+if($('btnFreeUndo')) $('btnFreeUndo').onclick=()=>sendFree(true);
+if($('rqty')) $('rqty').addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); sendFree(false); } });
 /* ---------------- 拣货：独立页面 /pick ---------------- */
 $('btnTake').onclick = () => { location.href = '/stocktake'; };   // 库存盘点：独立页面
 const _btnPick = $('btnPick');             // 拣货按钮已移除；处理器保留但不再绑定

@@ -668,6 +668,24 @@ def main():
                        ("同时登录" in _pg) and ("multi" in _pg))
                 except Exception as e:
                     ok("网页权限页：手机友好（账号切换 chips + 开关列表）", False, repr(e)[:150])
+                # 网页扫码页：查询结果里带「可发」（填数量 → 写扫码记录 → 电脑端联动）
+                try:
+                    import json as _json2
+                    import urllib.request as _ur2
+                    _op3 = _ur2.build_opener(_ur2.ProxyHandler({}))
+                    _sid = str(getattr(hs, "token", "") or "")
+                    _pg2 = _op3.open(hbase2 + "/?sid=" + _sid, timeout=8).read().decode("utf-8", "replace")
+                    ok("网页扫码页：结果里带「可发」输入框 + 按钮",
+                       ('id="rfree"' in _pg2) and ('id="btnFree"' in _pg2)
+                       and ('id="rqty"' in _pg2) and ('/api/stock/canprint' in _pg2), len(_pg2))
+                    _body = _json2.dumps({"code": "9681-黑色S", "qty": 7, "bins": "A-1"}).encode("utf-8")
+                    _r3 = _ur2.Request(hbase2 + "/api/stock/canprint?sid=" + _sid, data=_body,
+                                       headers={"Content-Type": "application/json"})
+                    _j3 = _json2.loads(_op3.open(_r3, timeout=8).read().decode("utf-8"))
+                    ok("网页「可发」接口能写记录（就是联动电脑端的入口）",
+                       bool(_j3.get("ok")) and int(_j3.get("qty") or -1) == 7, _j3)
+                except Exception as e:
+                    ok("网页扫码页：结果里带「可发」输入框 + 按钮", False, repr(e)[:150])
                 # 放最后：主账号再登录一次（会把上面用的会话顶掉，所以后面别再用了）
                 okk5, r5 = kmc.http_json(hbase2, "/api/auth/login", "POST",
                                          body={"name": owner_name, "pw": "pw12345",

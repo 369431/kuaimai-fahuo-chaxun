@@ -1722,7 +1722,7 @@ def play_alert_sound():
 # ============================ 内置手机网页服务 ============================
 WEB_PORT = 8790
 DISCOVER_PORT = 8791          # 子客户端「自动发现」的 UDP 广播端口
-APP_VER = (getattr(kmclient, "APP_VER", "") or "v1.14") if kmclient else "v1.14"
+APP_VER = (getattr(kmclient, "APP_VER", "") or "v1.15") if kmclient else "v1.15"
 # ---- 界面配色（macOS 风格扁平浅色）----
 UI_BG = "#f5f5f7"          # 窗口底
 UI_CARD = "#ffffff"        # 卡片
