@@ -1,9 +1,9 @@
 {
   "version": "v1.15",
-  "notes": "网页扫码结果新增可发按钮（可手动填数量并联动电脑端）；含 v1.14 闪屏修复与手机版权限页",
+  "notes": "网页扫码结果新增可发；含 v1.14 闪屏修复",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
   "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.15/kuaimai-scan-setup-v1.15.exe",
   "sha256": "ed92184e635025a913074a492370e3e005c94eeeed769d6962746b8508825f01",
   "mandatory": false,
-  "published_at": "2026-09-20 19:50"
+  "published_at": "2026-09-20 19:52"
 }
