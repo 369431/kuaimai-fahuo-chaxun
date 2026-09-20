@@ -1,6 +1,6 @@
 {
   "version": "v1.19",
-  "notes": "网页可发撤回宽限在电脑端设置（网页跟随）；点商家编码即复制并提示复制成功；安装包不再要求填 frp/证书",
+  "notes": "网页可发撤回宽限改成电脑端设置（网页跟随）；扫码记录点商家编码即复制并提示复制成功；安装包不再要求填 frp/证书（都在软件里设）",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
   "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.19/kuaimai-scan-setup-v1.19.exe",
   "sha256": "2ff38d5d4c3130d02abeaf4f6d3cebea52da11940693dbb4703e882badec644c",
