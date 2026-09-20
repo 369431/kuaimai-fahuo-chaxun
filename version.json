@@ -1,8 +1,8 @@
 {
-  "version": "v1.17",
-  "notes": "修网页点可发报保存失败；宽限期 10 秒（10 秒内撤回电脑端不显示）；撤回会删掉那条记录；网页查询不再写电脑端记录",
+  "version": "v1.19",
+  "notes": "网页可发撤回宽限在电脑端设置（网页跟随）；点商家编码即复制并提示复制成功；安装包不再要求填 frp/证书",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.17/kuaimai-scan-setup-v1.17.exe",
-  "sha256": "3a256f93f5b8d46a6219dd9adf493a52b69965c54d5ab154c5355fcab2321a2f",
-  "size": 28102534
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.19/kuaimai-scan-setup-v1.19.exe",
+  "sha256": "2ff38d5d4c3130d02abeaf4f6d3cebea52da11940693dbb4703e882badec644c",
+  "size": 28100515
 }
