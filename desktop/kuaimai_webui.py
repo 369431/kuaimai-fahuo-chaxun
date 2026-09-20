@@ -140,6 +140,7 @@ WEB_INDEX_HTML = r"""<!DOCTYPE html>
              style="width:96px;font-size:21px;font-weight:800;padding:8px;text-align:center">
       <button id="btnFree" class="ghost" style="font-weight:800;padding:10px 18px">可发</button>
       <button id="btnFreeUndo" class="ghost" style="display:none">撤回</button>
+      <span style="font-size:12px;color:#8e8e93">（只有这里点「可发」并填数量才写进电脑端扫码记录；10 秒内可撤回，撤回就不写）</span>
       <span id="rfreeMsg" style="font-size:13px;color:#1e9e4a"></span>
     </div>
   </div>
@@ -291,7 +292,7 @@ async function sendFree(undo){
   const code=LAST.code;
   try{
     let url, body;
-    if(undo){ url='/api/stock/sent'+postq(); body={code:code, undo:true}; }
+    if(undo){ url='/api/stock/canprint'+postq(); body={code:code, cancel:1}; }
     else{
       const q=parseInt($('rqty').value,10);
       if(isNaN(q)||q<0){ alert('可发数量要填 0 或正整数'); return; }
@@ -302,8 +303,8 @@ async function sendFree(undo){
     let j={}; try{ j=await r.json(); }catch(e){}
     if(!r.ok||!j.ok){ alert('保存失败：'+((j&&j.error)||('HTTP '+r.status))); return; }
     if($('rfreeMsg')){
-      $('rfreeMsg').textContent = undo ? ('已撤回：'+code)
-        : ('已联动到电脑端：'+code+' 可发 '+$('rqty').value+' 件');
+      $('rfreeMsg').textContent = undo ? ('已撤回：'+code+'（电脑端不会出现这条）')
+        : ('已提交：'+code+' 可发 '+$('rqty').value+' 件，10 秒内点「撤回」就不写进电脑端');
     }
     if($('btnFreeUndo')) $('btnFreeUndo').style.display = undo ? 'none' : '';
     beep(!undo);

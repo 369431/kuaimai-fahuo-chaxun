@@ -269,8 +269,8 @@ def main():
         # 7) 有权限的查询/动作：扫码、批次、标记已打、已发
         okk, res = sub.api("/api/lookup", params={"code": "9681-黑色S", "rel": "any", "n": 0})
         ok("子账号扫码查询成功", okk and res.get("code") == "9681-黑色S", res)
-        ok("扫码记录里记的是登录账号", app.calls["record"] == 1 and getattr(app, "last_who", "") == "u1",
-           getattr(app, "last_who", ""))
+        ok("网页查询不再写电脑端扫码记录（改由「可发」写）", app.calls["record"] == 0,
+           app.calls["record"])
         okk, res = sub.api("/api/batch", params={"batch": "3014728", "days": 3}, timeout=30)
         ok("子账号批次查询成功", okk and len(res.get("rows") or []) == 1, res)
         okk, res = sub.api("/api/scans/printed", "POST", body={"id": 1, "flag": 1})
@@ -684,6 +684,27 @@ def main():
                     _j3 = _json2.loads(_op3.open(_r3, timeout=8).read().decode("utf-8"))
                     ok("网页「可发」接口能写记录（就是联动电脑端的入口）",
                        bool(_j3.get("ok")) and int(_j3.get("qty") or -1) == 7, _j3)
+                    # 网页查询不该再写扫码记录（只「可发」才写）
+                    _n0 = len(km.fetch_all_scans())
+                    _op3.open(hbase2 + "/api/lookup?code=9681-黑色S&sid=" + _sid, timeout=8).read()
+                    _n1 = len(km.fetch_all_scans())
+                    ok("网页查询不再写电脑端扫码记录", _n1 == _n0, (_n0, _n1))
+                    # 可发后 10 秒内撤回 → 电脑端根本不出现
+                    _n2 = len(km.fetch_all_scans())
+                    _b4 = _json2.dumps({"code": "9681-白色M", "qty": 5}).encode("utf-8")
+                    _r4 = _ur2.Request(hbase2 + "/api/stock/canprint?sid=" + _sid, data=_b4,
+                                       headers={"Content-Type": "application/json"})
+                    _j4 = _json2.loads(_op3.open(_r4, timeout=8).read().decode("utf-8"))
+                    _n3 = len(km.fetch_all_scans())      # 宽限期内看不到
+                    _b5 = _json2.dumps({"code": "9681-白色M", "cancel": 1}).encode("utf-8")
+                    _r5 = _ur2.Request(hbase2 + "/api/stock/canprint?sid=" + _sid, data=_b5,
+                                       headers={"Content-Type": "application/json"})
+                    _j5 = _json2.loads(_op3.open(_r5, timeout=8).read().decode("utf-8"))
+                    _n4 = len(km.fetch_all_scans())
+                    ok("可发后 30 秒内撤回：电脑端不显示（防误操作）",
+                       bool(_j4.get("ok")) and int(_j4.get("hold") or 0) == 10
+                       and _n3 == _n2 and _n4 == _n2 and int(_j5.get("cancelled") or 0) >= 1,
+                       (_j4.get("hold"), _n2, _n3, _n4, _j5.get("cancelled")))
                 except Exception as e:
                     ok("网页扫码页：结果里带「可发」输入框 + 按钮", False, repr(e)[:150])
                 # 放最后：主账号再登录一次（会把上面用的会话顶掉，所以后面别再用了）

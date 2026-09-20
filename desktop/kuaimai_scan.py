@@ -710,22 +710,48 @@ def insert_scan(barcode, pending_qty, shelf_qty, orders_count, light, who="", pr
     conn.close()
 
 
-def insert_canprint(code, qty, who="", bins="", pending_qty=0, shelf_qty=0):
+def delete_pending_canprint(code):
+    """撤回想「可发」写的记录 → 电脑端不再显示（已打印的、桌面自己扫的都不动）。返回删了几条。"""
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("ALTER TABLE scan_record ADD COLUMN hold_until INTEGER DEFAULT 0")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM scan_record WHERE barcode=? AND COALESCE(printed,0)=0 "
+                    "AND COALESCE(hold_until,0) > 0", (str(code),))
+        gone = cur.rowcount
+        conn.commit()
+        conn.close()
+        return int(gone or 0)
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return 0
+
+
+def insert_canprint(code, qty, who="", bins="", pending_qty=0, shelf_qty=0, hold_secs=0):
     """网页现货可发点「可发」并输入数量 → 写一条扫码日志，可打单数量 = 输入的数量。"""
     conn = get_conn()
     cur = conn.cursor()
     for stmt in ("ALTER TABLE scan_record ADD COLUMN who TEXT",
                  "ALTER TABLE scan_record ADD COLUMN print_num TEXT",
-                 "ALTER TABLE scan_record ADD COLUMN printed INTEGER DEFAULT 0"):
+                 "ALTER TABLE scan_record ADD COLUMN printed INTEGER DEFAULT 0",
+                 "ALTER TABLE scan_record ADD COLUMN hold_until INTEGER DEFAULT 0"):
         try:
             cur.execute(stmt)
         except Exception:
             pass
     cur.execute(
-        "INSERT INTO scan_record(scan_time,barcode,order_no,goods_name,status,pending_qty,shelf_qty,orders_count,who,print_num,printed)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,0)",
+        "INSERT INTO scan_record(scan_time,barcode,order_no,goods_name,status,pending_qty,shelf_qty,orders_count,who,print_num,printed,hold_until)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,0,?)",
         (now_gmt8(), str(code), "", str(bins or ""), "可", int(pending_qty or 0), int(shelf_qty or 0), 0,
-         str(who or ""), str(int(qty)),),
+         str(who or ""), str(int(qty)), int(time.time()) + int(hold_secs or 0)),
     )
     conn.commit()
     conn.close()
@@ -765,7 +791,8 @@ def fetch_all_scans():
     cur = conn.cursor()
     for stmt in ("ALTER TABLE scan_record ADD COLUMN who TEXT",
                  "ALTER TABLE scan_record ADD COLUMN print_num TEXT",
-                 "ALTER TABLE scan_record ADD COLUMN printed INTEGER DEFAULT 0"):
+                 "ALTER TABLE scan_record ADD COLUMN printed INTEGER DEFAULT 0",
+                 "ALTER TABLE scan_record ADD COLUMN hold_until INTEGER DEFAULT 0"):
         try:
             cur.execute(stmt)
             conn.commit()
@@ -773,7 +800,8 @@ def fetch_all_scans():
             pass
     rows = cur.execute(
         "SELECT id,scan_time,barcode,pending_qty,shelf_qty,orders_count,status,COALESCE(who,''),"
-        "COALESCE(print_num,''),COALESCE(printed,0) FROM scan_record ORDER BY id ASC"
+        "COALESCE(print_num,''),COALESCE(printed,0) FROM scan_record "
+        "WHERE COALESCE(hold_until,0) <= ? ORDER BY id ASC", (int(time.time()),)
     ).fetchall()
     conn.close()
     return rows
@@ -1722,7 +1750,7 @@ def play_alert_sound():
 # ============================ 内置手机网页服务 ============================
 WEB_PORT = 8790
 DISCOVER_PORT = 8791          # 子客户端「自动发现」的 UDP 广播端口
-APP_VER = (getattr(kmclient, "APP_VER", "") or "v1.15") if kmclient else "v1.15"
+APP_VER = (getattr(kmclient, "APP_VER", "") or "v1.17") if kmclient else "v1.17"
 # ---- 界面配色（macOS 风格扁平浅色）----
 UI_BG = "#f5f5f7"          # 窗口底
 UI_CARD = "#ffffff"        # 卡片
@@ -2147,10 +2175,8 @@ class _WebHandler(BaseHTTPRequestHandler):
                 if not code:
                     return self._json({"error": "缺少 code"}, 400)
                 out = app.web_lookup(code, rel, n)
-                try:                       # 手机/网页扫一次就写进电脑版扫码记录（带账号）
-                    app.record_web_scan(out, str((me or {}).get("name") or ""))
-                except Exception:
-                    pass
+                # 说明：网页查询（摄像头/手动）**不再**写电脑端扫码记录 ——
+                # 只有点「已发」并填了数量才写（见 /api/stock/canprint），避免查询把日志刷满。
                 return self._json(out)
             if parsed.path == "/api/order":
                 deny = self._need(me, "order.query")
@@ -2308,17 +2334,25 @@ class _WebHandler(BaseHTTPRequestHandler):
                 if deny:
                     return deny
                 code = str(body.get("code") or "").strip()
+                if not code:
+                    return self._json({"error": "缺少编码"}, 400)
+                if body.get("cancel"):
+                    # 撤回：把还在 30 秒宽限期里的那条删掉 → 电脑端根本不会出现
+                    gone = delete_pending_canprint(code)
+                    return self._json({"ok": True, "code": code, "cancelled": gone})
                 try:
                     qty = int(body.get("qty"))
                 except Exception:
                     return self._json({"error": "数量必须是整数"}, 400)
-                if not code:
-                    return self._json({"error": "缺少编码"}, 400)
+                hold = int(body.get("hold") if body.get("hold") is not None else 10)
+                if hold < 0:
+                    hold = 0
                 insert_canprint(code, qty, who=str((me or {}).get("name") or ""),
                                 bins=str(body.get("bins") or ""),
                                 pending_qty=body.get("pending") or 0,
-                                shelf_qty=body.get("shelf") or 0)
-                return self._json({"ok": True, "code": code, "qty": qty})
+                                shelf_qty=body.get("shelf") or 0,
+                                hold_secs=hold)
+                return self._json({"ok": True, "code": code, "qty": qty, "hold": hold})
             if path == "/api/stock/adjust":
                 # 改库存（盘点接口，按货位）。必须带 confirm 二次确认，改完写操作日志。
                 try:
@@ -6052,7 +6086,9 @@ class ScanApp:
             return
         try:
             conn = get_conn()
-            n = int(conn.cursor().execute("SELECT COUNT(*) FROM scan_record").fetchone()[0])
+            n = int(conn.cursor().execute("SELECT COUNT(*) FROM scan_record "
+                                          "WHERE COALESCE(hold_until,0) <= ?",
+                                          (int(time.time()),)).fetchone()[0])
             conn.close()
         except Exception:
             n = None
