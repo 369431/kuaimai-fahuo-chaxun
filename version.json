@@ -1,8 +1,8 @@
 {
-  "version": "v1.20",
-  "notes": "修网页右上角一直「连接中…」（v1.19 的网页脚本括号写错导致整段 JS 失效）；其余同 v1.19",
+  "version": "v1.21",
+  "notes": "撤回宽限入口挪到「重新登录」右边；修网页一直「连接中…」；安装包不再要求填 frp/证书",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.20/kuaimai-scan-setup-v1.20.exe",
-  "sha256": "2b5bd50a4b68c517917806c3bb12767e591925b00179fc74e643ac982ff8d4fc",
-  "size": 28098147
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.21/kuaimai-scan-setup-v1.21.exe",
+  "sha256": "f0711a3700877e6d0bc06c4c72de3d22c4479a29e0199b367ede7d88e418998d",
+  "size": 28099340
 }
