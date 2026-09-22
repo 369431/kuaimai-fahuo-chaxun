@@ -1,8 +1,10 @@
 {
-  "version": "v1.22",
-  "notes": "撤回宽限入口挪到「重新登录」右边；修网页一直「连接中…」；安装包不再要求填 frp/证书",
+  "version": "v1.23",
+  "notes": "新增「打单」：扫码记录里点「可打单数量」的数字即可直接打印（会先弹确认，确认后才取号出纸）；新增「网页提交后自动打单」：网页点「可发」提交后电脑自动打单（界面勾选框可开关，也支持暂停/恢复脚本）；扫码记录字号放大、更好看；去掉「现货可发」「批次查询」两个按钮；打单浏览器后台静默运行（不弹到桌面，首次需登录一次 ERP）。",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.22/kuaimai-scan-setup-v1.22.exe",
-  "sha256": "46af6ac58d9ef35d91d37becc18a4c61da2a317e4487fb8910195874b4e5bbd1",
-  "size": 28234889
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.23/kuaimai-scan-setup-v1.23.exe",
+  "sha256": "f7e6300ecf82ba8ebc42dbb181b8602fd5daf870ecf7e107ac76376907332517",
+  "size": 28234889,
+  "mandatory": false,
+  "published_at": "2026-09-22 17:33"
 }
