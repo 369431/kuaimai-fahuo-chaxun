@@ -1,0 +1,10 @@
+{
+  "domain": "",
+  "server_addr": "",
+  "server_port": 7000,
+  "token": "",
+  "https_port": 9443,
+  "web_port": 8790,
+  "expose_443": true,
+  "serv_root": ""
+}

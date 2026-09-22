@@ -51,3 +51,4 @@ packaging/frp/
 packaging/*.log
 https/km_https.exe# 但打包配置要入库（spec 决定 hiddenimports，缺了打出来的包点「打单」会 ModuleNotFoundError）
 !packaging/*.spec
+!packaging/assets/kuaimai_gateway.json
