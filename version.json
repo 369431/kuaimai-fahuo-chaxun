@@ -1,10 +1,10 @@
 {
-  "version": "v1.23",
-  "notes": "新增「打单」：扫码记录里点「可打单数量」的数字即可直接打印（会先弹确认，确认后才取号出纸）；新增「网页提交后自动打单」：网页点「可发」提交后电脑自动打单（界面勾选框可开关，也支持暂停/恢复脚本）；扫码记录字号放大、更好看；去掉「现货可发」「批次查询」两个按钮；打单浏览器后台静默运行（不弹到桌面，首次需登录一次 ERP）。",
+  "version": "v1.24",
+  "notes": "新增「打单」全链路（网页提交→按账号派单→多台认领→自动打单）；修复打印按钮改名导致的不出纸（ERP 已把「多平台极速打印」改为「多平台打印快递单」，且确认键「打 印」带空格）；新增「打单进度」面板与「打印记录」网页页；新增打印分工设置；修复误标「已打」与误写去重记忆；队列失败自动退避重试",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.23/kuaimai-scan-setup-v1.23.exe",
-  "sha256": "f7e6300ecf82ba8ebc42dbb181b8602fd5daf870ecf7e107ac76376907332517",
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.24/kuaimai-scan-setup-v1.24.exe",
+  "sha256": "8dd3b46156e28f41cd5686f98ff979f881cb5090124f3cbfa518c7c76d423996",
   "size": 28234889,
   "mandatory": false,
-  "published_at": "2026-09-22 17:33"
+  "published_at": "2026-09-22 21:59"
 }
