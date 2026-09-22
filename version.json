@@ -1,10 +1,10 @@
 {
-  "version": "v1.24",
-  "notes": "新增「打单」全链路（网页提交→按账号派单→多台认领→自动打单）；修复打印按钮改名导致的不出纸（ERP 已把「多平台极速打印」改为「多平台打印快递单」，且确认键「打 印」带空格）；新增「打单进度」面板与「打印记录」网页页；新增打印分工设置；修复误标「已打」与误写去重记忆；队列失败自动退避重试",
+  "version": "v1.25",
+  "notes": "修复自动打单偶发「找不到打印按钮」导致不出纸：ERP 的打印入口已改名为「多平台极速打印」，且会按订单状态在两种按钮间切换 → 改为按 data-name + 文案多候选识别并全页兜底；弹窗确认键兼容「继续打印」；修正批量勾选的目标定位（原先会提前停止：实测 60 单只定位到 10 单就回退慢扫）",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.24/kuaimai-scan-setup-v1.24.exe",
-  "sha256": "8dd3b46156e28f41cd5686f98ff979f881cb5090124f3cbfa518c7c76d423996",
-  "size": 28234889,
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.25/kuaimai-scan-setup-v1.25.exe",
+  "sha256": "e6db6288eef6e38cbe0d1f745ee64bda46519f2c72f95213c740afe8e3aa4fb2",
+  "size": 28460263,
   "mandatory": false,
-  "published_at": "2026-09-22 21:59"
+  "published_at": "2026-09-23 02:07"
 }
