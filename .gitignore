@@ -42,3 +42,12 @@ print_progress.json
 _selftest_*.out.txt
 # 打包中间产物
 _build_*/
+
+# 打包中间产物 / 第三方二进制（不入库）
+packaging/staging/
+packaging/out/
+packaging/_work/
+packaging/frp/
+packaging/*.log
+https/km_https.exe# 但打包配置要入库（spec 决定 hiddenimports，缺了打出来的包点「打单」会 ModuleNotFoundError）
+!packaging/*.spec
