@@ -40,3 +40,5 @@ print_progress.json
 *.new-empty
 *.bak-*
 _selftest_*.out.txt
+# 打包中间产物
+_build_*/

@@ -101,6 +101,7 @@ def main():
         "page_url": "https://github.com/%s/releases/latest" % GH_REPO,
         "setup_url": "https://github.com/%s/releases/download/%s/%s" % (GH_REPO, ver, asset_name),
         "sha256": digest,
+        "size": size,
         "mandatory": bool(data.get("mandatory", False)),
         "published_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
     })
