@@ -110,7 +110,9 @@ WEB_INDEX_HTML = r"""<!DOCTYPE html>
 </style>
 </head>
 <body>
-<header><span id="hdrTitle"></span><small id="hdr">连接中…</small></header>
+<header><span id="hdrTitle"></span><small id="hdr">连接中…</small><a id="lnkPrints" href="/prints" data-perm="scan.printed"
+   style="color:inherit;text-decoration:none;font-size:13px;font-weight:600;padding:4px 10px;
+          border-radius:9px;background:rgba(120,120,128,.16);white-space:nowrap">打印记录</a></header>
 <div class="wrap">
   <div class="card">
     <div class="row" data-perm="scan.query">
@@ -138,9 +140,11 @@ WEB_INDEX_HTML = r"""<!DOCTYPE html>
       <span style="font-size:14px;color:#3a3a3c">可发数量</span>
       <input id="rqty" type="number" inputmode="numeric" min="0" step="1"
              style="width:96px;font-size:21px;font-weight:800;padding:8px;text-align:center">
+      <span style="font-size:13px;color:#3a3a3c">宽限</span>
+      <span id="rholdTip" style="font-size:12px;color:#8e8e93">（宽限时长在电脑端设置）</span>
       <button id="btnFree" class="ghost" style="font-weight:800;padding:10px 18px">可发</button>
       <button id="btnFreeUndo" class="ghost" style="display:none">撤回</button>
-      <span style="font-size:12px;color:#8e8e93">（只有这里点「可发」并填数量才写进电脑端扫码记录；10 秒内可撤回，撤回就不写）</span>
+      <span style="font-size:12px;color:#8e8e93">（只有这里点「可发」并填数量才写进电脑端扫码记录；上面的秒数内可撤回，撤回就不写）</span>
       <span id="rfreeMsg" style="font-size:13px;color:#1e9e4a"></span>
     </div>
   </div>
@@ -189,6 +193,8 @@ async function loadStatus(){
       `待发货口径 ${s.live_orders} 单（剔除 ${s.shipped_excluded}，按条件加载 ${s.included_orders}）；编码 ${s.codes} 个`
       + `\n数据时间 ${s.loaded_at}；货位 ${s.shelf_at}；锁定数 ${s.lock_at}`;
     $('hdr').textContent='数据 '+(s.loaded_at||'—').slice(5,16);
+    try { if(s.web_hold!=null){ window.KM_HOLD=s.web_hold;
+      const t=$('rholdTip'); if(t) t.textContent='（电脑端设置：'+s.web_hold+' 秒内可撤回，撤回就不写）'; } } catch(e){}
   } catch(e){ $('hdr').textContent='连接失败'; }
 }
 async function query(code){
@@ -269,6 +275,7 @@ async function startCam(){
 }
 function stopCam(){ clearInterval(scanTimer); if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; } $('camBox').classList.add('hidden'); }
 $('btnCam').onclick=startCam; $('btnCamStop').onclick=stopCam;
+try{ const _h=localStorage.getItem('km_hold'); if(_h && $('rhold')) $('rhold').value=_h; }catch(e){}
 /* ---------------- 查询结果里的「可发」：就地填数量 → 写一条扫码记录（和电脑端联动） ---------------- */
 let LAST=null;
 const SID=(function(){ try { return localStorage.getItem('km_sid') || ''; } catch(e){ return ''; } })();
@@ -304,7 +311,7 @@ async function sendFree(undo){
     if(!r.ok||!j.ok){ alert('保存失败：'+((j&&j.error)||('HTTP '+r.status))); return; }
     if($('rfreeMsg')){
       $('rfreeMsg').textContent = undo ? ('已撤回：'+code+'（电脑端不会出现这条）')
-        : ('已提交：'+code+' 可发 '+$('rqty').value+' 件，10 秒内点「撤回」就不写进电脑端');
+        : ('已提交：'+code+' 可发 '+$('rqty').value+' 件，'+(window.KM_HOLD||10)+' 秒内点「撤回」就不写进电脑端');
     }
     if($('btnFreeUndo')) $('btnFreeUndo').style.display = undo ? 'none' : '';
     beep(!undo);
@@ -330,6 +337,14 @@ $('btnOrder').onclick = () => {
 $('btnStock').onclick = () => {
   const sid = (function(){ try { return localStorage.getItem('km_sid') || ''; } catch(e){ return ''; } })();
   location.href = '/stock' + (sid ? ('?sid=' + encodeURIComponent(sid)) : '');
+};
+/* ---------------- 打印记录：独立页面 /prints ---------------- */
+const _lnkPrints = $('lnkPrints');
+if(_lnkPrints) _lnkPrints.onclick = function(e){
+  if(e) e.preventDefault();
+  const sid = (function(){ try { return localStorage.getItem('km_sid') || ''; } catch(e){ return ''; } })();
+  location.href = '/prints' + (sid ? ('?sid=' + encodeURIComponent(sid)) : '');
+  return false;
 };
 /* （拣货已下线，不再自动查未结束批次） */
 
@@ -1689,6 +1704,299 @@ $('none').onclick = function(){ setAll(false); };
 $('reload').onclick = load;
 window.addEventListener('beforeunload', function(e){ if(DIRTY){ e.preventDefault(); e.returnValue = ''; } });
 load();
+</script>
+</body></html>
+"""
+
+
+# ============================ 网页「打印记录」页（/prints） ============================
+# 数据来自 GET /api/print/stats 的 live（正在打印 / 排队 / **打印完成** / 失败）；
+# 分区口径：排队区只列**未完成**（待打 + 正在打印），打完了进「打印完成」区。
+# 登录 / 权限 / 会话完全沿用现有机制（服务端 _auth + _page 注权限，前端只读 km_sid）。
+PRINTS_HTML = r"""<!doctype html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>打印记录 · 快麦</title>
+<style>
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  :root { --blue:#007AFF; --green:#34C759; --red:#FF3B30; --orange:#FF9500; --ink:#1d1d1f; --sub:#6e6e73;
+          --line:rgba(60,60,67,.12); --fill:rgba(120,120,128,.12); --glass:rgba(255,255,255,.80); }
+  body { margin:0; padding:12px; min-height:100vh; color:var(--ink); letter-spacing:-.01em;
+         -webkit-font-smoothing:antialiased;
+         font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+         background:linear-gradient(170deg,#eef3fa 0%,#e6edf8 45%,#e1e8f4 100%) fixed; }
+  header { display:flex; align-items:center; gap:8px; padding:2px 3px 10px; }
+  header b { font-size:17px; }
+  header .sp { flex:1; }
+  header a.home { color:var(--blue); text-decoration:none; font-size:13.5px; font-weight:600;
+                  background:var(--fill); border-radius:9px; padding:5px 11px; white-space:nowrap; }
+  .card { background:var(--glass); backdrop-filter:saturate(180%) blur(20px);
+          -webkit-backdrop-filter:saturate(180%) blur(20px); border:1px solid rgba(255,255,255,.62);
+          border-radius:14px; padding:12px; margin-bottom:10px; box-shadow:0 8px 24px rgba(24,39,75,.10); }
+  .sums { display:flex; gap:8px; margin-bottom:10px; }
+  .sum { flex:1 1 0; min-width:0; text-align:center; padding:11px 4px; border-radius:14px;
+         background:var(--glass); backdrop-filter:saturate(180%) blur(20px);
+         -webkit-backdrop-filter:saturate(180%) blur(20px); border:1px solid rgba(255,255,255,.62);
+         box-shadow:0 8px 24px rgba(24,39,75,.10); }
+  .sum b { display:block; font-size:24px; line-height:1.15; letter-spacing:-.02em; }
+  .sum span { font-size:12.5px; color:var(--sub); }
+  .sum.run b { color:var(--blue); } .sum.wait b { color:var(--orange); } .sum.fail b { color:var(--red); }
+  .sum.ok b { color:var(--green); }
+  .secttl { font-size:14px; font-weight:700; padding:2px 6px 6px; }
+  .tblwrap { padding:6px 6px 2px; overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { padding:7px 6px; border-bottom:1px solid rgba(60,60,67,.08); text-align:left;
+           white-space:nowrap; }
+  th { color:var(--sub); font-weight:500; background:transparent; position:sticky; top:0; z-index:2; }
+  tbody tr:last-child td { border-bottom:0; }
+  td.code { font-weight:700; }
+  .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:700; }
+  .pill.run { background:rgba(0,122,255,.14); color:#0b5394; }
+  .pill.wait { background:rgba(255,149,0,.16); color:#a35c00; }
+  .pill.ok { background:rgba(52,199,89,.15); color:#1B7F35; }
+  .pill.bad { background:rgba(255,59,48,.13); color:#c62828; }
+  td.msg { max-width:280px; white-space:normal; font-size:12.5px; color:var(--sub); }
+  .muted { font-size:12.5px; color:var(--sub); line-height:1.7; }
+  .opbtn { border:0; border-radius:9px; padding:4px 10px; font-size:12.5px; font-weight:600;
+           color:#c62828; background:rgba(255,59,48,.12); cursor:pointer; white-space:nowrap; }
+  .opbtn:active { transform:scale(.96); }
+  td.op { text-align:right; }
+  .legend b { color:var(--ink); }
+  @media (prefers-color-scheme: dark) {
+    body { background:linear-gradient(170deg,#1c1c1e,#151517 60%,#1a1a1c) fixed; color:#f2f2f7; }
+    .card, .sum { background:rgba(28,28,30,.74); border-color:rgba(255,255,255,.08); }
+    .muted, td.msg { color:#a1a1a6; }
+    .legend b { color:#f2f2f7; }
+    .sum.run b { color:#5aa9ff; } .sum.wait b { color:#ffb340; } .sum.fail b { color:#ff6b62; }
+    .sum.ok b { color:#4cd964; }
+    th, td { border-bottom-color:rgba(255,255,255,.08); }
+  }
+</style></head>
+<body>
+<header><span id="hdrTitle"></span><b>打印记录</b><span class="sp"></span>
+  <span class="muted" id="upd">载入中…</span>
+  <a class="home" href="#" id="clrFail" data-perm="scan.printed">清空失败任务</a>
+  <a class="home" href="/" id="home">返回扫码</a></header>
+<div class="sums">
+  <div class="sum run"><b id="nRun">0</b><span>正在打印</span></div>
+  <div class="sum wait"><b id="nWait">0</b><span>排队</span></div>
+  <div class="sum ok"><b id="nDone">0</b><span>打印完成</span></div>
+  <div class="sum fail"><b id="nFail">0</b><span>失败</span></div>
+</div>
+<div class="card">
+  <div class="secttl">排队中 / 正在打印</div>
+  <div class="tblwrap">
+  <table>
+    <thead><tr>
+      <th>时间</th><th>编码</th><th>成功数量</th><th>来源账号</th>
+      <th>状态</th><th>哪台电脑</th><th>运单号</th><th>备注</th><th>操作</th>
+    </tr></thead>
+    <tbody id="tbQueue"><tr><td colspan="9" class="muted">载入中…</td></tr></tbody>
+  </table>
+  </div>
+</div>
+<div class="card">
+  <div class="secttl">打印完成</div>
+  <div class="tblwrap">
+  <table>
+    <thead><tr>
+      <th>完成时间</th><th>编码</th><th>成功数量</th><th>来源账号</th>
+      <th>状态</th><th>哪台电脑</th><th>运单号</th><th>备注</th><th>操作</th>
+    </tr></thead>
+    <tbody id="tbDone"><tr><td colspan="9" class="muted">（暂无）</td></tr></tbody>
+  </table>
+  </div>
+</div>
+<div class="card">
+  <div class="secttl">失败</div>
+  <div class="tblwrap">
+  <table>
+    <thead><tr>
+      <th>时间</th><th>编码</th><th>数量</th><th>来源账号</th>
+      <th>状态</th><th>哪台电脑</th><th>运单号</th><th>失败原因</th><th>操作</th>
+    </tr></thead>
+    <tbody id="tbFail"><tr><td colspan="9" class="muted">（暂无）</td></tr></tbody>
+  </table>
+  </div>
+</div>
+<div class="card"><div class="legend muted">
+  <b>正在打印</b> = 已被某台电脑领走、还没回写（超过 5 分钟没回写会自动回「排队」重试）；
+  <b>打印完成</b> = 已经打出来的任务（打完就进这里，**不再留在「排队中」**，可查运单号与完成时间）；
+  <b>失败</b> = 重试 3 次仍失败。<br>
+  <b>哪台电脑</b>：「正在打印 / 已打印」显示实际打的那台；「排队」显示派给哪台（没派就是「任意」）。
+  数据来自打单任务表，5 秒自动刷新一次。
+</div></div>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const SID = (function(){
+  try {
+    const q = new URLSearchParams(location.search).get('sid');
+    if(q) localStorage.setItem('km_sid', q);
+    return localStorage.getItem('km_sid') || '';
+  } catch(e){ return ''; }
+})();
+function withSid(u){ return SID ? (u + (u.indexOf('?') >= 0 ? '&' : '?') + 'sid=' + encodeURIComponent(SID)) : u; }
+if($('home')) $('home').onclick = function(e){
+  if(e) e.preventDefault();
+  location.href = SID ? ('/?sid=' + encodeURIComponent(SID)) : '/';
+  return false;
+};
+const STLABEL = {pending:'排队', claimed:'正在打印', printing:'正在打印', done:'已打印', failed:'失败'};
+function stLabel(s){ return STLABEL[s] || s || '-'; }
+function stCls(s){ return s==='failed' ? 'bad' : (s==='done' ? 'ok' : (s==='pending' ? 'wait' : 'run')); }
+function fmt(ts){
+  if(ts==null || ts==='') return '-';
+  const n = Number(ts);
+  if(n && String(ts).length >= 9){                 // epoch 秒
+    const d = new Date(n*1000), p = x => String(x).padStart(2,'0');
+    return (d.getMonth()+1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
+  return String(ts);
+}
+function dur(sec){
+  sec = Number(sec||0);
+  if(sec < 60) return sec + '秒';
+  if(sec < 3600) return Math.floor(sec/60) + '分';
+  return Math.floor(sec/3600) + '小时' + (Math.floor((sec%3600)/60) ? (Math.floor((sec%3600)/60) + '分') : '');
+}
+function rowsOf(st){
+  const live = st.live || {}, out = [], seen = {};
+  (live.queue || []).forEach(function(r){
+    seen[r.job_id] = 1;
+    out.push({job_id:r.job_id, t:fmt(r.created_at), code:r.code, qty:r.qty, who:r.who,
+              st:'pending', pc:r.client || '任意', sid:'-',
+              msg:(r.retrying ? ('等待重试：' + (r.last_msg || '')) : (r.last_msg || ''))});
+  });
+  (live.printing || []).forEach(function(r){
+    seen[r.job_id] = 1;
+    out.push({job_id:r.job_id, t:fmt(r.claim_ts) + '（已' + dur(r.elapsed) + '）', code:r.code, qty:r.qty, who:r.who,
+              st:'printing', pc:r.claimed_by || '-', sid:'-',
+              msg:(r.tries ? ('重试 ' + r.tries + ' 次后重打') : '')});
+  });
+  return out;
+}
+function doneOf(st){
+  const live = st.live || {}, out = [], seen = {};
+  (live.done || []).forEach(function(r){
+    seen[r.job_id] = 1;
+    out.push({job_id:r.job_id, t:fmt(r.done_ts), code:r.code, qty:r.qty, who:r.who,
+              st:'done', pc:r.claimed_by || r.client || '-', sid:(r.out_sid || '-'),
+              msg:(r.last_msg || '')});
+  });
+  // 兼容：live.done 缺失时，从 recent 里把 done 挑出来（服务端没升级也不会漏显示）
+  (st.recent || []).forEach(function(r){
+    if(String(r.status) !== 'done') return;
+    if(seen[r.job_id]) return;
+    seen[r.job_id] = 1;
+    out.push({job_id:r.job_id, t:fmt(r.done_ts || r.created_at), code:r.code, qty:r.qty, who:r.who,
+              st:'done', pc:(r.claimed_by || r.target_client || '-'), sid:(r.out_sid || '-'),
+              msg:(r.last_msg || '')});
+  });
+  return out;
+}
+function failedOf(st){
+  const live = st.live || {}, out = [];
+  (live.failed || []).forEach(function(r){
+    out.push({job_id:r.job_id, t:fmt(r.done_ts), code:r.code, qty:r.qty, who:r.who,
+              st:'failed', pc:(r.claimed_by || '-'), sid:(r.out_sid || '-'),
+              msg:(r.last_msg || '')});
+  });
+  return out;
+}
+const CAN_DEL = !(window.KM_CAN && !window.KM_CAN('scan.printed'));
+function delJobs(body){
+  return fetch(withSid('/api/print/jobs_del'), {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(body)
+  }).then(function(r){
+    if(r.status === 401){ location.href = '/login'; throw new Error('请重新登录'); }
+    if(r.status === 403){ throw new Error('没有「打印记录」权限，删不了'); }
+    return r.json();
+  }).then(function(d){
+    if(d && d.error) throw new Error(d.error);
+    $('upd').textContent = '已删除 ' + ((d && d.deleted) || 0) + ' 个任务';
+    load();
+    return d;
+  });
+}
+function delOne(btn){
+  const id = btn.getAttribute('data-id');
+  const code = btn.getAttribute('data-code'), qty = btn.getAttribute('data-qty');
+  const st = btn.getAttribute('data-st');
+  const busy = (st === 'printing' || st === 'claimed');
+  const msg = (busy ? '这条任务正在打印中：\n\n' : '确定删除这条任务吗？\n\n')
+      + (code || '?') + ' ×' + (qty || 0) + '  #' + id
+      + (busy ? '\n\n正在打印中，先暂停再删（若坚持要删可再确认）。' : '\n\n（删了就没了，不能撤销）');
+  if(!confirm(msg)) return;
+  btn.disabled = true;
+  delJobs({ids:[Number(id)]})['catch'](function(e){
+    alert('删除失败：' + e.message);
+  }).then(function(){ btn.disabled = false; });
+}
+function delFailed(){
+  const n = Number($('nFail').textContent || 0);
+  if(!confirm('确定删掉全部「失败」任务吗？（当前 ' + n + ' 条）\n\n（删了就没了，不能撤销）')) return;
+  delJobs({status:'failed'})['catch'](function(e){ alert('删除失败：' + e.message); });
+}
+if($('clrFail')) $('clrFail').onclick = function(e){ if(e) e.preventDefault(); delFailed(); return false; };
+document.addEventListener('click', function(e){
+  const t = e.target;
+  if(t && t.getAttribute && t.getAttribute('data-act') === 'del'){ e.preventDefault(); delOne(t); }
+});
+function trOf(r){
+  const op = CAN_DEL
+    ? ('<td class="op"><button class="opbtn" data-act="del" data-id="' + esc(r.job_id) + '"'
+       + ' data-code="' + esc(r.code) + '" data-qty="' + esc(r.qty) + '" data-st="' + esc(r.st)
+       + '">删除</button></td>')
+    : '<td class="op"></td>';
+  return '<tr>'
+    + '<td>' + esc(r.t) + '</td>'
+    + '<td class="code">' + esc(r.code) + '</td>'
+    + '<td>' + esc(r.qty) + '</td>'
+    + '<td>' + esc(r.who || '-') + '</td>'
+    + '<td><span class="pill ' + stCls(r.st) + '">' + esc(stLabel(r.st)) + '</span></td>'
+    + '<td>' + esc(r.pc) + '</td>'
+    + '<td>' + esc(r.sid) + '</td>'
+    + '<td class="msg">' + esc(r.msg) + '</td>'
+    + op
+    + '</tr>';
+}
+function fillTbody(el, rows, emptyText){
+  el.innerHTML = rows.length ? rows.map(trOf).join('')
+                             : '<tr><td colspan="9" class="muted">' + esc(emptyText) + '</td></tr>';
+}
+function render(st){
+  const counts = (st.live && st.live.counts) || {};
+  const queueRows = rowsOf(st), doneRows = doneOf(st), failRows = failedOf(st);
+  $('nRun').textContent  = (counts.printing != null) ? counts.printing
+                       : queueRows.filter(r => r.st === 'printing').length;
+  $('nWait').textContent = (counts.queue != null) ? counts.queue
+                       : queueRows.filter(r => r.st === 'pending').length;
+  $('nDone').textContent = (counts.done != null) ? counts.done : doneRows.length;
+  $('nFail').textContent = (counts.failed != null) ? counts.failed : failRows.length;
+  fillTbody($('tbQueue'), queueRows, '排队里没有任务（打完了会进下面「打印完成」）');
+  fillTbody($('tbDone'), doneRows, '（暂无）');
+  fillTbody($('tbFail'), failRows, '（暂无）');
+}
+function load(){
+  fetch(withSid('/api/print/stats'), {cache:'no-store'})
+    .then(function(r){
+      if(r.status === 401){ location.href = '/login'; throw new Error('请重新登录'); }
+      return r.json();
+    })
+    .then(function(d){
+      if(d.error){ $('upd').textContent = d.error; return; }
+      render(d.stats || d);
+      const d0 = new Date(), p = x => String(x).padStart(2,'0');
+      $('upd').textContent = '更新 ' + p(d0.getHours()) + ':' + p(d0.getMinutes()) + ':' + p(d0.getSeconds());
+    })
+    .catch(function(e){ $('upd').textContent = '载入失败：' + e.message; });
+}
+load();
+setInterval(function(){ if(!document.hidden) load(); }, 5000);
+document.addEventListener('visibilitychange', function(){ if(!document.hidden) load(); });
 </script>
 </body></html>
 """

@@ -33,3 +33,10 @@ __pycache__/
 Thumbs.db
 desktop.ini
 kuaimai_users.json
+
+# 运行时产物（不该进版本库）
+printed_memory.json
+print_progress.json
+*.new-empty
+*.bak-*
+_selftest_*.out.txt

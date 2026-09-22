@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 快麦扫码查待发货 + 可售库存（增强版）
@@ -32,7 +32,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 try:
     from kuaimai_webui import (WEB_INDEX_HTML, PICK_HTML, ORDER_HTML, STOCK_HTML,
-                               STOCKTAKE_HTML, PERMS_HTML)
+                               STOCKTAKE_HTML, PERMS_HTML, PRINTS_HTML)
     from kuaimai_login_ui import LOGIN_HTML
 except Exception:
     WEB_INDEX_HTML = "<h1>缺少 kuaimai_webui.py</h1>"
@@ -41,6 +41,7 @@ except Exception:
     STOCK_HTML = WEB_INDEX_HTML
     STOCKTAKE_HTML = WEB_INDEX_HTML
     PERMS_HTML = WEB_INDEX_HTML
+    PRINTS_HTML = WEB_INDEX_HTML
     LOGIN_HTML = WEB_INDEX_HTML
 try:
     import kuaimai_auth as auth
@@ -299,6 +300,781 @@ def save_settings(data):
         save_json(SETTINGS_FILE, data)
     except Exception:
         pass
+
+
+WEB_HOLD_DEFAULT = 10          # 网页「可发」的撤回宽限（秒），电脑端可改
+
+
+def get_web_hold():
+    """网页可发的撤回宽限秒数（电脑端设置，网页按这个走）。"""
+    try:
+        v = int(float((load_settings() or {}).get("web_hold_secs", WEB_HOLD_DEFAULT)))
+    except Exception:
+        v = WEB_HOLD_DEFAULT
+    return max(0, min(600, v))
+
+
+def set_web_hold(secs):
+    try:
+        s = load_settings() or {}
+        s["web_hold_secs"] = max(0, min(600, int(float(secs))))
+        save_settings(s)
+    except Exception:
+        pass
+
+
+# ==================== 打印分工（哪个账号由哪台电脑自动打） ====================
+# 数据目录里两个文件（都由主端界面写，和 kuaimai_print_jobs.py 的账号映射同一份）：
+#   print_clients.json  {"123":"pc1","最帅的男人":"pc2","default":"pc1"}
+#       键 = 来源账号（scan_record.who），值 = 电脑名（pc1/pc2/pc3）；
+#       "default" = 没单独列出的账号跑哪台；没有 default = 谁都能领（不自动打）。
+#   print_client.json   {"client":"pc1"}
+#       这台电脑自己的「本机打印身份」（每台电脑各存一份，子端也要设）。
+PRINT_CLIENTS_FILE = os.path.join(BASE_DIR, "print_clients.json")
+PRINT_CLIENT_FILE = os.path.join(BASE_DIR, "print_client.json")
+PRINT_CLIENT_IDS = ("pc1", "pc2", "pc3")           # 可指定的电脑名
+PRINT_CLIENT_NONE = "不自动打"                        # 账号行选它 = 不写进映射
+PRINT_CLIENT_SELF = "本机"                            # 账号行选它 = 保存时写成上面的「本机打印身份」
+PRINT_CLIENT_ROW_OPTS = (PRINT_CLIENT_NONE,) + PRINT_CLIENT_IDS + (PRINT_CLIENT_SELF,)
+PRINT_DEFAULT_ROW = "默认（没单独列出的账号）"            # 映射到文件里的 "default"
+
+
+def load_print_clients():
+    """账号 → 电脑 映射（文件不存在/坏掉都当空表）。"""
+    d = load_json(PRINT_CLIENTS_FILE, {})
+    return dict(d) if isinstance(d, dict) else {}
+
+
+def save_print_clients(m):
+    save_json(PRINT_CLIENTS_FILE, {str(k): str(v) for k, v in (m or {}).items() if k})
+
+
+def load_print_client():
+    """本机是第几台电脑（pc1/pc2/pc3）；没有/不合法就默认 pc1。子端也读这个。"""
+    d = load_json(PRINT_CLIENT_FILE, {})
+    c = str((d or {}).get("client") or "").strip() if isinstance(d, dict) else ""
+    return c if c in PRINT_CLIENT_IDS else PRINT_CLIENT_IDS[0]
+
+
+def save_print_client(name):
+    name = str(name or "").strip()
+    if name not in PRINT_CLIENT_IDS:
+        return "只能选 pc1 / pc2 / pc3"
+    save_json(PRINT_CLIENT_FILE, {"client": name})
+    return ""
+
+
+def read_local_print_client():
+    """本机打印身份：只有 print_client.json **明确设过**才返回，否则返回 ''。
+
+    和 load_print_client() 的区别：后者没设也默认 pc1（界面显示用），
+    而「认领任务」必须没设就不认领（否则子端会误领 pc1 的单），所以单独一个。
+    """
+    try:
+        d = load_json(PRINT_CLIENT_FILE, {})
+    except Exception:
+        return ""
+    c = str((d or {}).get("client") or "").strip() if isinstance(d, dict) else ""
+    return c if c in PRINT_CLIENT_IDS else ""
+
+
+def print_jobs_log(msg):
+    """打单任务留痕：写进和自动打单同一个 auto_print.log（便于排查）。"""
+    line = "%s  [任务] %s" % (time.strftime("%m-%d %H:%M:%S"), msg)
+    try:
+        with open(os.path.join(BASE_DIR, "auto_print.log"), "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+    try:
+        print(line, flush=True)
+    except Exception:
+        pass
+
+
+def print_account_names():
+    """要分工的账号 = 扫码记录里出现过的扫码账号 ∪ 账号模块里的用户（取并集）。"""
+    out = []
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=10)
+        try:
+            for r in conn.execute("SELECT DISTINCT who FROM scan_record "
+                                  "WHERE COALESCE(who,'')<>'' ORDER BY who"):
+                w = str(r[0] or "").strip()
+                if w and w not in out:
+                    out.append(w)
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    try:
+        if auth is not None:
+            for u in auth.list_users():
+                n = str((u or {}).get("name") or "").strip()
+                if n and n not in out:
+                    out.append(n)
+    except Exception:
+        pass
+    return out
+
+
+# ============================ 打单进度面板 ============================
+# 数据来源（都已存在，只读不写）：
+#   1) print_jobs 任务表（scan_log.db）→ stats() 的 live{printing,queue,failed} + recent
+#   2) print_progress.json（kuaimai_print.py 打单链路的实时上报）
+#   3) auto_print.log 尾部（认领/打印日志，认领模式也写这里）
+PROGRESS_FILE = os.path.join(BASE_DIR, "print_progress.json")
+AUTO_PRINT_LOG = os.path.join(BASE_DIR, "auto_print.log")
+PROGRESS_PHASE_HINT = {
+    "开始": "开始打单", "挑单": "挑单", "取号": "取号", "设每页": "设每页显示",
+    "扫描勾选": "逐屏扫描勾选", "点打印": "点打印", "核对": "打印后核对",
+    "完成": "完成", "失败": "失败",
+}
+PROGRESS_STATUS_CN = {"pending": "排队中", "claimed": "打印中", "printing": "打印中",
+                      "done": "已完成", "failed": "失败"}
+
+
+def read_print_progress():
+    """读 print_progress.json（打单链路写的进度快照）；读不到返回 {}。"""
+    for p in (PROGRESS_FILE,
+              os.path.join(os.environ.get("LOCALAPPDATA") or "", "KuaimaiScan",
+                           "print_progress.json")):
+        if not p:
+            continue
+        try:
+            if os.path.isfile(p):
+                with open(p, encoding="utf-8") as f:
+                    d = json.load(f)
+                if isinstance(d, dict):
+                    return d
+        except Exception:
+            pass
+    return {}
+
+
+def read_log_tail(n=5):
+    """auto_print.log 尾部 n 行（认领/打印都写这里）。"""
+    try:
+        with open(AUTO_PRINT_LOG, encoding="utf-8", errors="replace") as f:
+            lines = [x.rstrip() for x in f.read().splitlines()]
+        lines = [x for x in lines if x.strip()]
+        return lines[-int(n):] if n else lines
+    except Exception:
+        return []
+
+
+def _fmt_elapsed(sec):
+    sec = int(sec or 0)
+    if sec < 60:
+        return "%d 秒" % sec
+    if sec < 3600:
+        return "%d 分 %d 秒" % (sec // 60, sec % 60)
+    return "%d 时 %d 分" % (sec // 3600, (sec % 3600) // 60)
+
+
+def print_progress_payload():
+    """面板数据：print_jobs.stats()（真库，几十行）+ 进度 JSON + 日志尾部。
+
+    只读、轻量（主线程直查没问题）；出错不抛，返回 ok=False + err。
+    """
+    out = {"ok": True, "err": "", "progress": read_print_progress(), "log": read_log_tail(5),
+           "live": {"printing": [], "queue": [], "done": [], "failed": [], "counts": {}},
+           "recent": []}
+    try:
+        import kuaimai_print_jobs as pj
+        conn = sqlite3.connect(DB_FILE, timeout=10)
+        try:
+            conn.row_factory = sqlite3.Row
+            st = pj.stats(conn)
+        finally:
+            conn.close()
+        lv = st.get("live") or {}
+        out["live"] = {"printing": lv.get("printing") or [], "queue": lv.get("queue") or [],
+                       "done": lv.get("done") or [], "failed": lv.get("failed") or [],
+                       "counts": lv.get("counts") or {}}
+        out["recent"] = st.get("recent") or []
+    except Exception as e:
+        out["ok"] = False
+        out["err"] = str(e)[:200]
+    return out
+
+
+def print_jobs_delete(ids=None, status=None):
+    """删打单任务（本机权威库 scan_log.db）：按 id 列表 / 按状态（如 failed）。
+
+    返回删除条数；两个都没给 → 0（不删任何东西）。只动 print_jobs，不碰别的表。
+    """
+    import kuaimai_print_jobs as pj
+    conn = sqlite3.connect(DB_FILE, timeout=10)
+    try:
+        return int(pj.delete_jobs(conn, ids=ids, status=status) or 0)
+    finally:
+        conn.close()
+
+
+def format_progress(payload, now=None):
+    """把 payload 变成面板要显示的文字（纯函数，便于桩对象断言）。"""
+    now = time.time() if now is None else float(now)
+    payload = payload or {}
+    lv = payload.get("live") or {}
+    pg = payload.get("progress") or {}
+    printing = lv.get("printing") or []
+    queue = lv.get("queue") or []
+    done = lv.get("done") or []
+    failed = lv.get("failed") or []
+    recent = payload.get("recent") or []
+
+    # —— 正在打印（大字：编码 ×数量、哪台电脑、已用时）——
+    if printing:
+        p = printing[0]
+        big = "%s ×%s  @%s  已用时 %s" % (p.get("code") or "?", p.get("qty") or 0,
+                                        p.get("claimed_by") or "?",
+                                        _fmt_elapsed(p.get("elapsed")))
+    else:
+        big = "（当前没有正在打的任务）"
+
+    # —— 阶段行（print_progress.json 的 phase / checked / want）——
+    phase = str(pg.get("phase") or "")
+    checked, want = pg.get("checked"), pg.get("want")
+    bits = []
+    if phase:
+        bits.append(PROGRESS_PHASE_HINT.get(phase, phase))
+        if checked is not None and want:
+            bits.append("已勾 %s/%s" % (checked, want))
+        elif checked is not None:
+            bits.append("已勾 %s" % checked)
+        if pg.get("page"):
+            bits.append("第 %s 屏" % pg.get("page"))
+    else:
+        bits.append("（还没有打单进度上报）")
+    line = " ".join(str(b) for b in bits if str(b))
+    if pg.get("msg"):
+        line += " ｜ " + str(pg.get("msg"))
+    if pg.get("ok") is True:
+        line += " ｜ 结果：成功"
+    elif pg.get("ok") is False:
+        line += " ｜ 结果：失败"
+
+    # —— 排队中 ——
+    q_lines = []
+    for q in queue:
+        s = "#%s %s ×%s → %s" % (q.get("job_id"), q.get("code") or "?", q.get("qty") or 0,
+                                 q.get("client") or q.get("target_client") or "任意")
+        if q.get("retrying"):
+            s += "（重试中，已失败 %s 次）" % (q.get("tries") or 0)
+        if q.get("last_msg"):
+            s += " ｜ %s" % str(q.get("last_msg"))[:90]
+        q_lines.append(s)
+
+    # —— 打印完成（运单号 + 完成时间；打完了就不再算「排队中」）——
+    d_lines = []
+    for q in done:
+        ts = q.get("done_ts")
+        try:
+            when = time.strftime("%m-%d %H:%M:%S", time.localtime(int(ts))) if ts else ""
+        except Exception:
+            when = str(ts or "")
+        s = "#%s %s ×%s" % (q.get("job_id"), q.get("code") or "?", q.get("qty") or 0)
+        if q.get("out_sid"):
+            s += " ｜ 运单号 %s" % q.get("out_sid")
+        if when:
+            s += " ｜ %s" % when
+        d_lines.append(s)
+
+    # —— 失败 ——
+    f_lines = []
+    for q in failed:
+        s = "#%s %s ×%s" % (q.get("job_id"), q.get("code") or "?", q.get("qty") or 0)
+        if q.get("last_msg"):
+            s += " ｜ 原因：%s" % str(q.get("last_msg"))[:140]
+        f_lines.append(s)
+
+    # —— 最近结果（前 8 条）——
+    rows = []
+    keys = []
+    for r in recent[:8]:
+        rows.append(("#%s" % r.get("job_id"), str(r.get("code") or ""), str(r.get("qty") or 0),
+                     PROGRESS_STATUS_CN.get(str(r.get("status")), str(r.get("status") or "")),
+                     str(r.get("claimed_by") or r.get("target_client") or "-"),
+                     str(r.get("out_sid") or ""), str(r.get("last_msg") or "")))
+        keys.append({"job_id": r.get("job_id"), "status": str(r.get("status") or ""),
+                     "code": str(r.get("code") or ""), "qty": r.get("qty") or 0})
+
+    return {"printing_big": big, "printing_phase": line,
+            "queue_title": "排队中（%d）" % len(queue),
+            "queue_text": "\n".join(q_lines) if q_lines else "（队列里没有待打任务）",
+            "done_title": "打印完成（%d）" % len(done),
+            "done_text": "\n".join(d_lines) if d_lines else "（暂无）",
+            "failed_title": "失败（%d）" % len(failed),
+            "failed_text": "\n".join(f_lines) if f_lines else "（没有失败任务）",
+            "recent_rows": rows,
+            "recent_keys": keys,
+            "log_text": "\n".join(payload.get("log") or []) or "（暂无日志）",
+            "updated": "更新于 %s（每 1.5 秒自动刷新）"
+                       % time.strftime("%H:%M:%S", time.localtime(now))}
+
+
+class PrintProgressDialog(object):
+    """「打单进度」实时面板（**新增** Toplevel，不动主界面既有布局）。
+
+    · 每 1.5 秒自动刷新（Toplevel.after 自循环，关窗即停；**不在后台线程碰控件**）；
+    · 数据在主线程读（print_jobs 只有几十行，SQLite 查询轻量）；
+    · app 只要提供 root / status_text 就行（测试传桩对象即可）；
+    · payload_fn 可注入（桩对象验证用）。
+    """
+
+    def __init__(self, app, parent=None, payload_fn=None, delete_fn=None):
+        self.app = app
+        self.payload_fn = payload_fn or print_progress_payload
+        self.delete_fn = delete_fn                 # None → 用 self._delete_ids（自检可注入桩）
+        self._rows = {}
+        self._after = None
+        _parent = parent if parent is not None else getattr(app, "root", None)
+        self.win = tk.Toplevel(_parent)
+        self.win.title("打单进度（实时）")
+        # parent 还藏着（如登录窗）时**不要** transient：owner 不可见 → 子窗口也不显示
+        try:
+            if _parent is not None and _parent.winfo_viewable():
+                self.win.transient(_parent)
+        except Exception:
+            pass
+        self.win.geometry("820x600")
+        self.win.minsize(640, 420)
+        self._build()
+        self.refresh()
+        self._schedule()
+        try:
+            self.win.deiconify()
+            self.win.lift()
+        except Exception:
+            pass
+        self.win.protocol("WM_DELETE_WINDOW", self.close)
+
+    def _build(self):
+        frm = ttk.Frame(self.win, padding=10)
+        frm.pack(fill=tk.BOTH, expand=True)
+
+        # 底部按钮**先**占位：中间内容再长也不会把按钮挤出可视区
+        btns = ttk.Frame(frm)
+        btns.pack(side=tk.BOTTOM, fill="x", pady=(8, 0))
+        ttk.Button(btns, text="关闭", command=self.close).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btns, text="立即刷新", command=self.refresh).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btns, text="打开数据目录", command=self._open_dir).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btns, text="清空失败任务", command=self.on_clear_failed).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btns, text="删除选中任务", command=self.on_delete_selected).pack(side=tk.RIGHT, padx=4)
+        self.lbl_updated = ttk.Label(btns, text="", foreground="#6e6e73")
+        self.lbl_updated.pack(side=tk.LEFT)
+
+        # 底部：实时日志尾部（在按钮上面）
+        logbox = ttk.LabelFrame(frm, text="实时日志（auto_print.log 尾部）")
+        logbox.pack(side=tk.BOTTOM, fill="x", pady=(8, 0))
+        self.log_text = tk.Text(logbox, height=5, wrap="none", font=("Consolas", 9),
+                                background="#F7F7F8")
+        self.log_text.pack(fill="x", padx=6, pady=4)
+        self.log_text.configure(state="disabled")
+
+        # 正在打印（大字）
+        top = ttk.LabelFrame(frm, text="正在打印")
+        top.pack(side=tk.TOP, fill="x")
+        self.lbl_printing = tk.Label(top, text="", font=("Microsoft YaHei", 15, "bold"),
+                                     fg="#0b5394", bg=UI_BG, justify="left", anchor="w")
+        self.lbl_printing.pack(fill="x", padx=8, pady=(6, 0))
+        self.lbl_phase = ttk.Label(top, text="", foreground="#333333", justify="left")
+        self.lbl_phase.pack(fill="x", padx=8, pady=(2, 8))
+
+        # 排队中
+        qbox = ttk.LabelFrame(frm, text="排队中")
+        qbox.pack(side=tk.TOP, fill="x", pady=(8, 0))
+        self.lbl_queue_title = ttk.Label(qbox, text="", font=("Microsoft YaHei", 11, "bold"))
+        self.lbl_queue_title.pack(anchor="w", padx=8, pady=(4, 0))
+        self.lbl_queue = ttk.Label(qbox, text="", justify="left")
+        self.lbl_queue.pack(fill="x", padx=8, pady=(0, 6))
+
+        # 打印完成（打完了就不再显示在「排队中」；这里可查运单号 + 完成时间）
+        dbox = ttk.LabelFrame(frm, text="打印完成")
+        dbox.pack(side=tk.TOP, fill="x", pady=(8, 0))
+        self.lbl_done_title = ttk.Label(dbox, text="", font=("Microsoft YaHei", 11, "bold"))
+        self.lbl_done_title.pack(anchor="w", padx=8, pady=(4, 0))
+        self.lbl_done = ttk.Label(dbox, text="", justify="left")
+        self.lbl_done.pack(fill="x", padx=8, pady=(0, 6))
+
+        # 失败
+        fbox = ttk.LabelFrame(frm, text="失败")
+        fbox.pack(side=tk.TOP, fill="x", pady=(8, 0))
+        self.lbl_failed_title = ttk.Label(fbox, text="", font=("Microsoft YaHei", 11, "bold"))
+        self.lbl_failed_title.pack(anchor="w", padx=8, pady=(4, 0))
+        self.lbl_failed = ttk.Label(fbox, text="", justify="left")
+        self.lbl_failed.pack(fill="x", padx=8, pady=(0, 6))
+
+        # 最近结果
+        rbox = ttk.LabelFrame(frm, text="最近结果")
+        rbox.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(8, 0))
+        cols = ("job", "code", "qty", "status", "client", "sid", "msg")
+        self.tree = ttk.Treeview(rbox, columns=cols, show="headings", height=6,
+                                 selectmode="extended")
+        for c, t, w in (("job", "任务号", 70), ("code", "编码", 150), ("qty", "数量", 55),
+                        ("status", "状态", 70), ("client", "哪台电脑", 80),
+                        ("sid", "运单号", 130), ("msg", "失败原因/备注", 240)):
+            self.tree.heading(c, text=t)
+            self.tree.column(c, width=w, anchor="w")
+        self.tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
+
+    def _open_dir(self):
+        try:
+            os.startfile(BASE_DIR)
+        except Exception:
+            pass
+
+    # ---------- 删除任务（新增）----------
+    def _who(self):
+        """当前登录账号名（写日志用）；拿不到就当「本机」。"""
+        try:
+            n = str(getattr(getattr(self.app, "session", None), "name", "") or "")
+            if n:
+                return n
+            return str((getattr(self.app, "me", None) or {}).get("name") or "") or "本机"
+        except Exception:
+            return "本机"
+
+    def _sel_jobs(self):
+        """当前选中的任务：[{job_id,status,code,qty,iid}]（支持多选）。"""
+        try:
+            sels = list(self.tree.selection())
+        except Exception:
+            sels = []
+        out = []
+        for iid in sels:
+            info = dict(self._rows.get(iid) or {})
+            if info.get("job_id") is None:
+                try:
+                    info["job_id"] = int(str(iid).lstrip("#"))
+                except Exception:
+                    continue
+            info["iid"] = iid
+            out.append(info)
+        return out
+
+    def _delete_ids(self, ids):
+        """删任务：子端走主端接口，主端直接改本地库。返回 (ok, msg)。"""
+        ids = [int(i) for i in (ids or []) if i is not None]
+        if not ids:
+            return True, "没有要删的任务"
+        if getattr(self.app, "remote", False):
+            try:
+                ok, res = self.app._remote_api("/api/print/jobs_del", "POST",
+                                               body={"ids": ids}, timeout=30)
+            except Exception as e:
+                return False, "主客户端请求失败：%s" % str(e)[:120]
+            if not ok or not isinstance(res, dict):
+                return False, "主客户端没返回结果"
+            if not res.get("ok"):
+                return False, str(res.get("error") or "主客户端拒绝删除")
+            return True, "已删除 %s 条" % res.get("deleted")
+        try:
+            return True, "已删除 %s 条" % print_jobs_delete(ids=ids)
+        except Exception as e:
+            return False, "删除失败：%s" % str(e)[:120]
+
+    def _note_delete(self, jobs, msg):
+        for j in jobs:
+            print_jobs_log("删除 #%s %s ×%s（%s 删的）"
+                           % (j.get("job_id"), j.get("code") or "?", j.get("qty") or 0,
+                              self._who()))
+        try:
+            self.app.status_text.set(msg)
+        except Exception:
+            pass
+
+    def on_delete_selected(self):
+        """删除列表里选中的任务（可多选）；正在打印的默认拦一下。"""
+        jobs = self._sel_jobs()
+        if not jobs:
+            messagebox.showinfo("删除任务",
+                                "先在下面「最近结果」里选中要删的任务（按住 Ctrl 可多选）。")
+            return
+        busy = [j for j in jobs if str(j.get("status") or "") in ("claimed", "printing")]
+        detail = "\n".join("  #%s  %s ×%s%s" % (j.get("job_id"), j.get("code") or "?",
+                                            j.get("qty") or 0,
+                                            "（正在打印中）" if j in busy else "")
+                          for j in jobs)
+        if busy:
+            if not messagebox.askyesno("正在打印中",
+                                       "选中的任务里有 %d 条正在打印：\n\n%s\n\n"
+                                       "正在打印中，先暂停再删（若坚持要删可再确认）。\n仍要删除吗？"
+                                       % (len(busy), detail)):
+                return
+        elif not messagebox.askyesno("删除任务",
+                                     "确定删除下面 %d 条任务吗？\n\n%s\n\n（删了就没了，不能撤销）"
+                                     % (len(jobs), detail)):
+            return
+        ids = [j["job_id"] for j in jobs if j.get("job_id") is not None]
+        fn = self.delete_fn or self._delete_ids
+        ok, msg = fn(ids)
+        if not ok:
+            messagebox.showerror("删除任务", str(msg))
+            return
+        self._note_delete(jobs, "已删除 %d 条任务（%s）" % (len(ids), msg))
+        self.refresh()
+
+    def on_clear_failed(self):
+        """一次删掉所有 failed 任务（删前确认）。"""
+        try:
+            payload = self.payload_fn() or {}
+        except Exception:
+            payload = {}
+        failed = ((payload.get("live") or {}).get("failed") or [])
+        detail = "\n".join("  #%s  %s ×%s" % (j.get("job_id"), j.get("code") or "?",
+                                             j.get("qty") or 0) for j in failed[:12])
+        if not messagebox.askyesno("清空失败任务",
+                                   "确定删掉全部「失败」任务吗？（当前 %d 条）\n\n%s\n\n"
+                                   "（删了就没了，不能撤销）" % (len(failed), detail or "（列表为空）")):
+            return
+        fn = self.delete_fn
+        if fn is not None:                          # 注入桩：自己决定怎么删
+            ok, msg = fn([])
+            if not ok:
+                messagebox.showerror("删除任务", str(msg))
+                return
+        elif getattr(self.app, "remote", False):   # 子端：走主端接口按状态删
+            try:
+                ok, res = self.app._remote_api("/api/print/jobs_del", "POST",
+                                               body={"status": "failed"}, timeout=30)
+            except Exception as e:
+                messagebox.showerror("删除任务", "主客户端请求失败：%s" % str(e)[:120])
+                return
+            if not ok or not isinstance(res, dict) or not res.get("ok"):
+                messagebox.showerror("删除任务", "主客户端没删成：%s"
+                                     % (res.get("error") if isinstance(res, dict) else res))
+                return
+        else:
+            try:
+                print_jobs_delete(status="failed")
+            except Exception as e:
+                messagebox.showerror("删除任务", "删除失败：%s" % str(e)[:120])
+                return
+        print_jobs_log("清空失败任务 %d 条（%s 删的）" % (len(failed), self._who()))
+        try:
+            self.app.status_text.set("已清空失败任务")
+        except Exception:
+            pass
+        self.refresh()
+
+    # ---------- 刷新 ----------
+    def refresh(self):
+        try:
+            payload = self.payload_fn()
+        except Exception as e:
+            payload = {"ok": False, "err": str(e)[:200]}
+        d = format_progress(payload)
+        try:
+            self.lbl_printing.config(text=d["printing_big"])
+            self.lbl_phase.config(text=d["printing_phase"])
+            self.lbl_queue_title.config(text=d["queue_title"])
+            self.lbl_queue.config(text=d["queue_text"])
+            self.lbl_done_title.config(text=d["done_title"])
+            self.lbl_done.config(text=d["done_text"])
+            self.lbl_failed_title.config(text=d["failed_title"])
+            self.lbl_failed.config(text=d["failed_text"])
+            for iid in self.tree.get_children():
+                self.tree.delete(iid)
+            self._rows = {}
+            keys = d.get("recent_keys") or []
+            for i, row in enumerate(d["recent_rows"]):
+                iid = str(row[0])
+                try:
+                    self.tree.insert("", "end", iid=iid, values=row)
+                except Exception:
+                    iid = ""
+                    self.tree.insert("", "end", values=row)
+                if iid:
+                    self._rows[iid] = (keys[i] if i < len(keys) else {})
+            self.log_text.configure(state="normal")
+            self.log_text.delete("1.0", "end")
+            self.log_text.insert("1.0", d["log_text"])
+            self.log_text.configure(state="disabled")
+            note = d["updated"]
+            if not (payload or {}).get("ok", True):
+                note += "  ｜ 读取失败：%s" % (payload.get("err") or "")
+            self.lbl_updated.config(text=note)
+        except Exception:
+            pass
+
+    def _schedule(self):
+        try:
+            self._after = self.win.after(1500, self._tick)
+        except Exception:
+            self._after = None
+
+    def _tick(self):
+        self._after = None
+        try:
+            if not self.win.winfo_exists():
+                return
+        except Exception:
+            return
+        self.refresh()
+        self._schedule()
+
+    def close(self):
+        """关窗：先停定时刷新，再销毁（不留 root.after 回调）。"""
+        try:
+            if self._after:
+                self.win.after_cancel(self._after)
+        except Exception:
+            pass
+        self._after = None
+        try:
+            self.win.destroy()
+        except Exception:
+            pass
+
+
+class PrintClientsDialog(object):
+    """「打印分工」设置窗（**新增** Toplevel，不动主界面既有 grid 布局）。
+
+    · 账号 → 哪台电脑（只主端能改；子端打开时那一块置灰并提示"只能在主端设置"）；
+    · 本机打印身份 pc1/pc2/pc3（哪一端都能改，每台电脑各存一份 print_client.json）。
+
+    app 只要提供 root / remote / status_text 就行（测试时传桩对象即可）。
+    """
+
+    def __init__(self, app, parent=None):
+        self.app = app
+        self.remote = bool(getattr(app, "remote", False))
+        self.rows = []                       # [(账号名, StringVar, 下拉控件)]
+        _parent = parent if parent is not None else getattr(app, "root", None)
+        self.win = tk.Toplevel(_parent)
+        self.win.title("打印分工（哪个账号由哪台电脑自动打）")
+        try:
+            self.win.transient(_parent)
+        except Exception:
+            pass
+        self.win.resizable(False, False)
+        self._build()
+
+    # ---------- 组装界面 ----------
+    def _build(self):
+        frm = ttk.Frame(self.win, padding=12)
+        frm.pack(fill=tk.BOTH, expand=True)
+        frm.columnconfigure(0, weight=1)
+
+        # —— 账号分工（只有主端能改）——
+        box = ttk.LabelFrame(frm, text="账号 → 哪台电脑自动打（「不自动打」的账号不写进文件）")
+        box.grid(row=0, column=0, sticky="ew")
+        box.columnconfigure(1, weight=1)
+        cur = load_print_clients()
+        local = load_print_client()
+        names = print_account_names()
+        r = 0
+        if not names:
+            ttk.Label(box, text="（还没有账号：扫码记录和账号模块里都没有）",
+                      foreground="#8e8e93").grid(row=r, column=0, columnspan=2,
+                                                sticky="w", padx=8, pady=6)
+            r += 1
+        for nm in names:
+            ttk.Label(box, text=nm).grid(row=r, column=0, sticky="w", padx=(8, 10), pady=3)
+            v = tk.StringVar(value=str(cur.get(nm) or PRINT_CLIENT_NONE))
+            cb = ttk.Combobox(box, textvariable=v, values=PRINT_CLIENT_ROW_OPTS,
+                              width=14, state="readonly")
+            cb.grid(row=r, column=1, sticky="w", padx=(0, 8), pady=3)
+            self.rows.append((nm, v, cb))
+            r += 1
+        # 「默认」行：文件里的 default（会写进 print_clients.json）
+        ttk.Label(box, text=PRINT_DEFAULT_ROW).grid(row=r, column=0, sticky="w",
+                                                    padx=(8, 10), pady=3)
+        dv = tk.StringVar(value=str(cur.get("default") or PRINT_CLIENT_NONE))
+        dcb = ttk.Combobox(box, textvariable=dv, values=PRINT_CLIENT_ROW_OPTS,
+                           width=14, state="readonly")
+        dcb.grid(row=r, column=1, sticky="w", padx=(0, 8), pady=3)
+        self.default_var = dv
+        self.default_cb = dcb
+        self.rows.append((PRINT_DEFAULT_ROW, dv, dcb))
+        r += 1
+        self.perm_note = None
+        if self.remote:
+            # 子端：账号分工只能在主端改，这里只读（置灰）+ 明确提示
+            self.perm_note = ttk.Label(
+                box, text="本机的账号分工只能在主端设置（这边只能改下面的「本机打印身份」）",
+                foreground="#c62828")
+            self.perm_note.grid(row=r, column=0, columnspan=2, sticky="w", padx=8, pady=(4, 6))
+            r += 1
+            for _nm, _v, _cb in self.rows:
+                try:
+                    _cb.state(["disabled"])
+                except Exception:
+                    pass
+
+        # —— 本机打印身份（每台电脑各一份）——
+        idbox = ttk.LabelFrame(frm, text="本机打印身份（这台电脑是 pc1 / pc2 / pc3）")
+        idbox.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        ttk.Label(idbox, text="这台电脑").grid(row=0, column=0, sticky="w", padx=(8, 10), pady=6)
+        self.local_var = tk.StringVar(value=local)
+        ttk.Combobox(idbox, textvariable=self.local_var, values=PRINT_CLIENT_IDS,
+                     width=14, state="readonly").grid(row=0, column=1, sticky="w", pady=6)
+        ttk.Label(idbox, text="（保存后立即生效，不用重启）", foreground="#8e8e93").grid(
+            row=0, column=2, sticky="w", padx=8)
+
+        ttk.Label(frm, foreground="#6e6e73", justify="left",
+                  text=("「本机」= 这台电脑（保存时写成上面的本机打印身份）。\n"
+                        "账号分工：%s\n本机身份：%s" % (PRINT_CLIENTS_FILE, PRINT_CLIENT_FILE))
+                  ).grid(row=2, column=0, sticky="w", pady=(8, 0))
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=3, column=0, sticky="e", pady=(10, 0))
+        ttk.Button(btns, text="保存", command=self.on_save, style="Accent.TButton").pack(
+            side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="取消", command=self.win.destroy).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="打开数据目录", command=self._open_dir).pack(side=tk.LEFT, padx=4)
+        try:
+            self.win.grab_set()
+        except Exception:
+            pass
+
+    def _open_dir(self):
+        try:
+            os.startfile(BASE_DIR)
+        except Exception:
+            pass
+
+    def _status(self, msg):
+        try:
+            self.app.status_text.set(msg)
+        except Exception:
+            pass
+
+    # ---------- 保存 ----------
+    def collect_accounts(self):
+        """把界面上的选择收成映射表：不自动打的不写，「本机」写成当前本机身份。"""
+        local = str(self.local_var.get() or "").strip() or load_print_client()
+        m = {}
+        for nm, var, _cb in self.rows:
+            v = str(var.get() or "").strip()
+            if not v or v == PRINT_CLIENT_NONE:
+                continue
+            if v == PRINT_CLIENT_SELF:
+                v = local
+            m["default" if nm == PRINT_DEFAULT_ROW else nm] = v
+        return m
+
+    def on_save(self):
+        err = save_print_client(self.local_var.get())
+        if err:
+            messagebox.showerror("保存失败", err, parent=self.win)
+            return
+        if not self.remote:
+            try:
+                save_print_clients(self.collect_accounts())
+            except Exception as e:
+                messagebox.showerror("保存失败", str(e)[:200], parent=self.win)
+                return
+            self._status("打印分工已保存（%s）；本机身份 %s"
+                         % (PRINT_CLIENTS_FILE, self.local_var.get()))
+        else:
+            self._status("本机打印身份已保存：%s（账号分工只能在主端改）" % self.local_var.get())
+        try:
+            self.win.destroy()
+        except Exception:
+            pass
 
 
 # ============================ API 参数（界面上可改） ============================
@@ -757,8 +1533,42 @@ def insert_canprint(code, qty, who="", bins="", pending_qty=0, shelf_qty=0, hold
     conn.close()
 
 
-def set_printed(rec_id, flag):
-    """把某条扫码日志标成「已打」（1）/ 未打（0）。返回是否写成功。"""
+def _printed_mark_log(msg):
+    """「已打」标记审计：谁在什么时机标的 → printed_mark.log（失败不影响主流程）。
+
+    `printed` 只是「人已确认出纸」的人为标记；这份日志专门用来一眼看出
+    **有没有自动链路偷偷写它**（自动链路永远不该出现在这里）。
+    """
+    line = "%s  [已打] %s" % (now_gmt8(), msg)
+    try:
+        with open(os.path.join(BASE_DIR, "printed_mark.log"), "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+    try:
+        print(line, flush=True)
+    except Exception:
+        pass
+
+
+def set_printed(rec_id, flag, by=""):
+    """把某条扫码日志标成「已打」（1）/ 未打（0）。返回是否写成功。
+
+    ★ 语义约束（用户口径）：`printed` 是「人工确认出纸」的标记，
+      **只有人工确认路径**可以调它：
+        ① 电脑端扫码记录里点「已打」那一格（本地，或经 /api/scans/printed 的远端）；
+        ② 子客户端同样的动作（也走 /api/scans/printed）。
+      **建打单任务 / 认领任务 / 打印成功或失败 / 回写任务结果等自动链路一律不得写它**：
+      排进队列 ≠ 打了纸；自动链路只写 print_jobs（任务表）与 printed_memory.json（去重记忆）。
+
+      防回归：必须显式传 `by`（来源说明）。不传 → 拒绝写入并记日志（fail-safe），
+      避免日后有人又在 add_job / claim / report 里顺手调它。
+    """
+    by = str(by or "").strip()
+    if not by:
+        _printed_mark_log("!! 拒绝写入 id=%r flag=%r：调用方没给来源（by）"
+                          "—— 自动链路不允许写 scan_record.printed" % (rec_id, flag))
+        return False
     want = 1 if flag else 0
     for _try in range(4):
         conn = None
@@ -775,6 +1585,7 @@ def set_printed(rec_id, flag):
                                (int(rec_id),)).fetchone()
             conn.close()
             if got is not None and int(got[0] or 0) == want:
+                _printed_mark_log("标记 id=%s → %s（来源 %s）" % (int(rec_id), want, by))
                 return True
         except Exception:
             try:
@@ -1750,7 +2561,7 @@ def play_alert_sound():
 # ============================ 内置手机网页服务 ============================
 WEB_PORT = 8790
 DISCOVER_PORT = 8791          # 子客户端「自动发现」的 UDP 广播端口
-APP_VER = (getattr(kmclient, "APP_VER", "") or "v1.17") if kmclient else "v1.17"
+APP_VER = (getattr(kmclient, "APP_VER", "") or "v1.23") if kmclient else "v1.23"
 # ---- 界面配色（macOS 风格扁平浅色）----
 UI_BG = "#f5f5f7"          # 窗口底
 UI_CARD = "#ffffff"        # 卡片
@@ -2069,6 +2880,11 @@ class _WebHandler(BaseHTTPRequestHandler):
                 if not self._can(me, "stock.view"):
                     return self._forbidden_page("这个账号没有现货可发权限")
                 return self._send(self._page(STOCK_HTML, me), "text/html; charset=utf-8")
+            if parsed.path in ("/prints", "/prints.html"):
+                # 打印记录：数据来自 /api/print/stats（live + recent），登录/权限沿用现有机制
+                if not self._can(me, "scan.printed"):
+                    return self._forbidden_page("这个账号没有打印记录权限")
+                return self._send(self._page(PRINTS_HTML, me), "text/html; charset=utf-8")
             if parsed.path == "/api/perms":
                 if not self._can(me, "admin.perms"):
                     return self._deny("admin.perms")
@@ -2078,6 +2894,21 @@ class _WebHandler(BaseHTTPRequestHandler):
                 if not self._can(me, "desktop.admin"):
                     return self._deny("desktop.admin")
                 return self._json(self._devices_payload())
+            if parsed.path == "/api/print/stats":
+                # 打单任务看板（各端/各状态计数）
+                _me = self._auth(urllib.parse.parse_qs(parsed.query))
+                if not _me:
+                    return self._json({"error": "请先登录", "login": True}, 401)
+                try:
+                    import kuaimai_print_jobs as pj
+                    conn = pj.connect(DB_FILE)
+                    try:
+                        st = pj.stats(conn)
+                    finally:
+                        conn.close()
+                except Exception as e:
+                    return self._json({"error": "读取失败：%s" % str(e)[:120]}, 500)
+                return self._json({"ok": True, "stats": st})
             if parsed.path == "/api/scans":
                 deny = self._need(me, "scan.record")
                 if deny:
@@ -2124,7 +2955,9 @@ class _WebHandler(BaseHTTPRequestHandler):
                     return self._json({"error": "缺少 code"}, 400)
                 return self._json(app.stock_bins_of(code))
             if parsed.path == "/api/status":
-                return self._json(app.web_status())
+                d_st = dict(app.web_status() or {})
+                d_st["web_hold"] = get_web_hold()
+                return self._json(d_st)
             if parsed.path == "/api/index":
                 return self._json(app.web_index_payload())
             if parsed.path == "/api/pick/list":
@@ -2311,8 +3144,116 @@ class _WebHandler(BaseHTTPRequestHandler):
                 except Exception:
                     return self._json({"error": "缺少 id"}, 400)
                 flag = 1 if (body.get("flag") is None or body.get("flag")) else 0
-                okw = set_printed(rid, flag)
+                # 来源写进审计日志：人工确认的那只手是谁（电脑端 / 子端都走这里）
+                okw = set_printed(rid, flag, by="接口 /api/scans/printed（%s）"
+                                  % str((me or {}).get("name") or "-"))
                 return self._json({"ok": bool(okw), "id": rid, "printed": flag})
+            if path == "/api/print/claim":
+                # 子客户端来认领属于它的打单任务（原子认领，多端同时抢只成一台）
+                deny = self._need(me, "scan.printed")
+                if deny:
+                    return deny
+                client = str(body.get("client") or "").strip()
+                if not client:
+                    return self._json({"error": "缺少 client（本机打印身份）"}, 400)
+                try:
+                    limit = max(1, min(20, int(body.get("limit") or 1)))
+                except Exception:
+                    limit = 1
+                try:
+                    import kuaimai_print_jobs as pj
+                    conn = pj.connect(DB_FILE)
+                    try:
+                        pj.reclaim(conn)
+                        jobs = pj.claim(conn, client, limit=limit)
+                    finally:
+                        conn.close()
+                except Exception as e:
+                    return self._json({"error": "认领失败：%s" % str(e)[:120]}, 500)
+                return self._json({"ok": True, "client": client, "jobs": jobs})
+            if path == "/api/print/report":
+                # 客户端打完回写结果（done/failed + 运单号）
+                deny = self._need(me, "scan.printed")
+                if deny:
+                    return deny
+                client = str(body.get("client") or "").strip()
+                try:
+                    job_id = int(body.get("job_id"))
+                except Exception:
+                    return self._json({"error": "缺少 job_id"}, 400)
+                try:
+                    import kuaimai_print_jobs as pj
+                    conn = pj.connect(DB_FILE)
+                    try:
+                        pj.report(conn, job_id, client, bool(body.get("ok")),
+                                  msg=body.get("msg") or "", out_sid=body.get("out_sid") or "")
+                    finally:
+                        conn.close()
+                except Exception as e:
+                    return self._json({"error": "回写失败：%s" % str(e)[:120]}, 500)
+                return self._json({"ok": True, "job_id": job_id})
+            if path == "/api/print/jobs_add":
+                # 提交一个打单任务（主端权威）：按 print_clients.json 的账号映射决定派给谁
+                deny = self._need(me, "scan.printed")
+                if deny:
+                    return deny
+                code = str(body.get("code") or "").strip()
+                try:
+                    qty = int(float(body.get("qty") or 0))
+                except Exception:
+                    qty = 0
+                if not code or qty <= 0:
+                    return self._json({"error": "code/qty 不合法"}, 400)
+                who = str(body.get("who") or me.get("name") or "").strip()
+                try:
+                    import kuaimai_print_jobs as pj
+                    mp = pj.load_client_map(os.path.join(BASE_DIR, "print_clients.json"))
+                    tgt = str(body.get("target") or "").strip() or pj.client_for(mp, who)
+                    conn = pj.connect(DB_FILE)
+                    try:
+                        jid = pj.add_job(conn, code, qty, who=who, target_client=tgt)
+                    finally:
+                        conn.close()
+                except Exception as e:
+                    return self._json({"error": "建任务失败：%s" % str(e)[:120]}, 500)
+                return self._json({"ok": True, "job_id": jid, "target_client": tgt})
+            if path == "/api/print/jobs_del":
+                # 删除打单任务（主端权威）：job_id 单条 / ids 列表 / status 批量（如清空 failed）。
+                # 权限：scan.printed；没权限时 _need 直接抛 _Denied（顶层统一转 403，
+                # 不做返回值短路 —— 否则后面的删除动作照样会跑）。子端删主端任务也走这里。
+                self._need(me, "scan.printed")
+                ids = body.get("ids")
+                if isinstance(ids, (str, int)):
+                    ids = [ids]
+                ids = list(ids or []) if isinstance(ids, (list, tuple)) else []
+                try:
+                    _jid = body.get("job_id")
+                    if _jid not in (None, ""):
+                        ids.append(int(_jid))
+                except Exception:
+                    pass
+                status = str(body.get("status") or "").strip()
+                if status and status not in ("pending", "claimed", "printing", "done", "failed"):
+                    return self._json({"error": "status 只能是 pending/claimed/done/failed"}, 400)
+                if not ids and not status:
+                    return self._json({"error": "要删什么：请给 job_id / ids / status"}, 400)
+                try:
+                    import kuaimai_print_jobs as pj
+                    conn = pj.connect(DB_FILE)
+                    try:
+                        n = pj.delete_jobs(conn, ids=ids, status=(status or None))
+                    finally:
+                        conn.close()
+                except Exception as e:
+                    return self._json({"error": "删除失败：%s" % str(e)[:120]}, 500)
+                if n:
+                    who = str((me or {}).get("name") or "-")
+                    if len(ids) == 1 and not status:
+                        print_jobs_log("删除任务 #%s（%s 删的）" % (ids[0], who))
+                    else:
+                        print_jobs_log("删除任务 %d 条%s（%s 删的）"
+                                       % (n, ("，状态 %s" % status) if status else "", who))
+                return self._json({"ok": True, "deleted": int(n)})
             if path == "/api/stock/sent":
                 # 现货可发：标记/撤回「已发」（存在程序里，所有账号共用；拉新数据后自动清空）
                 deny = self._need(me, "stock.canprint")
@@ -2344,14 +3285,32 @@ class _WebHandler(BaseHTTPRequestHandler):
                     qty = int(body.get("qty"))
                 except Exception:
                     return self._json({"error": "数量必须是整数"}, 400)
-                hold = int(body.get("hold") if body.get("hold") is not None else 10)
+                hold = get_web_hold()          # 宽限只认电脑端的设置，网页传什么都被忽略
                 if hold < 0:
                     hold = 0
-                insert_canprint(code, qty, who=str((me or {}).get("name") or ""),
+                who = str((me or {}).get("name") or "")
+                insert_canprint(code, qty, who=who,
                                 bins=str(body.get("bins") or ""),
                                 pending_qty=body.get("pending") or 0,
                                 shelf_qty=body.get("shelf") or 0,
                                 hold_secs=hold)
+                # 同一条路径上再建一个打单任务（主端权威）：按 print_clients.json 派给对应电脑，
+                # 各端启动后向本机主端认领 → 打单 → 回写（一台只打一次）。
+                # 「桌面版」自己扫的记录不建任务（那是电脑端人工点数字才打）。
+                if not who.startswith("桌面版"):
+                    try:
+                        import kuaimai_print_jobs as pj
+                        tgt = pj.client_for(load_print_clients(), who)
+                        _pc = pj.connect(DB_FILE)
+                        try:
+                            jid = pj.add_job(_pc, code, qty, who=who, target_client=tgt,
+                                             msg="网页提交")
+                        finally:
+                            _pc.close()
+                        print_jobs_log("建任务 #%s：%s ×%s（来源 %s → %s）"
+                                       % (jid, code, qty, who or "-", tgt or "任意"))
+                    except Exception as e:
+                        print_jobs_log("建任务失败（扫码记录已写，不影响提交）：%s" % str(e)[:120])
                 return self._json({"ok": True, "code": code, "qty": qty, "hold": hold})
             if path == "/api/stock/adjust":
                 # 改库存（盘点接口，按货位）。必须带 confirm 二次确认，改完写操作日志。
@@ -4070,9 +5029,8 @@ class ScanApp:
         ops.grid(row=6, column=0, sticky="ew", pady=6)
         for c in range(5):
             ops.columnconfigure(c, weight=1)
-        _ops_list = (("现货可发", self.on_stock_dialog, "Accent.TButton", "stock.view"),
-                     ("批次查询", self.on_batch_dialog, "Accent.TButton", "batch.query"),
-                     ("增量刷新", lambda: self.sync_pending(background=True), "TButton", "data.refresh"),
+        # 现货可发 / 批次查询 两个按钮按要求隐藏（功能代码保留：on_stock_dialog / on_batch_dialog）
+        _ops_list = (("增量刷新", lambda: self.sync_pending(background=True), "TButton", "data.refresh"),
                      ("全量重拉", lambda: self.full_reload(background=True), "TButton", "data.refresh"),
                      ("刷新货位库存", lambda: self.reload_shelf(background=True), "TButton", "data.refresh"),
                      ("刷新锁定数", lambda: self.reload_lock(background=True), "TButton", "data.refresh"),
@@ -4082,11 +5040,35 @@ class ScanApp:
                      ("子客户端管理", self.on_admin_panel, "Accent.TButton", "desktop.admin"),
                      ("对外访问设置", self.on_gateway_settings, "TButton", "gateway.settings"),
                      ("检查更新", self.on_check_update, "TButton", "__any"),
-                     ("重新登录", self.on_relogin, "TButton", "__any"))
+                     ("重新登录", self.on_relogin, "TButton", "__any"),
+                     ("打印分工", self.on_print_clients, "TButton", "__any"),
+                     ("打单进度", self.on_print_progress, "TButton", "__any"))
         for i, (txt, cmd, sty, perm) in enumerate(_ops_list):
             _b = ttk.Button(ops, text=txt, command=cmd, style=sty)
             _b.grid(row=i // 5, column=i % 5, sticky="ew", padx=5, pady=5)
             self._gate(perm, _b)
+        # 网页「可发」撤回宽限：放在「重新登录」右边（同一片操作区）
+        _holdbox = ttk.Frame(ops)
+        _holdbox.grid(row=2, column=4, sticky="w", padx=5, pady=5)
+        ttk.Label(_holdbox, text="可发撤回宽限").pack(side=tk.LEFT, padx=(0, 4))
+        self.hold_var = tk.StringVar(value=str(get_web_hold()))
+        _hsp = ttk.Spinbox(_holdbox, from_=0, to=600, width=4, textvariable=self.hold_var)
+        _hsp.pack(side=tk.LEFT)
+        ttk.Label(_holdbox, text="秒").pack(side=tk.LEFT, padx=(4, 0))
+
+        def _save_hold(_e=None):
+            try:
+                set_web_hold(self.hold_var.get())
+                self.hold_var.set(str(get_web_hold()))
+                self.status_text.set("已保存：网页可发撤回宽限 %d 秒" % get_web_hold())
+            except Exception:
+                self.status_text.set("宽限秒数要填 0～600 的整数")
+
+        for _ev in ("<FocusOut>", "<Return>", "<<Increment>>", "<<Decrement>>"):
+            try:
+                _hsp.bind(_ev, _save_hold)
+            except Exception:
+                pass
         chk = ttk.Frame(ops)
         chk.grid(row=3, column=0, columnspan=5, sticky="w", padx=5, pady=(2, 4))
         _hk = ttk.Checkbutton(chk, text="后台扫码监听（最小化也能扫）", variable=self.hook_on,
@@ -4125,12 +5107,15 @@ class ScanApp:
         self._gate("scan.record", log, "grid")
         main.rowconfigure(3, weight=1)
         cols = ("time", "barcode", "pending", "shelf", "who", "print_num", "ue_zt", "ue_st", "printed")
-        self.tree = ttk.Treeview(log, columns=cols, show="headings", height=16)
-        for c, t, w in (("time", "扫码时间", 150), ("barcode", "商家编码", 200),
-                        ("pending", "待发货订单数", 100), ("shelf", "在架数", 80),
-                        ("who", "扫码账号", 120), ("print_num", "可打单数量", 95),
-                        ("ue_zt", "中通加急", 85), ("ue_st", "申通加急", 85),
-                        ("printed", "已打", 80)):
+        _st = ttk.Style()
+        _st.configure("ScanLog.Treeview", font=("微软雅黑", 12), rowheight=30)
+        _st.configure("ScanLog.Treeview.Heading", font=("微软雅黑", 12, "bold"))
+        self.tree = ttk.Treeview(log, columns=cols, show="headings", height=16, style="ScanLog.Treeview")
+        for c, t, w in (("time", "扫码时间", 180), ("barcode", "商家编码", 240),
+                        ("pending", "待发货订单数", 120), ("shelf", "在架数", 100),
+                        ("who", "扫码账号", 145), ("print_num", "可打单数量", 115),
+                        ("ue_zt", "中通加急", 100), ("ue_st", "申通加急", 100),
+                        ("printed", "已打", 95)):
             self.tree.heading(c, text=t)
             self.tree.column(c, width=w, anchor="center")
         _bar = tk.Frame(log)
@@ -4148,15 +5133,23 @@ class ScanApp:
         _tsb.pack(side=tk.RIGHT, fill="y")
         ttk.Button(log, text="刷新记录",
                    command=lambda: self._poll_records(force=True)).pack(side=tk.BOTTOM, pady=3)
+        # 打单：选中若干行 → 预演 → 确认 → 取号/打印（不自动标「已打」）
+        ttk.Button(log, text="打单", command=self.run_print_selected).pack(side=tk.BOTTOM, pady=3)
+        # 网页提交后自动打单（总开关，与监听器共用暂停文件）
+        self.auto_print_var = tk.BooleanVar(value=self._auto_print_on())
+        ttk.Checkbutton(log, text="网页提交后自动打单", variable=self.auto_print_var,
+                        command=self._toggle_auto_print).pack(side=tk.BOTTOM, pady=3)
         self.tree.tag_configure("ok", background=self.GREEN_BG)
         self.tree.tag_configure("alert", background=self.RED_BG)
         self.tree.tag_configure("printed", background="#FFF6CC", foreground="#B8860B")   # 已打：黄色
         self.tree.bind("<Button-1>", self._on_record_click)      # 点「已打」那一格可切换
-        self.tree.bind("<Double-Button-1>", self._on_record_dblclick)   # 双击整行也能切换
+        self.tree.bind("<Button-1>", self._on_do_print_click, add="+")   # 点「打单」那格 = 直接按可打单数量打
+        # 双击整行不再切「已打」（改为只能手动点那一格）；_on_record_dblclick 保留但不再绑定
 
         self.scan_entry.focus()
         self._log_count = -1
         self.root.after(1500, self._poll_records)      # 手机/网页扫的码也会进这张表，定时刷新
+        self.root.after(6000, self._prefetch_loop)     # 后台预取订单：点「打单」时秒开
         # 以前这里绑了 FocusIn → 强制刷新：最小化再打开拿焦点的瞬间会整块重画（闪屏）。
         # 定时轮询（本地 2 秒 / 子端 10 秒）已经够用，不靠焦点事件。
 
@@ -4171,6 +5164,160 @@ class ScanApp:
             return False                    # 这些只能在主客户端那台上做
         s = self.session
         return True if s is None else bool(s.can(key))
+
+    def _prefetch_loop(self):
+        """后台预取扫码记录里待打编码的订单（不在主线程跑，不影响界面）。"""
+        try:
+            codes = []
+            for iid in self.tree.get_children()[:15]:
+                try:
+                    if "printed" in (self.tree.item(iid, "tags") or ()):
+                        continue                       # 已打的不用预取
+                    v = self.tree.item(iid, "values")
+                    code = str(v[1]).strip() if len(v) > 1 else ""
+                    qty = int(float(v[5] or 0)) if len(v) > 5 else 0
+                except Exception:
+                    continue
+                if code and qty > 0:
+                    codes.append(code)
+            if codes:
+                import threading
+
+                def work(cs=codes):
+                    try:
+                        import kuaimai_print as K
+                        for c in cs[:5]:               # 每轮最多预取 5 个编码
+                            K.prefetch(c)
+                    except BaseException:
+                        pass
+                threading.Thread(target=work, daemon=True).start()
+        except Exception:
+            pass
+        self.root.after(45000, self._prefetch_loop)    # 每 45 秒轮一次
+
+    def _on_do_print_click(self, event):
+        """点每行末尾的「打单」格 → 直接按该行「可打单数量」打单（不弹预演）。"""
+        try:
+            col = self.tree.identify_column(event.x)
+            row = self.tree.identify_row(event.y)
+            if col != "#6" or not row:           # #6 = 可打单数量 → 直接点数字打单
+                return
+            if "printed" in (self.tree.item(row, "tags") or ()):
+                messagebox.showinfo("打单", "这行已经是「已打」状态，不能重复打单")
+                return
+            vals = self.tree.item(row, "values")
+            code = str(vals[1] if len(vals) > 1 else "").strip()
+            try:
+                qty = int(float(vals[5] or 0))   # 可打单数量
+            except Exception:
+                qty = 0
+            if not code or qty <= 0:
+                messagebox.showinfo("打单", "这行的可打单数量是 0，无法打单")
+                return
+            if not messagebox.askyesno(
+                    "打单", "是否直接打印？\n\n编码：%s\n共 %d 单\n（会取号并出纸，不可撤回）" % (code, qty)):
+                return
+            self._direct_print(code, qty)
+        except Exception as e:
+            messagebox.showerror("打单", str(e)[:200])
+
+    def _direct_print(self, code, qty):
+        """后台直接打单（浏览器自检 → 查单/缓存 → 挑单 → 取号 → 打印；不自动标已打）。"""
+        import threading
+        self.status_text.set("打单中：%s ×%s …" % (code, qty))
+
+        def work():
+            try:
+                import kuaimai_print as K
+                st, msg = K.ensure_browser()
+                if st != "ok":
+                    self.root.after(0, lambda: messagebox.showinfo("打单", msg))
+                    return
+                picked, skipped, logs = K.do_print(code, qty, dry_run=False)
+                n = len(picked or [])
+                txt = "\n".join(str(x) for x in (logs or []))
+                self.root.after(0, lambda: self.status_text.set(
+                    "打单完成：%s 共 %d 单（请确认出纸后自行标「已打」）" % (code, n)))
+                self.root.after(0, lambda: messagebox.showinfo(
+                    "打单结果 %s" % code, (txt[-1600:] or "（无输出）")))
+            except BaseException as e:
+                self.root.after(0, lambda: messagebox.showerror("打单失败", str(e)[:200]))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    # ---------- 网页自动打单 总开关（与监听器共用「暂停文件」） ----------
+    def _auto_pause_flag(self):
+        return auto_print_pause_flag()      # 与自动打单监听线程同源
+
+    def _auto_print_on(self):
+        return not os.path.isfile(self._auto_pause_flag())
+
+    def _toggle_auto_print(self):
+        from tkinter import messagebox
+        p = self._auto_pause_flag()
+        try:
+            if self.auto_print_var.get():
+                if os.path.isfile(p):
+                    os.remove(p)
+                self.status_text.set("网页自动打单：已开启")
+            else:
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                with open(p, "w", encoding="utf-8") as f:
+                    f.write("paused")
+                self.status_text.set("网页自动打单：已暂停")
+        except Exception as e:
+            messagebox.showerror("自动打单", "切换失败：%s" % str(e)[:120])
+
+    def run_print_selected(self):
+        """把选中扫码记录里的「商家编码 + 可打单数量」交给打单窗口（预演→确认→取号/打印）。"""
+        from tkinter import messagebox
+        rows = []
+        blocked = []
+        try:
+            sel = self.tree.selection()
+        except Exception:
+            sel = []
+        for iid in sel:
+            try:
+                v = self.tree.item(iid, "values")
+            except Exception:
+                continue
+            if not v or len(v) < 6:
+                continue
+            # 「已打」判定：用行标签（应用自己就是用它把已打行标黄的），比解析文字可靠
+            try:
+                tags = self.tree.item(iid, "tags") or ()
+            except Exception:
+                tags = ()
+            if "printed" in tags:
+                blocked.append(str(v[1]).strip())               # 已打的行 → 不允许再打
+                continue
+            code = str(v[1]).strip()          # barcode = 商家编码
+            try:
+                qty = int(float(v[5] or 0))   # print_num = 可打单数量
+            except Exception:
+                qty = 0
+            if code and qty > 0:
+                rows.append((code, qty))
+        if not rows:
+            tip = "请先在上面的扫码记录里选中行（可按住 Ctrl / Shift 多选）；\n" \
+                  "选中的行需要有「商家编码」和大于 0 的「可打单数量」。"
+            if blocked:
+                tip = "选中的行已经是「已打」状态，不能再打单（避免重复打单）：\n%s" % "、".join(blocked[:10])
+            messagebox.showinfo("打单", tip)
+            return
+        if blocked:
+            messagebox.showinfo("打单", "已跳过 %d 行「已打」状态的记录：\n%s" % (
+                len(blocked), "、".join(blocked[:10])))
+        try:
+            import kuaimai_print_ui as _ui
+        except Exception as e:
+            messagebox.showerror("打单", "打单模块不可用：%s" % e)
+            return
+        try:
+            _ui.open_window(rows, master=self.root)
+        except Exception as e:
+            messagebox.showerror("打单", "打开打单窗口失败：%s" % e)
 
     def _gate(self, key, widget, mode="disable"):
         """把控件登记进权限表：mode = disable（置灰）/ grid（整块收起）。"""
@@ -5057,6 +6204,27 @@ class ScanApp:
                         sum(r.get("up", 0) for r in rows), sum(r["f"] for r in rows),
                         "　（只显示前 3000 行，导出含全部）" if len(shown) > 3000 else ""))
 
+        def print_row(*_a):
+            """双击某行 → 按该行「编码 + 可发数量」打单（弹打单窗口，先预演再打）。"""
+            try:
+                sel = tree.selection()
+                if not sel:
+                    return
+                v = tree.item(sel[0], "values")
+                code = str(v[0]).strip()
+                qty = int(float(v[-1] or 0))      # 最后一列 = 可发数量
+            except Exception:
+                return
+            if not code or qty <= 0:
+                messagebox.showinfo("打单", "该行可发数量为 0，不能打单")
+                return
+            try:
+                import kuaimai_print_ui as _ui
+                _ui.open_window([(code, qty)], master=self.root)
+            except Exception as e:
+                messagebox.showerror("打单", "打单模块不可用：%s" % e)
+
+        tree.bind("<Double-Button-1>", print_row)      # 双击一行 = 按该行打单
         btn.configure(command=refresh)
         ent.bind("<Return>", refresh)
         cb_sort.bind("<<ComboboxSelected>>", refresh)
@@ -5573,6 +6741,26 @@ class ScanApp:
             messagebox.showinfo("导出成功", "已导出 %d 行到：\n%s" % (len(data), path))
         except Exception as e:
             messagebox.showerror("导出失败", str(e))
+
+    # ---------- 打印分工（账号 → 哪台电脑 + 本机打印身份）----------
+    def on_print_clients(self):
+        """弹出「打印分工」设置窗（新增窗口，不动主界面既有布局）。
+
+        主端：账号分工 + 本机身份都能改；子端：账号分工置灰提示"只能在主端设置"，
+        本机身份照改（每台电脑各存一份 print_client.json）。
+        """
+        try:
+            PrintClientsDialog(self, parent=self.root)
+        except Exception as e:
+            messagebox.showerror("打印分工", "打不开设置窗口：%s" % str(e)[:200])
+
+    # ---------- 打单进度（实时面板）----------
+    def on_print_progress(self):
+        """弹出「打单进度」实时面板（新增窗口，不动主界面既有布局）。"""
+        try:
+            PrintProgressDialog(self, parent=self.root)
+        except Exception as e:
+            messagebox.showerror("打单进度", "打不开进度窗口：%s" % str(e)[:200])
 
     # ---------- API 设置 ----------
     def on_api_settings(self):
@@ -6110,12 +7298,40 @@ class ScanApp:
         except Exception:
             pass
 
+    def _toast(self, text, ms=900):
+        """屏幕右下角小提示（复制成功之类），自动消失。"""
+        try:
+            tt = tk.Toplevel(self.root)
+            tt.overrideredirect(True)
+            tt.attributes("-topmost", True)
+            tk.Label(tt, text=text, bg="#1e9e4a", fg="white",
+                     font=("Microsoft YaHei", 12, "bold"), padx=14, pady=8).pack()
+            tt.update_idletasks()
+            tt.geometry("+%d+%d" % (self.root.winfo_pointerx() + 14, self.root.winfo_pointery() + 14))
+            tt.after(ms, lambda: (tt.destroy() if tt.winfo_exists() else None))
+        except Exception:
+            pass
+
     def _on_record_click(self, event):
         """点「已打」那一格 → 标记为已打（单向，之后锁定不可再点）；双击整行也可以。"""
         try:
-            if self.tree.identify_column(event.x) != "#9":
-                return
+            col = self.tree.identify_column(event.x)
             row = self.tree.identify_row(event.y)
+            if col == "#2" and row:                    # 第 2 列 = 商家编码 → 点一下就复制
+                vals = self.tree.item(row, "values")
+                code = str(vals[1] if len(vals) > 1 else "").strip()
+                if code:
+                    try:
+                        self.root.clipboard_clear()
+                        self.root.clipboard_append(code)
+                        self.root.update_idletasks()
+                    except Exception:
+                        pass
+                    self.status_text.set("已复制商家编码：%s" % code)
+                    self._toast("复制成功：" + code)
+                return
+            if col != "#9":               # 已打列（回到 #9：已去掉那一列）
+                return
             if row:
                 self._mark_printed(row)
         except Exception:
@@ -6149,7 +7365,7 @@ class ScanApp:
                 okw, res = self._remote_api("/api/scans/printed", "POST", body={"id": rid, "flag": 1})
                 wrote = bool(okw and isinstance(res, dict) and res.get("ok"))
             else:
-                wrote = bool(set_printed(rid, 1))
+                wrote = bool(set_printed(rid, 1, by="电脑端界面点「已打」"))
             if wrote:
                 self.status_text.set("已标记：已打（该条已锁定）")
             else:
@@ -6337,6 +7553,74 @@ def run_selftest():
     print("[selftest] 增量同步: 处理 %d 单，store 由 %d → %d 单" % (processed, len(store), len(work)))
 
 
+def auto_print_pause_flag():
+    """「网页提交后自动打单」总开关文件（存在=暂停）。界面勾选框与监听线程同源。"""
+    return os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
+                        "KuaimaiScan", "auto_print_pause.flag")
+
+
+def start_auto_print_watcher(db_path=None, session=None):
+    """把「打单」监听放进主程序的 daemon 线程（不再另发一个 exe）。
+
+    · 本机设过「本机打印身份」（print_client.json）→ **认领模式**：向本机主端
+      `POST /api/print/claim` 认领属于本机的任务 → 打单 → `POST /api/print/report` 回写。
+      主端自己也一样（主端=pc1，也是向 127.0.0.1 的本机服务认领），
+      所以「网页提交 → 建任务 → 哪台认领 → 就打」是一条链路。
+    · 没设身份（主端）→ 保持原来的「读本机 scan_record」模式，行为不变。
+    · 子端没设身份时不做任何事（它没有本机库，原来也不该读）。
+    · 单实例保护已在 main() 里做过，这里只保证同一个进程内不起两个监听线程。
+    """
+    if _WEB_STATE.get("auto_print_thread") is not None:
+        return _WEB_STATE.get("auto_print_thread")
+    try:
+        import auto_print_watcher as apw
+    except Exception:
+        return None
+    mode = str(getattr(session, "mode", "") or "")
+    is_host = (session is None) or (mode == "host")
+    client = read_local_print_client()
+
+    def api(path, method="GET", params=None, body=None, timeout=25):
+        # 复用现有会话/主端地址机制：主端 → 127.0.0.1:本机端口；子端 → session.base
+        if session is not None:
+            return session.api(path, method=method, params=params, body=body, timeout=timeout)
+        import kuaimai_client as kc
+        base = "http://127.0.0.1:%d" % int(_WEB_STATE.get("port") or WEB_PORT)
+        return kc.http_json(base, path, method=method, params=params, body=body, timeout=timeout)
+
+    stop = threading.Event()
+    _WEB_STATE["auto_print_stop"] = stop
+    db = db_path or DB_FILE
+    log_path = os.path.join(BASE_DIR, "auto_print.log")
+    pause_path = auto_print_pause_flag()
+
+    if client:
+        def run():
+            try:
+                apw.watch_claims(api=api, client=client, stop_event=stop, log_path=log_path,
+                                 pause_path=pause_path)
+            except BaseException:
+                pass
+        why = "认领模式（本机身份 %s）" % client
+    elif is_host:
+        def run():
+            try:
+                apw.watch(stop_event=stop, db=db, log_path=log_path, pause_path=pause_path)
+            except BaseException:
+                pass
+        why = "原本地模式（未设本机身份）"
+    else:
+        print_jobs_log("子端未设「本机打印身份」，认领没开"
+                       "（请在「打印分工」里给这台电脑选 pc1/pc2/pc3）")
+        return None
+
+    t = threading.Thread(target=run, daemon=True, name="auto-print-watcher")
+    _WEB_STATE["auto_print_thread"] = t
+    t.start()
+    print_jobs_log("自动打单监听已启动：%s" % why)
+    return t
+
+
 def _single_instance_guard():
     """单实例保护：同一时间只允许跑一个。
 
@@ -6417,6 +7701,13 @@ def main():
         ScanApp(root, session)
         try:
             session.start_heartbeat()
+        except Exception:
+            pass
+        try:
+            # 主端/子端都起：设过「本机打印身份」就走认领模式（各打各的活），
+            # 主端没设身份时保持原来的「读本机 scan_record」模式。
+            start_auto_print_watcher(DB_FILE if session.mode == "host" else None,
+                                     session=session)
         except Exception:
             pass
         _note_login(session.name, session.role, session.mode)
