@@ -2009,8 +2009,8 @@ def click_print_button(c, logs=None, attempts=3):
             real_ok = False
             if 0 < x < (vw or 10 ** 6) and 0 < y < (vh or 10 ** 6):
                 try:
-                    _real_mouse_click(c, x, y)
-                    logs.append("  真实鼠标点击 @(%d,%d)" % (x, y))
+                    _real_mouse_click(c, x, y, move=False)   # 快路：跳过每次卡 ~5s 的 mouseMoved
+                    logs.append("  真实鼠标点击 @(%d,%d)（无 mouseMoved 快路）" % (x, y))
                 except Exception as e:
                     logs.append("  真实鼠标点击异常：%s" % str(e)[:100])
                 wait_until(c, "window.__km_print_clicked||0", ok=lambda v: int(v or 0) > 0,
@@ -2059,7 +2059,7 @@ def click_print_button(c, logs=None, attempts=3):
                         pass
                     if 0 < x < (vw or 10 ** 6) and 0 < y < (vh or 10 ** 6):
                         try:
-                            _real_mouse_click(c, x, y)
+                            _real_mouse_click(c, x, y, move=False)   # 快路：同上
                             wait_until(c, "window.__km_print_clicked||0",
                                        ok=lambda v: int(v or 0) > 0, interval=0.1, timeout=1.2,
                                        desc="点击是否落到目标", logs=None)
