@@ -2241,13 +2241,19 @@ def _print_one_batch(c, code, sids, shorts, logs, v, wait_rows=12.0, check_only=
         return False, psinfo
     seen_dialog = False
     t_dlg = time.time()
-    # 提速（实测 2026-09-23 任务 #11）：点的是「多平台极速打印」→ **从不弹窗**，
-    # 却仍死等满 18s，占整单 35.8s 的一半。旧按钮「多平台打印快递单」实测 +1.5s 就弹窗，
-    # 故上限砍到 5s 对两种按钮都够；万一真有弹窗来得更晚，后面的「核对未打印队列」
-    # 仍会兜住（没出纸 → 判失败 → 回队列退避重试，不会静默放过）。
-    while (time.time() - t_dlg) <= 5.0:
+    # 提速（实测 2026-09-23 任务 #11/#12）：**按按钮名决定要不要等**。
+    #   「多平台极速打印」→ 从不弹窗，只做一次 1.5s 首检（实测占了 6.0s）；
+    #   「多平台打印快递单」→ 实测 +1.5s 弹窗，上限 5s。
+    # 循环按「剩余时间」取 min(1.5, 剩余)，避免进循环尾部多等一轮而超出上限。
+    # 兜底不变：真没出纸 → 后面的「核对未打印队列」判失败 → 回队列退避重试。
+    _dlg_max = 1.5 if "极速" in str(clicked) else 5.0
+    while True:
+        _left = _dlg_max - (time.time() - t_dlg)
+        if _left <= 0:
+            break
         got, d, _dt = wait_until(c, DIALOG_JS, ok=lambda v: str(v or "none") != "none",
-                                 interval=0.25, timeout=1.5, desc="等打印弹窗", logs=None)
+                                 interval=0.25, timeout=min(1.5, _left),
+                                 desc="等打印弹窗", logs=None)
         if not got:
             continue
         seen_dialog = True
@@ -2257,7 +2263,7 @@ def _print_one_batch(c, code, sids, shorts, logs, v, wait_rows=12.0, check_only=
         wait_until(c, DIALOG_JS, ok=lambda v: str(v or "none") == "none",
                    interval=0.2, timeout=2.0, desc="等弹窗关闭", logs=None)
     if not seen_dialog:
-        logs.append("  （5s 内没看到弹窗——可能直接出纸，也可能没响应）")
+        logs.append("  （%.1fs 内没看到弹窗——可能直接出纸，也可能没响应）" % _dlg_max)
     _tm_add("等弹窗", time.time() - t_dlg)
     _tm_mark("弹窗等待", time.time() - t_dlg)
     # H. 打印后核对：这批单是否离开「快递单未打印」队列（≠ 离开 = 没真出纸）
