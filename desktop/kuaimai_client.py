@@ -22,7 +22,7 @@ import urllib.parse
 import urllib.request
 
 APP = "kuaimai-fahuo-chaxun"
-APP_VER = "v1.32"              # 版本号（登录窗/主窗口都显示它，一眼能看出是不是新版）
+APP_VER = "v1.33"              # 版本号（登录窗/主窗口都显示它，一眼能看出是不是新版）
 DISCOVER_PORT = 8791
 DISCOVER_REQ = b"KUIMAI-SCAN-DISCOVER/1"
 DEFAULT_PORT = 8790

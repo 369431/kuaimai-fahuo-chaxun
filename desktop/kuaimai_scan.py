@@ -463,6 +463,30 @@ def read_log_tail(n=5):
         return []
 
 
+AUTO_PUTAWAY_LOG = os.path.join(BASE_DIR, "auto_putaway.log")
+AUTO_AUDIT_LOG = os.path.join(BASE_DIR, "auto_audit.log")
+
+
+def read_auto_ops_tail(n=8):
+    """自动上架 / 智能审核日志尾部 n 行（两个文件合并，按时间排）。
+
+    两个日志都落在同一个数据目录：auto_putaway.log（上架）、auto_audit.log（审核）。
+    行首都是「MM-DD HH:MM:SS」→ 各自取尾部后拼一起再按时间排序。
+    没跑过就是还没生成文件，**不算错**（返回空，界面显示「暂无日志」）。
+    """
+    merged = []
+    for tag, p in (("上架", AUTO_PUTAWAY_LOG), ("审核", AUTO_AUDIT_LOG)):
+        try:
+            with open(p, encoding="utf-8", errors="replace") as f:
+                lines = [x.rstrip() for x in f.read().splitlines()]
+        except Exception:
+            continue
+        for ln in [x for x in lines if x.strip()][-int(n):]:
+            merged.append((ln[:14], "[%s] %s" % (tag, ln)))
+    merged.sort(key=lambda t: t[0])
+    return [x[1] for x in merged[-int(n):]]
+
+
 def _fmt_elapsed(sec):
     sec = int(sec or 0)
     if sec < 60:
@@ -478,6 +502,7 @@ def print_progress_payload():
     只读、轻量（主线程直查没问题）；出错不抛，返回 ok=False + err。
     """
     out = {"ok": True, "err": "", "progress": read_print_progress(), "log": read_log_tail(5),
+           "auto_log": read_auto_ops_tail(8),
            "live": {"printing": [], "queue": [], "done": [], "failed": [], "counts": {}},
            "recent": []}
     try:
@@ -610,6 +635,8 @@ def format_progress(payload, now=None):
             "recent_rows": rows,
             "recent_keys": keys,
             "log_text": "\n".join(payload.get("log") or []) or "（暂无日志）",
+            "auto_log_text": "\n".join(payload.get("auto_log") or [])
+                             or "（暂无上架/审核日志）",
             "updated": "更新于 %s（每 1.5 秒自动刷新）"
                        % time.strftime("%H:%M:%S", time.localtime(now))}
 
@@ -675,6 +702,15 @@ class PrintProgressDialog(object):
                                 background="#F7F7F8")
         self.log_text.pack(fill="x", padx=6, pady=4)
         self.log_text.configure(state="disabled")
+
+        # 自动上架 / 智能审核日志（两个文件合并尾部，同样是只读快照）
+        autobox = ttk.LabelFrame(
+            frm, text="自动上架 / 智能审核日志（auto_putaway.log + auto_audit.log 尾部）")
+        autobox.pack(side=tk.BOTTOM, fill="x", pady=(8, 0))
+        self.auto_log_text = tk.Text(autobox, height=6, wrap="none", font=("Consolas", 9),
+                                     background="#F7F7F8")
+        self.auto_log_text.pack(fill="x", padx=6, pady=4)
+        self.auto_log_text.configure(state="disabled")
 
         # 正在打印（大字）
         top = ttk.LabelFrame(frm, text="正在打印")
@@ -920,6 +956,10 @@ class PrintProgressDialog(object):
             self.log_text.delete("1.0", "end")
             self.log_text.insert("1.0", d["log_text"])
             self.log_text.configure(state="disabled")
+            self.auto_log_text.configure(state="normal")
+            self.auto_log_text.delete("1.0", "end")
+            self.auto_log_text.insert("1.0", d.get("auto_log_text") or "（暂无上架/审核日志）")
+            self.auto_log_text.configure(state="disabled")
             note = d["updated"]
             if not (payload or {}).get("ok", True):
                 note += "  ｜ 读取失败：%s" % (payload.get("err") or "")
