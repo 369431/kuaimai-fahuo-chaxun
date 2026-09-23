@@ -632,6 +632,10 @@ def do_print(code, want, dry_run=True, page_size=None, check_only=False, verdict
     logs = []
     report_progress(phase="挑单", picked=len(picked or []),
                     msg="挑到 %d 单（跳过 %d）" % (len(picked or []), len(skipped or [])))
+    if picked:                              # 选单自证：一眼看出是否真按「超时优先、剩余时间升序」
+        _rm = [parse_remain_hours(o.get("remain")) for o in picked]
+        logs.append("挑单明细: %d 单，剩余时间 %.2f ~ %.2f 小时（升序）；其中已超时(负数) %d 单"
+                    % (len(picked), min(_rm), max(_rm), len([x for x in _rm if x < 0])))
     if not picked:
         report_progress(phase="完成", ok=True, msg="没有可打的单（挑到 0 单）")
         return picked, skipped, logs
