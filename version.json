@@ -1,10 +1,10 @@
 {
-  "version": "v1.25",
-  "notes": "修复自动打单偶发「找不到打印按钮」导致不出纸：ERP 的打印入口已改名为「多平台极速打印」，且会按订单状态在两种按钮间切换 → 改为按 data-name + 文案多候选识别并全页兜底；弹窗确认键兼容「继续打印」；修正批量勾选的目标定位（原先会提前停止：实测 60 单只定位到 10 单就回退慢扫）",
+  "version": "v1.26",
+  "notes": "打单选单与核对修复（4 项）：① 修复「超时单没被优先打」——候选池被截断，负数剩余（已超时）的单被挡在池外，改为拉全量候选；② 排序改为「已超时(负数)绝对最优先 → 加急 → 剩余时间升序」，与文档口径一致；③ 挑单日志新增自证行（剩余时间范围 + 其中超时单数），便于核对；④ 打印后核对改按单号精确查，比全量翻页快 3.6~7 倍（50 单核对由 31~50 秒降到几秒）。",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.25/kuaimai-scan-setup-v1.25.exe",
-  "sha256": "e6db6288eef6e38cbe0d1f745ee64bda46519f2c72f95213c740afe8e3aa4fb2",
-  "size": 28460263,
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.26/kuaimai-scan-setup-v1.26.exe",
+  "sha256": "91603de185c65fa01281d8835c94a64de43af46687efbf57fd12981ab653b1b4",
+  "size": 28463594,
   "mandatory": false,
-  "published_at": "2026-09-23 02:07"
+  "published_at": "2026-09-23 16:22"
 }
