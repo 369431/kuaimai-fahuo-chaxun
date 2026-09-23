@@ -1,10 +1,10 @@
 {
-  "version": "v1.30",
-  "notes": "修「同一编码重复提交 → 多打一遍」：网页/手机点「可发」时，若该编码短时间内被提交多次，以前每次都各建一个任务、各去打一遍（实测 9681-燕麦色S ×5 提交 3 次打了 15 张）。\n现在：同一编码已有未完成任务（排队/正在打），或 60 秒内刚打完 → 不再建第二个任务，网页会提示「本次未新建打单任务（避免重复出纸）」，日志同步留痕。\n扫码记录照写（只是不建任务）；确需追加打印时可用 force 参数绕过。\n注：与 v1.29 修的「任务重试多打」不同根因，那条已修。",
+  "version": "v1.31",
+  "notes": "新增「后置打印（包装验货）」打单方式，可与「订单打印V2」切换（界面下拉，默认仍是 V2）：\n换到后置打印后，出纸走「拣选号 -11 → 编码 → 数量」，拣选号固定 -11、编码与数量只取自本次「可发」那条，不再取号、不再滚屏勾选。\n沿用旧口径的防重复打印（宁可漏打、绝不错重打）。\n\n撤回「可发」时，把该编码还没开打的打单任务一并取消（正在打/已打完/失败的一律不动）；取消后电脑端不会再认领，撤回就真的不出纸；撤回后同一编码可以重新提交。\n撤回提示会显示「已取消 N 个未开打的打单任务」。",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.30/kuaimai-scan-setup-v1.30.exe",
-  "sha256": "fd79b877257c7249f521d793e721c6d36ede33b96584553620643241b16caddb",
-  "size": 28479276,
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.31/kuaimai-scan-setup-v1.31.exe",
+  "sha256": "173898fa1ada40cb0c44096befa95e2f838aa873a40ae32d8e7e22642b67f9da",
+  "size": 28493653,
   "mandatory": false,
-  "published_at": "2026-09-23 21:35"
+  "published_at": "2026-09-24 02:55"
 }
