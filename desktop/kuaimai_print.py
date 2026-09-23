@@ -369,6 +369,9 @@ def pick_orders(orders, want, code=None, max_n=MAX_BATCH):
         if str(o.get("sid")) in _printed_set():     # 本机打过 → 绝不再打（即便 ERP 次数为 0）
             skip.append((o.get("sid"), "本机已打过（去重记忆）"))
             continue
+        if o.get("refund"):                         # 退款/售后单 → 自动跳过（用户要求）
+            skip.append((o.get("sid"), "退款/售后单：%s" % (o.get("refund") or "")))
+            continue
         if int(o.get("print_count") or 0) > 0:      # 已打印过 → 跳过
             skip.append((o.get("sid"), "已打印 %s 次" % o.get("print_count")))
             continue
@@ -525,6 +528,31 @@ def _load_urgent_raw():
     return set()
 
 
+def refund_reason(o):
+    """退款/售后标识：返回原因文本；返回 '' = 不是退款单。
+
+    依据 ERP /trade/search 订单对象的 isRefund（0/1；实测 2026-09-23 字段存在，
+    560 单样本均为 0）与明细行的 refundStatus（非 NO_REFUND 即视为有退款标）。
+    命中 → pick_orders 直接跳过这单（用户口径：退款/售后单自动跳过，别打出来）。
+    """
+    try:
+        if int(o.get("isRefund") or 0) == 1:
+            return "订单退款/售后(isRefund=1)"
+    except Exception:
+        pass
+    try:
+        av = str(o.get("advanceStatusText") or "").strip()    # 售后工单状态（有值 = 有工单）
+    except Exception:
+        av = ""
+    if av:
+        return "售后工单(%s)" % av[:20]
+    for it in (o.get("orders") or []):
+        rs = str(it.get("refundStatus") or "").strip()
+        if rs and rs.upper() not in ("NO_REFUND", "0", "NONE"):
+            return "明细退款(%s)" % rs[:20]
+    return ""
+
+
 def fetch_orders_live(code, page_size=500):
     key = ("orders", str(code), int(page_size))
     hit = _cache_get(key, ORDERS_TTL)      # 预取 / 重复点击都复用
@@ -588,6 +616,7 @@ def fetch_orders_live(code, page_size=500):
         out.append({"sid": str(o.get("sid") or ""), "short_id": str(o.get("shortId") or ""),
                     "items": items, "remain": remain,
                     "print_count": o.get("printCount"), "express": o.get("expressName"),
+                    "refund": refund_reason(o),
                     "urgent": str(o.get("sid") or "") in urgent_set})
     _cache_put(key, list(out))
     _cache_put(("orders_by_code", str(code)), {"page_size": int(page_size), "rows": list(out)})
@@ -636,6 +665,11 @@ def do_print(code, want, dry_run=True, page_size=None, check_only=False, verdict
         _rm = [parse_remain_hours(o.get("remain")) for o in picked]
         logs.append("挑单明细: %d 单，剩余时间 %.2f ~ %.2f 小时（升序）；其中已超时(负数) %d 单"
                     % (len(picked), min(_rm), max(_rm), len([x for x in _rm if x < 0])))
+        _refs = [s for s in (skipped or []) if "退款" in str(s[1] or "")]
+        if _refs:
+            logs.append("跳过退款/售后单 %d 个：%s%s"
+                        % (len(_refs), "、".join(str(s[0]) for s in _refs[:8]),
+                           " …" if len(_refs) > 8 else ""))
     if not picked:
         report_progress(phase="完成", ok=True, msg="没有可打的单（挑到 0 单）")
         return picked, skipped, logs
@@ -821,8 +855,11 @@ def getcode_stable(sids, batch=CODE_BATCH, workers=3, retries=2):
     return {"ok": ok, "fail": fail, "errors": errors}
 
 
+# timeType=timeoutActionTime（**不是** pay_time）：列表按「剩余时间」排 → 与本地挑单
+# 口径一致，最急的单落在前几屏，勾选少滚很多屏（用户口径：按剩余时间排更快）。
+# 技能文档已明确：pay_time 只按付款时间取窗，会把最急的单漏在结果窗之外。
 PRINT_PAGE_TPL = ("https://erpb.superboss.cc/index.html#/trade/printv2/?queryId=77&module=printv2"
-                  "&warehouseId=556677&order=asc&pageNo=1&pageSize=300&timeType=pay_time&expressStatus=0"
+                  "&warehouseId=556677&order=asc&pageNo=1&pageSize=300&timeType=timeoutActionTime&expressStatus=0"
                   "&orderIdTypeSelect=mixKey&key=mainOuterId&queryType=1&skuOuterId=%s")
 ROWS_JS = "document.querySelectorAll('div.module-list-item-inpage').length"
 UNCHECK_JS = """

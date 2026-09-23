@@ -559,7 +559,7 @@ def format_progress(payload, now=None):
     q_lines = []
     for q in queue:
         s = "#%s %s ×%s → %s" % (q.get("job_id"), q.get("code") or "?", q.get("qty") or 0,
-                                 q.get("client") or q.get("target_client") or "任意")
+                                 q.get("client") or q.get("target_client") or "未指派(不自动打)")
         if q.get("retrying"):
             s += "（重试中，已失败 %s 次）" % (q.get("tries") or 0)
         if q.get("last_msg"):
@@ -662,6 +662,9 @@ class PrintProgressDialog(object):
         ttk.Button(btns, text="打开数据目录", command=self._open_dir).pack(side=tk.RIGHT, padx=4)
         ttk.Button(btns, text="清空失败任务", command=self.on_clear_failed).pack(side=tk.RIGHT, padx=4)
         ttk.Button(btns, text="删除选中任务", command=self.on_delete_selected).pack(side=tk.RIGHT, padx=4)
+        # 暂停/恢复「自动打单」（与主界面勾选框、监听线程同一个 flag 文件）
+        self.btn_pause = ttk.Button(btns, text="暂停自动打单", command=self.on_toggle_pause)
+        self.btn_pause.pack(side=tk.RIGHT, padx=4)
         self.lbl_updated = ttk.Label(btns, text="", foreground="#6e6e73")
         self.lbl_updated.pack(side=tk.LEFT)
 
@@ -816,6 +819,31 @@ class PrintProgressDialog(object):
         self._note_delete(jobs, "已删除 %d 条任务（%s）" % (len(ids), msg))
         self.refresh()
 
+    def on_toggle_pause(self):
+        """暂停 / 恢复「网页提交后自动打单」（与主界面勾选框、监听线程同一个 flag 文件）。
+
+        暂停期间监听线程**不认领新任务**（正在打的那一单会打完）；恢复即继续认领。
+        """
+        from tkinter import messagebox
+        p = auto_print_pause_flag()
+        try:
+            if os.path.isfile(p):
+                os.remove(p)
+                msg = "已恢复自动打单：监听会继续认领新任务"
+            else:
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                with open(p, "w", encoding="utf-8") as f:
+                    f.write("paused")
+                msg = "已暂停自动打单：不再认领新任务（正在打的那单会打完）"
+        except Exception as e:
+            messagebox.showerror("自动打单", "切换失败：%s" % str(e)[:120])
+            return
+        try:
+            self.lbl_updated.config(text=msg)
+        except Exception:
+            pass
+        self.refresh()
+
     def on_clear_failed(self):
         """一次删掉所有 failed 任务（删前确认）。"""
         try:
@@ -896,6 +924,11 @@ class PrintProgressDialog(object):
             if not (payload or {}).get("ok", True):
                 note += "  ｜ 读取失败：%s" % (payload.get("err") or "")
             self.lbl_updated.config(text=note)
+            try:                                   # 暂停按钮文案跟随当前状态
+                self.btn_pause.config(text=("恢复自动打单" if os.path.isfile(auto_print_pause_flag())
+                                            else "暂停自动打单"))
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -3209,6 +3242,11 @@ class _WebHandler(BaseHTTPRequestHandler):
                     import kuaimai_print_jobs as pj
                     mp = pj.load_client_map(os.path.join(BASE_DIR, "print_clients.json"))
                     tgt = str(body.get("target") or "").strip() or pj.client_for(mp, who)
+                    if not tgt:
+                        # 空 = 不自动打：拒绝建「任意」任务（旧行为会把空串当谁都能领 → 到处打单）
+                        return self._json({"error": "该账号未配置自动打单（「不自动打」）："
+                                                    "请到「打印分工」指定 pc1/pc2/pc3，"
+                                                    "或用 target 明确指定"}, 400)
                     conn = pj.connect(DB_FILE)
                     try:
                         jid = pj.add_job(conn, code, qty, who=who, target_client=tgt)
@@ -3301,14 +3339,20 @@ class _WebHandler(BaseHTTPRequestHandler):
                     try:
                         import kuaimai_print_jobs as pj
                         tgt = pj.client_for(load_print_clients(), who)
-                        _pc = pj.connect(DB_FILE)
-                        try:
-                            jid = pj.add_job(_pc, code, qty, who=who, target_client=tgt,
-                                             msg="网页提交")
-                        finally:
-                            _pc.close()
-                        print_jobs_log("建任务 #%s：%s ×%s（来源 %s → %s）"
-                                       % (jid, code, qty, who or "-", tgt or "任意"))
+                        if not tgt:
+                            # tgt 为空 = 「不自动打」（该账号没在「打印分工」里指派电脑，
+                            # 或明确选了「不自动打」，或文件是空表）→ **不建任务**，绝不派给任意电脑。
+                            print_jobs_log("不建任务：来源 %s 未配置自动打单（「不自动打」）→ 请到"
+                                           "「打印分工」指定电脑后再提交" % (who or "-"))
+                        else:
+                            _pc = pj.connect(DB_FILE)
+                            try:
+                                jid = pj.add_job(_pc, code, qty, who=who, target_client=tgt,
+                                                 msg="网页提交")
+                            finally:
+                                _pc.close()
+                            print_jobs_log("建任务 #%s：%s ×%s（来源 %s → %s）"
+                                           % (jid, code, qty, who or "-", tgt))
                     except Exception as e:
                         print_jobs_log("建任务失败（扫码记录已写，不影响提交）：%s" % str(e)[:120])
                 return self._json({"ok": True, "code": code, "qty": qty, "hold": hold})

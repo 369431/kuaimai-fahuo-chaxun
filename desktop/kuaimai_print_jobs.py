@@ -93,8 +93,10 @@ def claim(conn, client, limit=1):
     try:
         conn.execute("BEGIN IMMEDIATE")
         rows = conn.execute(
+            # 只认「明确派给本机」的任务：空串 = 不自动打（旧实现把空串当「任意」→
+            # 用户设了不自动打仍被打单，见 client_for 的语义说明）
             "SELECT job_id, code, qty, who FROM print_jobs "
-            "WHERE status='pending' AND next_try_ts<=? AND (target_client=? OR target_client='') "
+            "WHERE status='pending' AND next_try_ts<=? AND target_client=? "
             "ORDER BY job_id LIMIT ?", (now, str(client), int(limit))).fetchall()
         got = []
         for r in rows:
@@ -225,7 +227,7 @@ def live_view(conn):
             "SELECT job_id, code, qty, who, target_client, tries, next_try_ts, created_at, last_msg "
             "FROM print_jobs WHERE status='pending' ORDER BY next_try_ts, job_id"):
         d = dict(r)
-        d["client"] = d.get("target_client") or "任意"
+        d["client"] = d.get("target_client") or "未指派(不自动打)"
         d["retrying"] = bool(d.get("tries"))
         try:
             d["wait"] = max(0, now - int(time.mktime(time.strptime(str(d.get("created_at") or ""),
@@ -281,7 +283,14 @@ def load_client_map(path):
 
 
 def client_for(mapd, who):
-    """按映射决定这个来源账号该派给哪个客户端（未命中 → default → ''=谁都能领）。"""
+    """按映射决定这个来源账号该派给哪个客户端。
+
+    ★ 语义（2026-09-23 修正）：返回 '' = **不自动打**（不派发，任何电脑都别认领）。
+      旧实现把 '' 当「谁都能领」→ 用户在「打印分工」里把所有账号设成「不自动打」时，
+      文件被存成空表 {} → client_for 返回 '' → 空串任务被任意电脑认领并打单
+      （用户报的「设了不自动打还是打单出来」就是这个）。现在空表/未命中/default 缺失
+      一律 = 不自动打：建任务处据此**不建任务**，claim() 也不再匹配空串。
+    """
     if not mapd:
         return ""
     w = str(who or "").strip()
