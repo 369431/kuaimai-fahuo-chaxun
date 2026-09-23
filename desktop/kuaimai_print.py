@@ -35,6 +35,63 @@ try:
 except Exception:                          # pragma: no cover
     websocket = None
 
+# ============= 分段计时埋点（只记时间，不改行为）=============
+# 目的：把「提交可发 → 出纸」之间的黑盒段量出来（取号 / 拉单 / 勾选 / 等弹窗 / 核对各多少秒），
+# 用数据决定该优化哪一段。结果以「耗时分解: …」写进打单日志（auto_print.log）与任务日志。
+# 说明：纯累加字典，不参与任何判断分支；异常时也只是数字不准，不会影响打单。
+_TM = {"t0": time.time(), "tick": time.time(), "stages": {}, "counts": {}, "marks": []}
+
+
+def _tm_reset():
+    """每次 do_print 开头清零（一次任务一份分解）。"""
+    _TM["t0"] = time.time()
+    _TM["tick"] = _TM["t0"]
+    _TM["stages"] = {}
+    _TM["counts"] = {}
+    _TM["marks"] = []
+
+
+def _tm(name):
+    """距上一次计时点到现在，累加到 name（推进计时链）。"""
+    now = time.time()
+    _TM["stages"][name] = _TM["stages"].get(name, 0.0) + (now - _TM["tick"])
+    _TM["tick"] = now
+    return now
+
+
+def _tm_add(name, secs):
+    """显式加一段时间（用于函数内部局部测量，不动计时链）。"""
+    try:
+        _TM["stages"][name] = _TM["stages"].get(name, 0.0) + float(secs)
+    except Exception:
+        pass
+
+
+def _tm_count(name):
+    """计数（CDP 建页次数、队列读取次数等）——量化「反复建页」这类开销。"""
+    _TM["counts"][name] = _TM["counts"].get(name, 0) + 1
+
+
+def _tm_mark(label, secs):
+    """记一个独立的时刻点（如弹窗到底等了多久）。"""
+    try:
+        _TM["marks"].append((str(label), float(secs)))
+    except Exception:
+        pass
+
+
+def _tm_line():
+    """拼成一行：总时长 + 各阶段耗时（降序）+ 计数 + 时刻点。"""
+    tot = time.time() - _TM["t0"]
+    parts = ["%s=%.1f" % (k, v)
+             for k, v in sorted(_TM["stages"].items(), key=lambda kv: -kv[1])]
+    if _TM["marks"]:
+        parts.append("(" + " ".join("%s=%.1f" % m for m in _TM["marks"]) + ")")
+    if _TM["counts"]:
+        parts.append("{" + " ".join("%s=%d" % kv for kv in sorted(_TM["counts"].items())) + "}")
+    return "耗时分解(总 %.1fs): %s" % (tot, " ".join(parts) or "（无分段）")
+
+
 CDP_BASE = "http://127.0.0.1:9222"
 _CDP_OP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -91,8 +148,12 @@ class CDP(object):
 
 def open_cdp_page():
     """连上打单页（找不到页面抛 SystemExit，由调用方给友好提示）。"""
+    _t_cdp = time.time()
     t = erp_page_ws()
-    return CDP(t["webSocketDebuggerUrl"])
+    c = CDP(t["webSocketDebuggerUrl"])
+    _tm_add("CDP建页", time.time() - _t_cdp)
+    _tm_count("CDP建页次数")
+    return c
 
 
 def page_api(c, path, form, timeout=90000):
@@ -461,6 +522,7 @@ def fetch_orders_live(code, page_size=500):
     key = ("orders", str(code), int(page_size))
     hit = _cache_get(key, ORDERS_TTL)      # 预取 / 重复点击都复用
     if hit is not None:
+        _tm_count("订单列表-命中缓存")
         return list(hit)
     # 按编码复用：同一次点击里「预览」用默认 page_size=500 查过，真打时 do_print 会按
     # want×3 换成更小的 page_size（10 张→60），键不同 → 原来会把刚查的结果白白丢掉再查一遍。
@@ -477,6 +539,7 @@ def fetch_orders_live(code, page_size=500):
 
     返回 [{sid, items[{code,qty,gift}], remain(小时,可负), print_count, express, urgent}]
     """
+    _t_ord = time.time()
     c = open_cdp_page()
     form = ("api_name=trade_search&queryId=77&pageSize=%d&field=timeoutActionTime&needOrder=1"
             "&useCompress=0&minutesAfterPaidOrderAreNotDisplayed=0&outerId=%s"
@@ -488,6 +551,8 @@ def fetch_orders_live(code, page_size=500):
     })()""" % json.dumps(form)
     raw = c.js(js) or ""
     c.close()
+    _tm_add("拉订单列表", time.time() - _t_ord)
+    _tm_count("订单列表-网络拉取")
     try:
         arr = (json.loads(raw).get("data") or {}).get("list") or []
     except Exception as e:
@@ -544,11 +609,14 @@ def do_print(code, want, dry_run=True, page_size=None, check_only=False, verdict
     """
     if page_size is None:                  # 按需要的单量缩短查询：want×3（至少 60，最多 500）
         page_size = min(500, max(60, int(want or 0) * 3))
+    _tm_reset()
     report_progress(reset=True, code=str(code), want=int(want or 0), picked=0, phase="开始",
                     checked=0, page=0, ok=None,
                     msg="开始打单：%s ×%s" % (code, want))
     orders = fetch_orders_live(code, page_size=page_size)
+    _tm("拉订单列表(do_print)")
     picked, skipped = pick_orders(orders, want, code=code)
+    _tm("挑单")
     logs = []
     report_progress(phase="挑单", picked=len(picked or []),
                     msg="挑到 %d 单（跳过 %d）" % (len(picked or []), len(skipped or [])))
@@ -574,7 +642,9 @@ def do_print(code, want, dry_run=True, page_size=None, check_only=False, verdict
         return picked, skipped, logs
     report_progress(phase="取号", checked=0, page=0,
                     msg="取号中：共 %d 单要取号" % len(sids))
+    _tm("取号前")
     gc = getcode_stable(sids)
+    _tm("取号")
     fresh = [s for s in sids if s in (gc.get("ok") or {})]
     fails = gc.get("fail") or {}
     # 预发货单：早就取了号（但还没打印）→ 不算失败，**直接进打印**
@@ -599,7 +669,9 @@ def do_print(code, want, dry_run=True, page_size=None, check_only=False, verdict
     # 页面勾选 + 点打印：**进程内执行**（不再 subprocess 调 tools/erp_print_run2.py，冻结后不可用）
     v = verdict if isinstance(verdict, dict) else {}
     try:
+        _tm("打单页前")
         plog = print_selected(code, ok_sids, shorts, verdict=v)
+        _tm("打单页(勾选+打印+核对)")
     except BaseException as e:
         logs.insert(0, "！！打印失败：打印链路异常 %s" % str(e)[:200])
         v.update({"clicked": False, "verified": False, "reason": "exception:%s" % str(e)[:120]})
@@ -629,6 +701,7 @@ def do_print(code, want, dry_run=True, page_size=None, check_only=False, verdict
         logs.append("打印结果: 失败（%s）→ **未记去重记忆**，下次还会选中这些单" % str(why)[:80])
         if not any(str(x).startswith("！！打印失败") for x in logs):
             logs.insert(0, "！！打印失败：%s" % str(why)[:120])
+    logs.append(_tm_line())
     return picked, skipped, logs
 
 
@@ -1721,6 +1794,7 @@ def fetch_unprinted_sids(code, page_size=500, max_pages=8):
     """
     c = None
     all_sids, total, pages = set(), None, 0
+    _t_q = time.time()
     try:
         c = open_cdp_page()
         for pno in range(1, max(1, int(max_pages)) + 1):
@@ -1754,6 +1828,8 @@ def fetch_unprinted_sids(code, page_size=500, max_pages=8):
             if total is not None and len(all_sids) >= total:
                 break
     except BaseException as e:
+        _tm_add("读未打印队列", time.time() - _t_q)
+        _tm_count("读未打印队列次数")
         return set(), 0, str(e)[:80], False, None
     finally:
         try:
@@ -1761,11 +1837,13 @@ def fetch_unprinted_sids(code, page_size=500, max_pages=8):
                 c.close()
         except Exception:
             pass
+    _tm_add("读未打印队列", time.time() - _t_q)
+    _tm_count("读未打印队列次数")
     complete = bool(pages) and (total is not None) and (len(all_sids) >= total)
     return all_sids, len(all_sids), "", complete, total
 
 
-def verify_printed(code, sids, logs=None, max_secs=PRINT_VERIFY_SECS, page_size=500, interval=6.0):
+def verify_printed(code, sids, logs=None, max_secs=PRINT_VERIFY_SECS, page_size=500, interval=2.0):
     """打印后核对：这批单**是否离开「快递单未打印」队列**（= 真出纸了）。
 
     返回 {"ok", "still", "gone", "total", "why"}。ok=False 时调用方必须判失败：
@@ -2021,15 +2099,19 @@ def _print_one_batch(c, code, sids, shorts, logs, v, wait_rows=12.0, check_only=
     v["clicked"] = False
     v["verified"] = None
     # C. 对齐过滤条件（快递单打印状态=未打印；单号类型等其他下拉不动）
+    _t_af = time.time()
     f = align_filters(c, logs)
+    _tm_add("对齐过滤", time.time() - _t_af)
     if not f.get("ok"):
         logs.append("！！过滤条件没对上（%s）→ 终止（不出纸）" % f.get("why"))
         v["reason"] = "filter:%s" % f.get("why")
         report_progress(phase="失败", ok=False, msg="过滤条件没对上：%s" % f.get("why"))
         return False, {}
     # D. 「每页显示」设成下拉里数值最大的一项（不写死）；列表只渲染可见窗口，下面边滚边勾
+    _t_ps = time.time()
     psinfo = set_page_size_max(c, logs)
     rows = poll_rows(c, 1, 8.0)
+    _tm_add("设每页显示", time.time() - _t_ps)
     total = read_total(c)
     if rows <= 0:
         logs.append("！！设完每页显示后页面没有行 → 终止（不出纸）")
@@ -2093,7 +2175,9 @@ def _print_one_batch(c, code, sids, shorts, logs, v, wait_rows=12.0, check_only=
     # ERP「已勾选订单数」严格核对，不等就清空回退逐屏扫描（宁慢勿错）。
     found, n_click = None, 0
     if len(sids) >= 2:
+        _t_sh = time.time()
         _sh = shift_sweep_check(c, sids, expect, logs=logs, on_scan=_on_scan)
+        _tm_add("shift快速勾选", time.time() - _t_sh)
         if _sh is not None:
             _m = read_model_count(c)
             if _m == len(sids):
@@ -2108,7 +2192,9 @@ def _print_one_batch(c, code, sids, shorts, logs, v, wait_rows=12.0, check_only=
                 except Exception:
                     pass
     if found is None:
+        _t_sw = time.time()
         found, n_click = sweep_check(c, keys, expect, logs=logs, on_scan=_on_scan)
+        _tm_add("逐屏勾选", time.time() - _t_sw)
     model = read_model_count(c)
     n_hit = len(found)
     v["checked"] = n_hit
@@ -2143,7 +2229,9 @@ def _print_one_batch(c, code, sids, shorts, logs, v, wait_rows=12.0, check_only=
     # G. 点一次「多平台极速打印」+ 处理弹窗
     report_progress(phase="点打印", checked=int(got or 0),
                     msg="点「多平台打印快递单」（已勾 %s/%s）" % (got, expect))
+    _t_cl = time.time()
     clicked = click_print_button(c, logs)
+    _tm_add("点打印", time.time() - _t_cl)
     logs.append("点打印: " + clicked)
     v["clicked"] = clicked.startswith("clicked:")
     if not v["clicked"]:
@@ -2153,10 +2241,11 @@ def _print_one_batch(c, code, sids, shorts, logs, v, wait_rows=12.0, check_only=
         return False, psinfo
     seen_dialog = False
     t_dlg = time.time()
-    for i in range(12):
-        # 等前置弹窗（原固定 1.5s/轮）：弹窗一出现就走；整段仍保留 ~18s 兜底
-        if (time.time() - t_dlg) > 18.0:
-            break
+    # 提速（实测 2026-09-23 任务 #11）：点的是「多平台极速打印」→ **从不弹窗**，
+    # 却仍死等满 18s，占整单 35.8s 的一半。旧按钮「多平台打印快递单」实测 +1.5s 就弹窗，
+    # 故上限砍到 5s 对两种按钮都够；万一真有弹窗来得更晚，后面的「核对未打印队列」
+    # 仍会兜住（没出纸 → 判失败 → 回队列退避重试，不会静默放过）。
+    while (time.time() - t_dlg) <= 5.0:
         got, d, _dt = wait_until(c, DIALOG_JS, ok=lambda v: str(v or "none") != "none",
                                  interval=0.25, timeout=1.5, desc="等打印弹窗", logs=None)
         if not got:
@@ -2168,12 +2257,16 @@ def _print_one_batch(c, code, sids, shorts, logs, v, wait_rows=12.0, check_only=
         wait_until(c, DIALOG_JS, ok=lambda v: str(v or "none") == "none",
                    interval=0.2, timeout=2.0, desc="等弹窗关闭", logs=None)
     if not seen_dialog:
-        logs.append("  （18s 内没看到弹窗——可能直接出纸，也可能没响应）")
+        logs.append("  （5s 内没看到弹窗——可能直接出纸，也可能没响应）")
+    _tm_add("等弹窗", time.time() - t_dlg)
+    _tm_mark("弹窗等待", time.time() - t_dlg)
     # H. 打印后核对：这批单是否离开「快递单未打印」队列（≠ 离开 = 没真出纸）
     report_progress(phase="核对", checked=int(v.get("checked") or 0),
                     msg="打印后核对：等这批单离开「未打印」队列…")
+    _t_vf = time.time()
     r = verify_printed(code, list(sids or []) or [], logs=logs, max_secs=PRINT_VERIFY_SECS,
                        page_size=500)
+    _tm_add("核对队列", time.time() - _t_vf)
     v["verified"] = bool(r.get("ok"))
     v["still_unprinted"] = r.get("still")
     v["gone"] = r.get("gone")
@@ -2224,7 +2317,10 @@ def print_selected(code, sids, shorts=None, wait_rows=12.0, check_only=False, ve
             csids, cshorts = chunks[bi]
             if bi > 0:
                 logs.append("--- 第 %d/%d 批：重新筛单（上一批已离开未打印队列）---" % (bi + 1, len(chunks)))
-            if not _goto_print_page(c, code, logs):
+            _t_goto = time.time()
+            _ok_goto = _goto_print_page(c, code, logs)
+            _tm_add("进打单页", time.time() - _t_goto)
+            if not _ok_goto:
                 logs.append("！！无法进入打单页 → 终止（不出纸）")
                 v["reason"] = "no-page"
                 return logs

@@ -307,12 +307,17 @@ def _do_claim_one(api, client, job):
             _report(api, client, jid, False, "浏览器未就绪：%s" % str(msg)[:160])
             return
         verdict = {}
+        _t_job = time.time()
         picked, skipped, logs = K.do_print(code, qty, dry_run=False, verdict=verdict)
+        _job_secs = time.time() - _t_job
         good, why = _job_verdict(picked, logs)
         if good is None:                       # 0 单：必须分类，**绝不判 done**
             good, why = _classify_no_pick(code)
-        log("  打单结果：%d 单；%s" % (len(picked or []),
-                                      " | ".join(str(x)[:140] for x in (logs or []))))
+        _tmline = [x for x in (logs or []) if "耗时分解" in str(x)]
+        log("  打单结果：%d 单（do_print 耗时 %.1fs）；%s" % (len(picked or []), _job_secs,
+                                      " | ".join(str(x)[:140] for x in (logs or []) if x not in _tmline)))
+        for _t in _tmline:          # 耗时分解单独整行：别被上面的 140 字截断（实测被砍掉尾巴）
+            log("  " + str(_t))
         if good:
             sid = _extract_out_sid(picked)
             log("  任务 #%s 完成：%s%s" % (jid, why, ("（运单号 %s）" % sid) if sid else ""))
