@@ -1049,6 +1049,7 @@ class PrintClientsDialog(object):
 
         ttk.Label(frm, foreground="#6e6e73", justify="left",
                   text=("「本机」= 这台电脑（保存时写成上面的本机打印身份）。\n"
+                        "「不自动打」的账号：网页点「可发」也**不会推送到任何电脑**（最安全）。\n"
                         "账号分工：%s\n本机身份：%s" % (PRINT_CLIENTS_FILE, PRINT_CLIENT_FILE))
                   ).grid(row=2, column=0, sticky="w", pady=(8, 0))
 
@@ -1077,16 +1078,24 @@ class PrintClientsDialog(object):
 
     # ---------- 保存 ----------
     def collect_accounts(self):
-        """把界面上的选择收成映射表：不自动打的不写，「本机」写成当前本机身份。"""
+        """把界面上的选择收成映射表（含「不自动打」）。
+
+        ★ 「不自动打」必须**明确写进文件**，不能像以前那样跳过 —— 跳过等于文件里没这个
+          账号，取用时就可能落回「默认」那台电脑，于是网页点「可发」照样推送（用户报的不安全点）。
+          写进去后 client_for 认得出「这个账号明确不自动打」→ 直接不派发、不落回 default。
+          「本机」写成当前本机打印身份。
+        """
         local = str(self.local_var.get() or "").strip() or load_print_client()
         m = {}
         for nm, var, _cb in self.rows:
+            key = "default" if nm == PRINT_DEFAULT_ROW else nm
             v = str(var.get() or "").strip()
             if not v or v == PRINT_CLIENT_NONE:
+                m[key] = PRINT_CLIENT_NONE          # 明确「不自动打」（不派发、不落回 default）
                 continue
             if v == PRINT_CLIENT_SELF:
                 v = local
-            m["default" if nm == PRINT_DEFAULT_ROW else nm] = v
+            m[key] = v
         return m
 
     def on_save(self):
@@ -3342,8 +3351,9 @@ class _WebHandler(BaseHTTPRequestHandler):
                         if not tgt:
                             # tgt 为空 = 「不自动打」（该账号没在「打印分工」里指派电脑，
                             # 或明确选了「不自动打」，或文件是空表）→ **不建任务**，绝不派给任意电脑。
-                            print_jobs_log("不建任务：来源 %s 未配置自动打单（「不自动打」）→ 请到"
-                                           "「打印分工」指定电脑后再提交" % (who or "-"))
+                            print_jobs_log("不推送：来源 %s 在「打印分工」里是「不自动打」"
+                                           "→ 网页可发也不派给任何电脑（要自动打请指定 pc1/pc2/pc3）"
+                                           % (who or "-"))
                         else:
                             _pc = pj.connect(DB_FILE)
                             try:

@@ -21,6 +21,7 @@
 """
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -282,24 +283,38 @@ def load_client_map(path):
         return {}
 
 
+CLIENT_ID_RE = re.compile(r"^pc\d+$")      # 有效电脑名：pc1 / pc2 / pc3 …
+
+
+def valid_client(v):
+    """只认**有效电脑名**；其余（含「不自动打」/空/垃圾）一律当 '' = 不自动打。"""
+    v = str(v or "").strip()
+    return v if CLIENT_ID_RE.match(v) else ""
+
+
 def client_for(mapd, who):
     """按映射决定这个来源账号该派给哪个客户端。
 
-    ★ 语义（2026-09-23 修正）：返回 '' = **不自动打**（不派发，任何电脑都别认领）。
-      旧实现把 '' 当「谁都能领」→ 用户在「打印分工」里把所有账号设成「不自动打」时，
-      文件被存成空表 {} → client_for 返回 '' → 空串任务被任意电脑认领并打单
-      （用户报的「设了不自动打还是打单出来」就是这个）。现在空表/未命中/default 缺失
-      一律 = 不自动打：建任务处据此**不建任务**，claim() 也不再匹配空串。
+    ★ 返回 '' = **不自动打**：不派发 → 网页点「可发」也**不推送**、不建任务、
+      任何电脑都不会认领（claim 只认明确派给本机的任务）。
+
+    判定顺序（2026-09-23 修正）：
+      1) 该账号**明确列出**（含宽松匹配）→ 用它；值不是有效电脑名（「不自动打」/空）
+         **直接 = 不自动打，不再落回 default** —— 用户要求：设了不自动打就绝不推送。
+      2) 都没命中 → default；default 无效/缺失 = 不自动打。
+
+    旧实现的两处漏洞（用户报「设了不自动打还是打单出来」）：
+      · '' 被当「谁都能领」→ 全设不自动打时文件是空表 → 空串任务被任意电脑认领并打单；
+      · 「不自动打」的账号没写进文件 → 取用时落回 default 那台电脑 → 照样推送。
     """
-    if not mapd:
-        return ""
+    mapd = mapd or {}
     w = str(who or "").strip()
     if w and w in mapd:
-        return str(mapd[w])
+        return valid_client(mapd[w])
     for k, v in mapd.items():                        # 宽松匹配（网页账号常带前缀/后缀）
         if k and k != "default" and (k in w or (w and w in k)):
-            return str(v)
-    return str(mapd.get("default") or "")
+            return valid_client(v)
+    return valid_client(mapd.get("default"))
 
 
 def selftest():
