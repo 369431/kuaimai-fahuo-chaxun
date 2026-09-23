@@ -3380,9 +3380,28 @@ class _WebHandler(BaseHTTPRequestHandler):
                 if not code:
                     return self._json({"error": "缺少编码"}, 400)
                 if body.get("cancel"):
-                    # 撤回：把还在 30 秒宽限期里的那条删掉 → 电脑端根本不会出现
+                    # 撤回：把还在 30 秒宽限期里的那条删掉 → 电脑端根本不会出现。
+                    # ★ 同时取消该编码**还没开打**的 pending 打单任务（用户口径 2026-09-24）：
+                    #   撤回就真的不打；正在打/已打完/失败的任务一律不动
+                    #   （不打断出纸、也不涉重复打印）。只能在主端做（子端无本机库）。
                     gone = delete_pending_canprint(code)
-                    return self._json({"ok": True, "code": code, "cancelled": gone})
+                    n_cancel = 0
+                    if not self.remote:
+                        try:
+                            import kuaimai_print_jobs as pj
+                            _pc = pj.connect(DB_FILE)
+                            try:
+                                n_cancel = pj.cancel_pending_by_code(
+                                    _pc, code, who=str((me or {}).get("name") or ""))
+                            finally:
+                                _pc.close()
+                            if n_cancel:
+                                print_jobs_log("可发撤回：取消该编码未开打的任务 %d 条（%s）"
+                                               % (n_cancel, code))
+                        except Exception as e:
+                            print_jobs_log("可发撤回：取消失败（不影响撤回记录）：%s" % str(e)[:120])
+                    return self._json({"ok": True, "code": code, "cancelled": gone,
+                                       "jobs_cancelled": int(n_cancel)})
                 try:
                     qty = int(body.get("qty"))
                 except Exception:
@@ -5260,6 +5279,15 @@ class ScanApp:
         self.auto_print_var = tk.BooleanVar(value=self._auto_print_on())
         ttk.Checkbutton(log, text="网页提交后自动打单", variable=self.auto_print_var,
                         command=self._toggle_auto_print).pack(side=tk.BOTTOM, pady=3)
+        # 打单方式（本地设置，与「自动打单」并列；默认订单打印V2，切到后置打印即换链路）
+        _pmf = ttk.Frame(log)
+        _pmf.pack(side=tk.BOTTOM, pady=3)
+        ttk.Label(_pmf, text="打单方式：").pack(side=tk.LEFT)
+        self.print_method_var = tk.StringVar(value=self._print_method_label())
+        _pmbox = ttk.Combobox(_pmf, textvariable=self.print_method_var, state="readonly",
+                              width=22, values=list(self._print_method_labels()))
+        _pmbox.pack(side=tk.LEFT)
+        _pmbox.bind("<<ComboboxSelected>>", lambda e: self._on_print_method_change())
         self.tree.tag_configure("ok", background=self.GREEN_BG)
         self.tree.tag_configure("alert", background=self.RED_BG)
         self.tree.tag_configure("printed", background="#FFF6CC", foreground="#B8860B")   # 已打：黄色
@@ -5372,6 +5400,38 @@ class ScanApp:
 
     def _auto_print_on(self):
         return not os.path.isfile(self._auto_pause_flag())
+
+    # ---------- 打单方式（订单打印V2 / 后置打印）----------
+    def _print_method_labels(self):
+        """可选打单方式的中文标签（顺序：V2 在前 = 默认）。"""
+        try:
+            import kuaimai_print as K
+            return [K.PRINT_METHOD_LABELS[K.PRINT_METHOD_PRINTV2],
+                    K.PRINT_METHOD_LABELS[K.PRINT_METHOD_POSTPRINT]]
+        except Exception:
+            return ["订单打印V2（滚动勾选）", "后置打印（包装验货）"]
+
+    def _print_method_label(self):
+        """当前打单方式对应的中文标签（读不到则当 V2）。"""
+        try:
+            import kuaimai_print as K
+            return K.PRINT_METHOD_LABELS.get(K.get_print_method(),
+                                             self._print_method_labels()[0])
+        except Exception:
+            return self._print_method_labels()[0]
+
+    def _on_print_method_change(self):
+        """切换打单方式（本地设置，只写 print_method 一个键，不动其他设置）。"""
+        try:
+            import kuaimai_print as K
+            label = self.print_method_var.get()
+            m = dict((v, k) for k, v in K.PRINT_METHOD_LABELS.items()).get(label)
+            if not m:
+                return
+            K.set_print_method(m)
+            self.status_text.set("打单方式已切换为：%s" % label)
+        except Exception as e:
+            messagebox.showerror("打单方式", "切换失败：%s" % str(e)[:200])
 
     def _toggle_auto_print(self):
         from tkinter import messagebox

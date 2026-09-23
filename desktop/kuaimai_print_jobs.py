@@ -5,13 +5,17 @@
 
 表 print_jobs:
     job_id / code / qty / who(来源账号) / target_client(派给谁) /
-    status(pending|claimed|printing|done|failed) / claimed_by / claim_ts /
+    status(pending|claimed|printing|done|failed|cancelled) / claimed_by / claim_ts /
     done_ts / tries / out_sid / last_msg / created_at
 
 三道防重复闸：
   1) claim() 原子认领（BEGIN IMMEDIATE + rowcount 判定）——并发下只有一台成功
   2) reclaim() 超时回收（认领后 5 分钟没回写 → 回 pending；重试超 3 次 → failed）
   3) 客户端侧另有"本机去重记忆" + ERP 打印次数核对（kuaimai_print.py）
+
+cancelled = 「可发」被撤回时取消掉的 pending 任务（cancel_pending_by_code）：
+  只取消**还没开打**的（pending）；正在打/已打完/失败的一律不动（不打断出纸、不涉重打）。
+  取消后 pc 端不再认领 → 撤回的那条不会出纸。
 
 账号映射：print_clients.json  {"admin": "pc1", "账号B": "pc2", "default": "pc1"}
 
@@ -250,6 +254,27 @@ def report(conn, job_id, client, ok, msg="", out_sid="", picked_sids=None):
                   json.dumps(merged), int(job_id)))
     conn.commit()
     return "pending"
+
+
+def cancel_pending_by_code(conn, code, who=""):
+    """撤回「可发」时调用：把该编码**还没开打**的 pending 任务取消掉。返回取消条数。
+
+    只动 pending：
+      · claimed / printing（正在打）**不动** —— 不打断正在出的纸；
+      · done（已打完）**不动** —— 已出纸的更不碰，也就不涉重复打印；
+      · failed 不动。
+    取消后 status='cancelled' → 不在 claim() 的 `status='pending'` 里 → pc 端不再认领
+    → 撤回的那条真的不会出纸。也不入 dup_reason 的去重窗口（撤回后可重新提交）。
+    """
+    init(conn)
+    c = str(code or "").strip()
+    if not c:
+        return 0
+    msg = "已取消（可发撤回）" + (("，操作人 %s" % str(who)) if who else "")
+    n = conn.execute("UPDATE print_jobs SET status='cancelled', last_msg=? "
+                     "WHERE code=? AND status='pending'", (msg[:200], c)).rowcount
+    conn.commit()
+    return int(n or 0)
 
 
 def delete_job(conn, job_id):
@@ -592,6 +617,38 @@ def selftest():
                % (n_failed_before, n_st, n_failed_after)))
     ok.append(("剩 1 条（claimed 那条不动）", left == [jd3], "left=%s 期望=[%s]" % (left, jd3)))
     ok.append(("什么都不给时删 0 条", delete_jobs(conn) == 0, "防整表清空"))
+
+    # 撤回「可发」取消 pending 任务：只动 pending，其它状态一律不动
+    jx1 = add_job(conn, "7107-撤回A", 3, who="admin", target_client="pc1")
+    jx2 = add_job(conn, "7107-撤回A", 5, who="admin", target_client="pc1")
+    jx3 = add_job(conn, "7107-撤回A", 1, who="admin", target_client="pc1")
+    jx_other = add_job(conn, "7107-撤回B", 2, who="admin", target_client="pc1")
+    conn.execute("UPDATE print_jobs SET status='done', done_ts=? WHERE job_id=?",
+                 (int(time.time()), jx3))
+    conn.commit()
+    n_cx = cancel_pending_by_code(conn, "7107-撤回A", who="admin")
+
+    def _st(j):
+        return str(conn.execute("SELECT status FROM print_jobs WHERE job_id=?",
+                                (j,)).fetchone()["status"])
+
+    ok.append(("cancel_pending_by_code 只取消该编码的 pending", n_cx == 2,
+               "返回 %d 期望 2" % n_cx))
+    ok.append(("取消后 pending→cancelled、done 不动、别的编码不动",
+               _st(jx1) == "cancelled" and _st(jx2) == "cancelled"
+               and _st(jx3) == "done" and _st(jx_other) == "pending",
+               "A1=%s A2=%s done=%s B=%s" % (_st(jx1), _st(jx2), _st(jx3), _st(jx_other))))
+    ok.append(("被取消的任务不再被 claim 认领",
+               all(g["job_id"] not in (jx1, jx2) for g in claim(conn, "pc1", limit=20)),
+               "claim 未取到已取消的任务"))
+    # 干净编码：取消后可重新提交（不进 dup 窗口）
+    jx_clean = add_job(conn, "7107-撤回C", 4, who="admin", target_client="pc1")
+    cancel_pending_by_code(conn, "7107-撤回C", who="admin")
+    ok.append(("撤回后可重新提交同一编码", dup_reason(conn, "7107-撤回C") == "",
+               "dup=%r" % dup_reason(conn, "7107-撤回C")))
+    ok.append(("cancelled 不出现在看板 queue",
+               all(x.get("job_id") != jx1 for x in live_view(conn)["queue"]),
+               "queue 无已取消任务"))
 
     mp = {"admin": "pc1", "账号B": "pc2", "default": "pc1"}
     ok.append(("账号映射", client_for(mp, "admin") == "pc1" and client_for(mp, "账号B") == "pc2"

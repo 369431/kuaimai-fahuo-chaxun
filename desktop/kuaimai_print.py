@@ -672,6 +672,231 @@ def prefetch(code):
         return None
 
 
+# ==================== 打单方式：订单打印V2 / 后置打印（包装验货） ====================
+# 两种方式并存，用设置里的 print_method 切换（默认 printv2 = 老链路，行为不变）。
+PRINT_METHOD_PRINTV2 = "printv2"
+PRINT_METHOD_POSTPRINT = "postprint"
+PRINT_METHOD_LABELS = {PRINT_METHOD_PRINTV2: "订单打印V2（滚动勾选）",
+                       PRINT_METHOD_POSTPRINT: "后置打印（包装验货）"}
+SETTINGS_FILE = os.path.join(BASE_DIR, "kuaimai_settings.json")
+
+
+def get_print_method():
+    """当前打单方式；读不到/值不认识 → printv2（默认，绝不误改成新链路）。"""
+    try:
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+            v = str((json.load(f) or {}).get("print_method") or "").strip()
+        if v in PRINT_METHOD_LABELS:
+            return v
+    except Exception:
+        pass
+    return PRINT_METHOD_PRINTV2
+
+
+def set_print_method(m):
+    """写入打单方式：**只改 print_method 这一个键**，其他设置原样保留。"""
+    m = str(m or "").strip()
+    if m not in PRINT_METHOD_LABELS:
+        raise ValueError("未知打单方式：%s" % m)
+    try:
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+            s = json.load(f) or {}
+    except Exception:
+        s = {}
+    s["print_method"] = m
+    tmp = SETTINGS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(s, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, SETTINGS_FILE)
+    return m
+
+
+# ---- 后置打印（交易 → 包装验货 → 后置打印 `#/trade/postprint/`）----
+# 用户口径（2026-09-24 实测 + 硬规则）：
+#   · 拣选号/波次短号 = **只能输入 -11**（写死，本文件不接受别的值）
+#   · 商家编码 / 数量 = **只能来自「可发」**（= 调用方传进来的 code/want，不许手填别的）
+#   · 必需开关：开启连打模式 + 出单成功自动验货（页面里已开；本代码只读不点）
+#   · 后置打印默认就是一单一件
+# 输入序列：-11 → 编码 → 数量，各按一次回车 → 出纸（请求里 printNum=数量）。
+# 实测：合成 click 不触发 → 必须走 CDP Input.insertText + Input.dispatchKeyEvent(Enter)。
+PP_PICK_SEL = "input.j-picker-code-input"        # 拣选号/波次短号
+PP_CODE_SEL = "input.j-input-code"                # 商家编码
+PP_QTY_SEL = "input.continuity-print-num"         # 商品数量
+PP_NUM_SEL = "input.continuity-print-num"
+PP_PICK_VALUE = "-11"                             # ★ 硬规则：只允许这个值
+PP_READY_JS = r"""
+(function(){
+  var p=document.querySelector('input.j-picker-code-input');
+  var c=document.querySelector('input.j-input-code');
+  return JSON.stringify({hash:location.hash, pick:!!p, code:!!c});
+})()
+"""
+
+
+def _pp_goto(c, logs):
+    """导航到后置打印页（先沿用当前租户域名，避免 302 跳域丢掉 #/ 路由）。"""
+    frag = "/index.html#/trade/postprint/"
+    urls = []
+    try:
+        cur = str(c.js("location.href") or "")
+        if "superboss.cc/index.html" in cur:
+            urls.append(cur.split("/index.html", 1)[0] + frag)
+    except Exception:
+        pass
+    urls.append("https://erpb.superboss.cc" + frag)
+    for i in range(2):
+        c.call("Page.navigate", {"url": urls[min(i, len(urls) - 1)]})
+        ok, _val, _dt = wait_until(
+            c, PP_READY_JS,
+            ok=lambda v: ("postprint" in str(v or "")) and ('"pick":true' in str(v or "")),
+            interval=0.25, timeout=9.0, desc="加载后置打印页", logs=logs)
+        if ok:
+            return True
+    return False
+
+
+def _pp_type(c, sel, text, logs=None, wait=0.35):
+    """聚焦 → 清空 → 真实键入 → 回车。合成 click 不触发 ERP 处理器，必须走 Input.*。"""
+    r = c.js("(function(){var e=document.querySelector(%s);if(!e)return 'no-field';"
+             "e.focus();e.value='';return 'ok';})()" % json.dumps(sel))
+    if r != "ok":
+        if logs is not None:
+            logs.append("  后置打印：找不到输入框 %s（%s）" % (sel, r))
+        return False
+    time.sleep(0.15)
+    c.call("Input.insertText", {"text": str(text)})
+    time.sleep(wait)
+    for tn in ("keyDown", "keyUp"):
+        c.call("Input.dispatchKeyEvent", {"type": tn, "key": "Enter", "code": "Enter",
+                                          "windowsVirtualKeyCode": 13,
+                                          "nativeVirtualKeyCode": 13})
+    return True
+
+
+def print_postprint(code, want, logs=None, verdict=None, wait_secs=None, check_only=False):
+    """后置打印出纸：-11 → 编码 → 数量，各回车 → 核对这批单离开未打印队列。
+
+    **输入只来自调用方**：拣选号写死 -11；编码/数量 = 传进来的 code/want（即可发那条记录）。
+    check_only=True 时**不按数量那次回车**（= 不出纸），只验证「进页 + -11 + 编码 + 数量框就绪」。
+    返回 (ok, v)；v 字段对齐 printv2 的 verdict（clicked/checked/verified/gone/gone_sids/...）。
+    """
+    logs = logs if logs is not None else []
+    v = verdict if isinstance(verdict, dict) else {}
+    v.update({"clicked": False, "checked": 0, "verified": None, "gone": None,
+              "still_unprinted": None, "reason": "", "gone_sids": [], "still_sids": [],
+              "verify_complete": None, "printed_sids": [], "method": PRINT_METHOD_POSTPRINT})
+    code = str(code or "").strip()
+    try:
+        qn = int(want or 0)
+    except Exception:
+        qn = 0
+    if not code or qn <= 0:
+        logs.append("！！后置打印：编码/数量无效（code=%r 数量=%r）→ 不出纸" % (code, want))
+        v["reason"] = "bad-args"
+        return False, v
+    v["checked"] = qn
+    c = open_cdp_page()
+    try:
+        before, _n, _e, _cmp, _t = fetch_unprinted_sids(code)
+        logs.append("后置打印：%s ×%d（拣选号固定 %s）；打印前未打印队列 %d 单"
+                    % (code, qn, PP_PICK_VALUE, len(before)))
+        report_progress(phase="后置打印", checked=0, msg="后置打印：%s ×%d" % (code, qn))
+        if not _pp_goto(c, logs):
+            logs.insert(0, "！！后置打印失败：进不了后置打印页")
+            v["reason"] = "no-page"
+            return False, v
+        logs.append("   已进后置打印页: " + str(c.js("location.href") or "")[:120])
+        if not _pp_type(c, PP_PICK_SEL, PP_PICK_VALUE, logs):       # 1) 拣选号 = -11
+            logs.insert(0, "！！后置打印失败：拣选号输入框不可用")
+            v["reason"] = "no-pick-field"
+            return False, v
+        time.sleep(0.5)
+        if not _pp_type(c, PP_CODE_SEL, code, logs):                # 2) 商家编码（可发）
+            logs.insert(0, "！！后置打印失败：商家编码输入框不可用")
+            v["reason"] = "no-code-field"
+            return False, v
+        time.sleep(0.8)
+        if check_only:
+            # 只验证：三个输入框的值/焦点是否符合预期（**不按数量回车、不出纸**）
+            _r = c.js("(function(){var q=document.querySelector(%s),p=document.querySelector(%s),"
+                      "k=document.querySelector(%s);return JSON.stringify({pick:p?p.value:null,"
+                      "code:k?k.value:null,qtyFound:!!q,qtyFocused:!!q&&document.activeElement===q,"
+                      "qtyPh:q?(q.getAttribute('placeholder')||''):''});})()"
+                      % (json.dumps(PP_QTY_SEL), json.dumps(PP_PICK_SEL), json.dumps(PP_CODE_SEL)))
+            logs.append("   三个框: %s" % str(_r)[:160])
+            try:
+                _d = json.loads(str(_r))
+            except Exception:
+                _d = {}
+            v["pp_pick"] = _d.get("pick")
+            v["pp_code"] = _d.get("code")
+            _good = (str(_d.get("pick") or "").strip() == PP_PICK_VALUE
+                     and str(_d.get("code") or "").strip() == code
+                     and bool(_d.get("qtyFound")))
+            try:
+                c.js("(function(){var e=document.querySelector(%s);if(e)e.value='';return 1;})()"
+                     % json.dumps(PP_QTY_SEL))
+            except Exception:
+                pass
+            v["reason"] = "check-only"
+            v["verify_complete"] = None
+            v["checked"] = qn
+            report_progress(phase="完成" if _good else "失败", ok=bool(_good),
+                            msg="后置打印只验证：%s（未出纸）" % ("就绪" if _good else "输入框不符"))
+            logs.append("后置打印只验证（check_only）：拣选号=%r 编码=%r 数量框=%s → %s —— **未出纸**"
+                        % (_d.get("pick"), _d.get("code"), "就绪" if _d.get("qtyFound") else "没找到",
+                           "通过" if _good else "不通过"))
+            return bool(_good), v
+        if not _pp_type(c, PP_QTY_SEL, str(qn), logs):              # 3) 数量（可发）→ 回车出纸
+            logs.insert(0, "！！后置打印失败：数量输入框不可用（「开启连打模式」没开？）")
+            v["reason"] = "no-qty-field"
+            return False, v
+        v["clicked"] = True
+        report_progress(phase="后置打印", checked=0,
+                        msg="后置打印：已提交 %s ×%d，等出纸…" % (code, qn))
+        # 4) 核对：这批单离开未打印队列（渐进；与 printv2 同一套判定口径）
+        _t0 = time.time()
+        limit = max(float(wait_secs or PRINT_VERIFY_SECS), min(300.0, qn * 1.5))
+        gone, still, complete = set(), set(before), False
+        while True:
+            time.sleep(2.0)
+            _still, err, comp, _want = fetch_queue_sids_by_ids(list(before))
+            if err or not comp:
+                logs.append("   核对：队列没读全（%s）→ 保守继续等" % str(err)[:60])
+            else:
+                still = set(_still)
+                gone = set(before) - still
+                complete = True
+                logs.append("   核对：已离开 %d/%d（仍在 %d）" % (len(gone), len(before), len(still)))
+                if len(gone) >= qn:
+                    break
+            if time.time() - _t0 >= limit:
+                break
+        v["gone"] = len(gone)
+        v["still_unprinted"] = len(still)
+        v["gone_sids"] = sorted(gone)
+        v["still_sids"] = sorted(still)
+        v["verify_complete"] = bool(complete)
+        ok = len(gone) >= qn
+        v["verified"] = bool(ok)
+        if ok:
+            v["printed_sids"] = sorted(gone)
+            logs.append("后置打印结果: 成功（已离开未打印队列 %d/%d）" % (len(gone), qn))
+            report_progress(phase="完成", ok=True,
+                            msg="后置打印成功：已离开队列 %d/%d" % (len(gone), qn))
+        else:
+            v["reason"] = "queue-not-changed"
+            logs.append("后置打印结果: 失败（只离开 %d/%d）" % (len(gone), qn))
+            report_progress(phase="失败", ok=False,
+                            msg="后置打印失败：只离开队列 %d/%d" % (len(gone), qn))
+        return ok, v
+    finally:
+        try:
+            c.close()
+        except Exception:
+            pass
+
+
 def do_print(code, want, dry_run=True, page_size=None, check_only=False, verdict=None,
              only_sids=None):
     """一条龙：实时查单 → 挑单 →（预演 / 只勾选核对 / 真打：取号 → 页面勾选 → 打印 → 核对队列）。
@@ -692,6 +917,7 @@ def do_print(code, want, dry_run=True, page_size=None, check_only=False, verdict
         # 一次请求即可（pageSize=500），不比 pageSize=150 多花时间；且与预览共用同一 page_size 缓存。
         page_size = MAX_BATCH
     _tm_reset()
+    _method = get_print_method()          # 打单方式：printv2（默认）/ postprint
     report_progress(reset=True, code=str(code), want=int(want or 0), picked=0, phase="开始",
                     checked=0, page=0, ok=None,
                     msg="开始打单：%s ×%s" % (code, want))
@@ -730,6 +956,74 @@ def do_print(code, want, dry_run=True, page_size=None, check_only=False, verdict
                                                      v.get("checked"), len(sids)))
         return picked, skipped, logs
     if dry_run:
+        return picked, skipped, logs
+    # ★ 打单方式 = 后置打印（包装验货）：走「-11 → 编码 → 数量」，不取号、不滚屏勾选。
+    #   输入只来自本次可发：拣选号写死 -11，编码/数量 = code/want（调用方传的就是可发那条）。
+    if _method == PRINT_METHOD_POSTPRINT:
+        logs.append("打单方式：后置打印（包装验货）—— 拣选号固定 %s；编码/数量取自本次可发：%s ×%d"
+                    % (PP_PICK_VALUE, code, int(want or 0)))
+        if len(picked or []) < int(want or 0):
+            logs.append("  提示：本地候选只挑到 %d 单 < 可发 %d 单（仍然按可发数量提交，由 ERP 自己选单）"
+                        % (len(picked or []), int(want or 0)))
+        v = verdict if isinstance(verdict, dict) else {}
+        # ★ 防重复打印（与旧链路同一口径）：**重试只补本任务锁定批次里还没打出去的那部分**，
+        #   绝不按原数量再提交一遍（否则 ERP 会再挑一批新单 → 越打越多）。
+        #   only_sids = 本任务首次挑中的那批（调用方在重试时传入）。
+        _q = int(want or 0)
+        if only_sids:
+            try:
+                _done_sids = set(str(s) for s in only_sids) & set(str(s) for s in _printed_set())
+            except Exception:
+                _done_sids = set()
+            if _done_sids:
+                logs.append("  重试：本任务锁定批次里已有 %d 单在去重记忆里（确证已出纸）→ 本次只补 %d 单"
+                            % (len(_done_sids), max(0, _q - len(_done_sids))))
+                _q = max(0, _q - len(_done_sids))
+        if _q <= 0:
+            logs.append("本任务锁定批次的单已全部打完 → 不再提交（防重复打印）")
+            v.update({"clicked": False, "verified": True, "checked": 0, "gone": 0,
+                      "reason": "already-done", "printed_sids": []})
+            report_progress(phase="完成", ok=True, checked=0,
+                            msg="本任务的单已全部打完（补打完成，不再提交）")
+            logs.append(_tm_line())
+            return picked, skipped, logs
+        try:
+            _t_pp = time.time()
+            _p_ok, _pv = print_postprint(code, _q, logs=logs, verdict=v)
+            _tm_add("后置打印(提交+核对)", time.time() - _t_pp)
+        except BaseException as e:
+            logs.insert(0, "！！打印失败：后置打印链路异常 %s" % str(e)[:200])
+            v.update({"clicked": False, "verified": False, "reason": "exception:%s" % str(e)[:120]})
+            report_progress(phase="失败", ok=False, msg="后置打印链路异常：%s" % str(e)[:150])
+            return picked, skipped, logs
+        _gone_n = int(v.get("gone") or 0)
+        printed_ok = bool(v.get("clicked")) and (v.get("verified") is True) and (_gone_n > 0)
+        if printed_ok:
+            logs.append("打印结果: 成功（已离开未打印队列 %s/%s）" % (v.get("gone"), v.get("checked")))
+            report_progress(phase="完成", ok=True, checked=int(v.get("checked") or 0),
+                            msg="打单成功：已离开未打印队列 %s/%s" % (v.get("gone"), v.get("checked")))
+            try:
+                remember_printed(v.get("printed_sids") or [], None)
+                logs.append("已记入本机去重记忆：%d 单" % len(v.get("printed_sids") or []))
+            except Exception as e:
+                logs.append("去重记忆写入失败：%s" % str(e)[:80])
+        else:
+            _partial = [s for s in (v.get("gone_sids") or []) if s] if v.get("verify_complete") else []
+            report_progress(phase="失败", ok=False, checked=int(v.get("checked") or 0),
+                            msg="打单失败：%s" % str(v.get("reason") or "队列未变化")[:150])
+            if _partial:
+                try:
+                    remember_printed(_partial, None)
+                    logs.append("部分成功：已离开队列 %d 单已记入去重记忆（重试不会再打这些）"
+                                % len(_partial))
+                except Exception as e:
+                    logs.append("部分成功后记去重记忆失败：%s" % str(e)[:80])
+            v["printed_sids"] = _partial
+            logs.append("打印结果: 失败（%s）→ 未离开队列的单下次还会重试"
+                        % str(v.get("reason") or "")[:80])
+            if not any(str(x).startswith("！！打印失败") for x in logs):
+                logs.insert(0, "！！打印失败：%s" % str(v.get("reason") or "队列未变化")[:120])
+        logs.append(_tm_line())
         return picked, skipped, logs
     report_progress(phase="取号", checked=0, page=0,
                     msg="取号中：共 %d 单要取号" % len(sids))
@@ -2665,5 +2959,23 @@ if __name__ == "__main__":
             print(str(r)[:600])
     elif len(sys.argv) > 3 and sys.argv[1] == "preview":
         preview(sys.argv[2], int(sys.argv[3]))
+    elif len(sys.argv) > 3 and sys.argv[1] in ("postprint", "postprint-check"):
+        # 后置打印：postprint <编码> <数量> 真打；postprint-check 只验证不出纸
+        _ck = (sys.argv[1] == "postprint-check")
+        _logs = []
+        _v = {}
+        _ok, _v = print_postprint(sys.argv[2], int(sys.argv[3]), logs=_logs, verdict=_v,
+                                  check_only=_ck)
+        print("OK=%s" % _ok)
+        for _ln in _logs:
+            print("  " + str(_ln))
+        print("verdict=%s" % {k: v for k, v in _v.items() if k != "logs"})
+        sys.exit(0 if _ok else 1)
+    elif len(sys.argv) > 1 and sys.argv[1] == "method":
+        # method            → 看当前打单方式；method postprint → 切过去
+        if len(sys.argv) > 2:
+            print("已切换为:", set_print_method(sys.argv[2]))
+        else:
+            print(get_print_method(), PRINT_METHOD_LABELS.get(get_print_method()))
     else:
         print(__doc__)

@@ -310,7 +310,9 @@ async function sendFree(undo){
     let j={}; try{ j=await r.json(); }catch(e){}
     if(!r.ok||!j.ok){ alert('保存失败：'+((j&&j.error)||('HTTP '+r.status))); return; }
     if($('rfreeMsg')){
-      $('rfreeMsg').textContent = undo ? ('已撤回：'+code+'（电脑端不会出现这条）')
+      $('rfreeMsg').textContent = undo ? ('已撤回：'+code+'（电脑端不会出现这条'
+          + ((j&&j.jobs_cancelled) ? ('；已取消 '+j.jobs_cancelled+' 个未开打的打单任务') : '')
+          + '）')
         : (j.dup ? ('已记可打单，但'+j.dup_msg+'：本次未新建打单任务（避免重复出纸）')
         : ('已提交：'+code+' 可发 '+$('rqty').value+' 件，'+(window.KM_HOLD||10)+' 秒内点「撤回」就不写进电脑端'));
     }
