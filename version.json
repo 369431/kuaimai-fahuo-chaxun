@@ -1,10 +1,10 @@
 {
-  "version": "v1.29",
-  "notes": "防「重试多打」：9687-绿色XL ×170 却多打 138 单已修。\n原因：任务失败重试时会**重新挑一批新单**再打一遍。\n现在：任务锁定第一次挑中的那批单，重试**只补这批**、绝不另挑新单；\n这批全部打完即判完成，不再重试。\n另含 v1.28：渐进核对、部分成功记账、跨机共享去重、认领心跳。",
+  "version": "v1.30",
+  "notes": "修「同一编码重复提交 → 多打一遍」：网页/手机点「可发」时，若该编码短时间内被提交多次，以前每次都各建一个任务、各去打一遍（实测 9681-燕麦色S ×5 提交 3 次打了 15 张）。\n现在：同一编码已有未完成任务（排队/正在打），或 60 秒内刚打完 → 不再建第二个任务，网页会提示「本次未新建打单任务（避免重复出纸）」，日志同步留痕。\n扫码记录照写（只是不建任务）；确需追加打印时可用 force 参数绕过。\n注：与 v1.29 修的「任务重试多打」不同根因，那条已修。",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.29/kuaimai-scan-setup-v1.29.exe",
-  "sha256": "f0a8ab76390d51788225969a44de9f5b2a156fd46686baaa68806e9f8cf851da",
-  "size": 28478729,
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.30/kuaimai-scan-setup-v1.30.exe",
+  "sha256": "fd79b877257c7249f521d793e721c6d36ede33b96584553620643241b16caddb",
+  "size": 28479276,
   "mandatory": false,
-  "published_at": "2026-09-23 21:06"
+  "published_at": "2026-09-23 21:35"
 }
