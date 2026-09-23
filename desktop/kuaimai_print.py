@@ -1859,6 +1859,66 @@ def fetch_unprinted_sids(code, page_size=500, max_pages=8):
     return all_sids, len(all_sids), "", complete, total
 
 
+def fetch_queue_sids_by_ids(sids, batch=100):
+    """按 sid 精确查「快递单未打印」(queryId=77) 队列：只问这几个单**是否还在队列里**。
+
+    返回 (still_set, err, complete, want_n)：still_set = 请求的 sid 里仍在队列的那些。
+
+    实测（2026-09-23，队列 289 条）：
+      ``sid=a,b,c`` 支持逗号批量（100 个一次 → 覆盖 100/100，1.04s）；
+      不存在的 sid 被干净排除（total=0，不报错）；
+      ``sids=`` / ``sidList=`` 是**无效参数**（会被忽略并返回全量，别用）。
+      比全量翻页（289 条 3.85s）快约 7 倍，且待核对单越多优势越大 —— 核对本身也更快收敛。
+    complete=True 表示每个 sid 都有明确结论（每组 total 与返回条数一致）→ 调用方才能用
+    「不在集合」判已打印；任一组请求失败 → err 非空、complete=False（保守）。
+    """
+    want = [str(s) for s in (sids or []) if s]
+    if not want:
+        return set(), "", True, 0
+    bs = max(1, int(batch))
+    c, still, errs = None, set(), None
+    _t_q = time.time()
+    try:
+        c = open_cdp_page()
+        for i in range(0, len(want), bs):
+            grp = want[i:i + bs]
+            form = ("api_name=trade_search&queryId=77&pageSize=%d&pageNo=1&field=timeoutActionTime"
+                    "&needOrder=1&useCompress=0&minutesAfterPaidOrderAreNotDisplayed=0&sid=%s"
+                    % (max(50, len(grp) + 5), ",".join(grp)))
+            raw = c.js("""(async function(){
+              const r = await fetch('/trade/search', {method:'POST', credentials:'include',
+                headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:%s});
+              return await r.text();
+            })()""" % json.dumps(form)) or ""
+            try:
+                data = (json.loads(raw).get("data") or {})
+                arr = data.get("list") or []
+            except Exception as e:
+                errs = "sid 查返回解析失败(%s, 长度 %d)" % (str(e)[:40], len(raw))
+                break
+            try:
+                qtotal = int(data.get("total")) if data.get("total") is not None else None
+            except Exception:
+                qtotal = None
+            got = set(str(o.get("sid") or "") for o in arr)
+            got.discard("")
+            still |= (got & set(grp))
+            if qtotal is None or qtotal != len(got):
+                errs = "sid 查结果不完整（total=%s，返回 %d，本组查了 %d）" % (qtotal, len(got), len(grp))
+                break
+    except BaseException as e:
+        errs = str(e)[:80]
+    finally:
+        try:
+            if c:
+                c.close()
+        except Exception:
+            pass
+    _tm_add("读未打印队列", time.time() - _t_q)
+    _tm_count("读未打印队列次数")
+    return still, (errs or ""), (errs is None), len(want)
+
+
 def verify_printed(code, sids, logs=None, max_secs=PRINT_VERIFY_SECS, page_size=500, interval=2.0):
     """打印后核对：这批单**是否离开「快递单未打印」队列**（= 真出纸了）。
 
@@ -1875,7 +1935,14 @@ def verify_printed(code, sids, logs=None, max_secs=PRINT_VERIFY_SECS, page_size=
     t0 = time.time()
     last = {"ok": False, "still": total, "gone": 0, "total": total, "why": ""}
     while True:
-        cur, n, err, complete, q_total = fetch_unprinted_sids(code, page_size=page_size)
+        # 优先「按 sid 精确查」（实测快约 7 倍）；任何异常 → 回退全量翻页（保守，不据此判成功）
+        cur, err, complete, n = fetch_queue_sids_by_ids(sorted(want), batch=100)
+        mode = "sid精确查"
+        if err:
+            cur, n, err, complete, q_total = fetch_unprinted_sids(code, page_size=page_size)
+            mode = "全量翻页"
+        else:
+            q_total = len(want)
         if err:
             last = {"ok": False, "still": total, "gone": 0, "total": total,
                     "why": "核对时读队列失败：%s" % err}
@@ -1884,10 +1951,10 @@ def verify_printed(code, sids, logs=None, max_secs=PRINT_VERIFY_SECS, page_size=
             still, gone = want & cur, want - cur
             last = {"ok": (not still) and complete, "still": len(still), "gone": len(gone),
                     "total": total, "why": ""}
-            logs.append("  打印后核对(+%.0fs): 已离开队列 %d/%d，仍在队列 %d（队列共 %s 条，读到 %d 条%s）"
-                        % (time.time() - t0, len(gone), total, len(still),
-                           q_total if q_total is not None else "?", n,
-                           "" if complete else "，未读全"))
+            logs.append("  打印后核对(+%.0fs)[%s]: 已离开队列 %d/%d，仍在队列 %d%s"
+                        % (time.time() - t0, mode, len(gone), total, len(still),
+                           "" if complete else "（未读全：队列共 %s 条，读到 %d 条）"
+                           % (q_total if q_total is not None else "?", n)))
             if last["ok"]:
                 last["why"] = "全部离开未打印队列"
                 return last
