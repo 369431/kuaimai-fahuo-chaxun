@@ -329,12 +329,16 @@ class _Heartbeat(object):
         return False
 
 
-def _report(api, client, job_id, ok, msg="", out_sid=""):
-    """回写结果；回写本身失败就写日志（任务在主端会超时回收，不会丢）。"""
+def _report(api, client, job_id, ok, msg="", out_sid="", picked_sids=None):
+    """回写结果；回写本身失败就写日志（任务在主端会超时回收，不会丢）。
+
+    picked_sids：本次挑中的 sid → 主端存进任务，**重试只补这批**（防另挑新单重打）。
+    """
     try:
         ok2, res = api("/api/print/report", "POST",
                        body={"job_id": int(job_id), "client": client, "ok": bool(ok),
-                             "msg": str(msg)[:200], "out_sid": str(out_sid or "")}, timeout=25)
+                             "msg": str(msg)[:200], "out_sid": str(out_sid or ""),
+                             "picked_sids": [str(s) for s in (picked_sids or []) if s]}, timeout=25)
         if not ok2 or (isinstance(res, dict) and res.get("error")):
             log("  回写失败（任务 #%s）：%s（主端超时回收后会重试）" % (job_id, _err_text(res)))
     except BaseException as e:
@@ -371,11 +375,26 @@ def _do_claim_one(api, client, job):
             return
         verdict = {}
         _sync_shared_memory(api)               # 先同步别台已打的单（跨机防重）
+        # ★ 重试只用「本任务上次挑中的那批单」，绝不另挑新单（防重试重打用户没要的单）
+        only = [str(s) for s in (job.get("picked_sids") or []) if s]
+        if only:
+            log("  本任务已锁定 %d 单（重试只补这批，不另挑新单）" % len(only))
         _t_job = time.time()
         with _Heartbeat(api, client, jid):     # 打单期间心跳，防超时回收被别台重领
-            picked, skipped, logs = K.do_print(code, qty, dry_run=False, verdict=verdict)
+            picked, skipped, logs = K.do_print(code, qty, dry_run=False, verdict=verdict,
+                                              only_sids=(only or None))
         _job_secs = time.time() - _t_job
+        _picked_now = [str(o.get("sid")) for o in (picked or []) if o.get("sid")]
+        _all_picked = list(dict.fromkeys(only + _picked_now))
         good, why = _job_verdict(picked, logs)
+        if good is None and _all_picked:
+            # ★ 锁定批次的单若已全部进本机去重记忆 → 确实都打完了，判完成（不再重试）：
+            #   重试时已打的会被去重记忆挡住 → 挑到 0 单是「补打完成」，不是失败。
+            try:
+                if set(_all_picked) <= set(str(s) for s in K._printed_set()):
+                    good, why = True, "本任务的单已全部打完（补打完成，无新单可挑）"
+            except Exception:
+                pass
         if good is None:                       # 0 单：必须分类，**绝不判 done**
             good, why = _classify_no_pick(code)
         _tmline = [x for x in (logs or []) if "耗时分解" in str(x)]
@@ -390,10 +409,11 @@ def _do_claim_one(api, client, job):
         if good:
             sid = _extract_out_sid(picked)
             log("  任务 #%s 完成：%s%s" % (jid, why, ("（运单号 %s）" % sid) if sid else ""))
-            _report(api, client, jid, True, why, out_sid=sid)
+            _report(api, client, jid, True, why, out_sid=sid, picked_sids=_all_picked)
         else:
-            log("  任务 #%s 失败：%s → 回队列退避重试" % (jid, why))
-            _report(api, client, jid, False, why)
+            log("  任务 #%s 失败：%s → 回队列退避重试（下次只补这批 %d 单）"
+                % (jid, why, len(_all_picked)))
+            _report(api, client, jid, False, why, picked_sids=_all_picked)
     except BaseException as e:
         log("  任务 #%s 打单异常：%s → 回队列退避重试" % (jid, str(e)[:180]))
         _report(api, client, jid, False, "异常：%s" % str(e)[:160])

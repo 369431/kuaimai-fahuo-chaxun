@@ -45,7 +45,8 @@ CREATE TABLE IF NOT EXISTS print_jobs(
   next_try_ts INTEGER DEFAULT 0,
   out_sid TEXT DEFAULT '',
   last_msg TEXT DEFAULT '',
-  created_at TEXT DEFAULT ''
+  created_at TEXT DEFAULT '',
+  picked_sids TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_print_jobs_state ON print_jobs(status, target_client);
 -- 跨机共享的「已打订单」（防两台电脑把同一单各打一遍，2026-09-23）
@@ -71,6 +72,13 @@ def init(conn):
         conn.execute("ALTER TABLE print_jobs ADD COLUMN next_try_ts INTEGER DEFAULT 0")
     except Exception:
         pass
+    for _col, _ddl in (("picked_sids", "TEXT DEFAULT ''"),):   # 本轮任务首次挑中的 sid（防重试另挑新单）
+        try:
+            have = [r[1] for r in conn.execute("PRAGMA table_info(print_jobs)")]
+            if _col not in have:
+                conn.execute("ALTER TABLE print_jobs ADD COLUMN %s %s" % (_col, _ddl))
+        except Exception:
+            pass
     conn.commit()
 
 
@@ -89,6 +97,15 @@ def add_job(conn, code, qty, who="", target_client="", msg=""):
     return cur.lastrowid
 
 
+def _parse_sids(raw):
+    """把任务里存的 picked_sids（JSON 数组文本）解析成 list；坏值当空。"""
+    try:
+        v = json.loads(raw or "[]")
+        return [str(s) for s in v if s] if isinstance(v, list) else []
+    except Exception:
+        return []
+
+
 def claim(conn, client, limit=1):
     """原子认领：属于该客户端（或未指派）的 pending 任务。返回 [{'job_id','code','qty','who'}]。
 
@@ -103,7 +120,7 @@ def claim(conn, client, limit=1):
         rows = conn.execute(
             # 只认「明确派给本机」的任务：空串 = 不自动打（旧实现把空串当「任意」→
             # 用户设了不自动打仍被打单，见 client_for 的语义说明）
-            "SELECT job_id, code, qty, who FROM print_jobs "
+            "SELECT job_id, code, qty, who, picked_sids FROM print_jobs "
             "WHERE status='pending' AND next_try_ts<=? AND target_client=? "
             "ORDER BY job_id LIMIT ?", (now, str(client), int(limit))).fetchall()
         got = []
@@ -113,7 +130,8 @@ def claim(conn, client, limit=1):
                 "WHERE job_id=? AND status='pending'", (str(client), now, r["job_id"]))
             if cur.rowcount == 1:                    # 只有真抢到才算
                 got.append({"job_id": r["job_id"], "code": r["code"],
-                            "qty": r["qty"], "who": r["who"]})
+                            "qty": r["qty"], "who": r["who"],
+                            "picked_sids": _parse_sids(r["picked_sids"])})
         conn.execute("COMMIT")
         return got
     except Exception:
@@ -129,33 +147,42 @@ def claim(conn, client, limit=1):
 BACKOFF = (60, 180, 600)          # 失败重试退避（秒）：第 1/2/3 次
 
 
-def report(conn, job_id, client, ok, msg="", out_sid=""):
+def report(conn, job_id, client, ok, msg="", out_sid="", picked_sids=None):
     """回写结果：成功→done；失败→**回 pending 并退避重试**（tries 超限才判 failed）。
+
+    picked_sids：本次挑中的 sid（与任务里已存的一起并入）——
+    **重试只补这批**，绝不再另挑新单（防重试把用户没要的单也打了，2026-09-23）。
 
     只改 print_jobs；**不**碰 scan_record.printed（回写任务 ≠ 已打；已打由人工点）。
     """
     init(conn)
     now = int(time.time())
+    row = conn.execute("SELECT picked_sids FROM print_jobs WHERE job_id=?",
+                       (int(job_id),)).fetchone()
+    old = _parse_sids(row["picked_sids"]) if row else []
+    merged = list(dict.fromkeys(old + [str(s) for s in (picked_sids or []) if s]))
     if ok:
-        conn.execute("UPDATE print_jobs SET status='done', done_ts=?, out_sid=?, last_msg=? "
-                     "WHERE job_id=? AND claimed_by=?",
-                     (now, str(out_sid), str(msg)[:300], int(job_id), str(client)))
+        conn.execute("UPDATE print_jobs SET status='done', done_ts=?, out_sid=?, last_msg=?, "
+                     "picked_sids=? WHERE job_id=? AND claimed_by=?",
+                     (now, str(out_sid), str(msg)[:300], json.dumps(merged),
+                      int(job_id), str(client)))
         conn.commit()
         return "done"
     r = conn.execute("SELECT tries FROM print_jobs WHERE job_id=?", (int(job_id),)).fetchone()
     tries = int((r["tries"] if r else 0) or 0) + 1
     if tries >= MAX_TRIES:
-        conn.execute("UPDATE print_jobs SET status='failed', tries=?, done_ts=?, last_msg=? "
-                     "WHERE job_id=? AND claimed_by=?",
+        conn.execute("UPDATE print_jobs SET status='failed', tries=?, done_ts=?, last_msg=?, "
+                     "picked_sids=? WHERE job_id=? AND claimed_by=?",
                      (tries, now, ("重试 %d 次仍失败：%s" % (tries, str(msg)[:200])),
-                      int(job_id), str(client)))
+                      json.dumps(merged), int(job_id), str(client)))
         conn.commit()
         return "failed"
     wait = BACKOFF[min(tries, len(BACKOFF)) - 1]
     conn.execute("UPDATE print_jobs SET status='pending', claimed_by='', claim_ts=0, tries=?, "
-                 "next_try_ts=?, last_msg=? WHERE job_id=?",
+                 "next_try_ts=?, last_msg=?, picked_sids=? WHERE job_id=?",
                  (tries, now + wait,
-                  ("第 %d 次失败，%d 秒后重试：%s" % (tries, wait, str(msg)[:160])), int(job_id)))
+                  ("第 %d 次失败，%d 秒后重试：%s" % (tries, wait, str(msg)[:160])),
+                  json.dumps(merged), int(job_id)))
     conn.commit()
     return "pending"
 

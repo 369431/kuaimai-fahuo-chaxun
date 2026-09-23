@@ -3243,7 +3243,8 @@ class _WebHandler(BaseHTTPRequestHandler):
                     conn = pj.connect(DB_FILE)
                     try:
                         pj.report(conn, job_id, client, bool(body.get("ok")),
-                                  msg=body.get("msg") or "", out_sid=body.get("out_sid") or "")
+                                  msg=body.get("msg") or "", out_sid=body.get("out_sid") or "",
+                                  picked_sids=body.get("picked_sids") or [])
                     finally:
                         conn.close()
                 except Exception as e:

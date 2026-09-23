@@ -354,18 +354,25 @@ def sort_key(order):
             str(order.get("sid") or ""))
 
 
-def pick_orders(orders, want, code=None, max_n=MAX_BATCH):
+def pick_orders(orders, want, code=None, max_n=MAX_BATCH, only_sids=None):
     """按规则挑单：返回 (要打的列表, 跳过的[(sid, 原因)])。
 
     want = 该编码要打的单数；code = 网页扫到的商家编码 —— **只打这个编码的单**
     （不是同一个编码的一律不打，即「一单一件且非赠品编码 == 扫到的编码」）。
     code 传空则不按编码过滤（仅自测/调试用）。
+
+    ★ only_sids（2026-09-23）：**只在这批 sid 里挑**。用于「任务重试补打」——
+      第一次挑中的那批单已记进任务，重试只补其中还没打出去的，
+      **绝不允许另挑新单**（否则重试会把用户没要的单也打了，实测多打 138 张）。
     """
     ok, skip = [], []
     limit = min(int(want or 0), max_n)
+    _only = None if only_sids is None else set(str(s) for s in only_sids)
     for o in sorted(orders or [], key=sort_key):
         if len(ok) >= limit:
             break
+        if _only is not None and str(o.get("sid")) not in _only:
+            continue                                  # 不是本任务第一次挑中的单 → 绝不新挑
         if str(o.get("sid")) in _printed_set():     # 本机打过 → 绝不再打（即便 ERP 次数为 0）
             skip.append((o.get("sid"), "本机已打过（去重记忆）"))
             continue
@@ -665,11 +672,14 @@ def prefetch(code):
         return None
 
 
-def do_print(code, want, dry_run=True, page_size=None, check_only=False, verdict=None):
+def do_print(code, want, dry_run=True, page_size=None, check_only=False, verdict=None,
+             only_sids=None):
     """一条龙：实时查单 → 挑单 →（预演 / 只勾选核对 / 真打：取号 → 页面勾选 → 打印 → 核对队列）。
 
     dry_run=True   只列单，不取号不出纸（给人工核对）
     check_only=True 不取号、**不点打印**，只走页面「设页数/对齐条件/勾选/核对」→ 验证链路用
+    only_sids=…    只在这批 sid 里挑单（**重试补打专用**：首次挑中的一批已记进任务，
+                   重试只补其中没打出去的，绝不另挑新单 —— 见 pick_orders 的说明）
     返回 (picked, skipped, logs) —— 保持 3 元组（3 个调用方按 3 元组解包，别改签名）。
     真打时：**只有核对通过才记去重记忆**；失败时 logs 首行是「！！打印失败：…」，调用方据此判失败。
     注意：**不自动标「已打」**，由人工确认出纸后自己标。
@@ -687,7 +697,7 @@ def do_print(code, want, dry_run=True, page_size=None, check_only=False, verdict
                     msg="开始打单：%s ×%s" % (code, want))
     orders = fetch_orders_live(code, page_size=page_size)
     _tm("拉订单列表(do_print)")
-    picked, skipped = pick_orders(orders, want, code=code)
+    picked, skipped = pick_orders(orders, want, code=code, only_sids=only_sids)
     _tm("挑单")
     logs = []
     report_progress(phase="挑单", picked=len(picked or []),
