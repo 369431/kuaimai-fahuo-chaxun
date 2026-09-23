@@ -5196,6 +5196,25 @@ class ScanApp:
         _hsp.pack(side=tk.LEFT)
         ttk.Label(_holdbox, text="秒").pack(side=tk.LEFT, padx=(4, 0))
 
+        # 自动上架（推荐货位）：独立开关 + 可调刷新间隔，就放在「打单进度」旁边
+        # （纯开放平台 API，不需要浏览器；只在主客户端跑，故 __host 门控）
+        self.auto_putaway_var = tk.BooleanVar(value=self._auto_putaway_on())
+        self.ap_secs_var = tk.StringVar(value=str(self._auto_putaway_secs()))
+        _apbox = ttk.Frame(ops)
+        _apbox.grid(row=2, column=3, sticky="w", padx=5, pady=5)
+        ttk.Checkbutton(_apbox, text="自动上架推荐货位", variable=self.auto_putaway_var,
+                        command=self._toggle_auto_putaway).pack(side=tk.LEFT)
+        _apsb = ttk.Spinbox(_apbox, from_=AUTO_PUTAWAY_MIN_SECS, to=AUTO_PUTAWAY_MAX_SECS,
+                            increment=10, width=4, textvariable=self.ap_secs_var)
+        _apsb.pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Label(_apbox, text="秒").pack(side=tk.LEFT, padx=(4, 0))
+        for _ev in ("<FocusOut>", "<Return>", "<<Increment>>", "<<Decrement>>"):
+            try:
+                _apsb.bind(_ev, lambda e: self._on_ap_secs())
+            except Exception:
+                pass
+        self._gate("__host", _apbox, "grid")
+
         def _save_hold(_e=None):
             try:
                 set_web_hold(self.hold_var.get())
@@ -5393,6 +5412,46 @@ class ScanApp:
                 self.root.after(0, lambda: messagebox.showerror("打单失败", str(e)[:200]))
 
         threading.Thread(target=work, daemon=True).start()
+
+    # ---------- 自动上架（推荐货位）：独立开关 + 刷新间隔 ----------
+    def _auto_putaway_on(self):
+        try:
+            return auto_putaway_conf()[0]
+        except Exception:
+            return False
+
+    def _auto_putaway_secs(self):
+        try:
+            return auto_putaway_conf()[1]
+        except Exception:
+            return AUTO_PUTAWAY_DEFAULT_SECS
+
+    def _toggle_auto_putaway(self):
+        """独立开关：只切换自动上架，不影响自动打单。监听每轮重读设置，不用重启。"""
+        from tkinter import messagebox
+        try:
+            on = bool(self.auto_putaway_var.get())
+            _o, secs = set_auto_putaway_conf(on=on)
+            self.status_text.set("自动上架：%s（每 %d 秒查一次待上架单）"
+                                 % ("已开启" if on else "已关闭", secs))
+            print_jobs_log("自动上架：%s（间隔 %d 秒）"
+                           % ("已开启" if on else "已关闭", secs))
+        except Exception as e:
+            messagebox.showerror("自动上架", "切换失败：%s" % str(e)[:120])
+
+    def _on_ap_secs(self):
+        """改刷新间隔（10–3600 秒）；写入设置，监听下一轮就按新间隔跑。"""
+        try:
+            v = int(float(self.ap_secs_var.get()))
+        except Exception:
+            v = AUTO_PUTAWAY_DEFAULT_SECS
+        v = max(AUTO_PUTAWAY_MIN_SECS, min(AUTO_PUTAWAY_MAX_SECS, v))
+        self.ap_secs_var.set(str(v))
+        try:
+            set_auto_putaway_conf(secs=v)
+            self.status_text.set("自动上架刷新间隔：%d 秒" % v)
+        except Exception as e:
+            self.status_text.set("保存刷新间隔失败：%s" % str(e)[:80])
 
     # ---------- 网页自动打单 总开关（与监听器共用「暂停文件」） ----------
     def _auto_pause_flag(self):
@@ -7740,6 +7799,131 @@ def auto_print_pause_flag():
                         "KuaimaiScan", "auto_print_pause.flag")
 
 
+# ==================== 自动上架（推荐货位）====================
+# 纯**开放平台 API**：查待上架 → 本地算推荐货位 → 上架。不依赖浏览器/登录态。
+# 独立于「自动打单」的开关 + 可调间隔，都存在 kuaimai_settings.json 里，
+# 监听每轮重读，界面改了立刻生效。
+AUTO_PUTAWAY_DEFAULT_SECS = 60        # 默认间隔（秒）
+AUTO_PUTAWAY_MIN_SECS = 10
+AUTO_PUTAWAY_MAX_SECS = 3600
+
+
+def auto_putaway_conf():
+    """自动上架设置 → (开关, 间隔秒)。开关与「自动打单」互相独立。"""
+    s = load_settings() or {}
+    on = bool(s.get("auto_putaway_on", False))
+    try:
+        secs = int(float(s.get("auto_putaway_secs", AUTO_PUTAWAY_DEFAULT_SECS)))
+    except Exception:
+        secs = AUTO_PUTAWAY_DEFAULT_SECS
+    return on, max(AUTO_PUTAWAY_MIN_SECS, min(AUTO_PUTAWAY_MAX_SECS, secs))
+
+
+def set_auto_putaway_conf(on=None, secs=None):
+    """写自动上架设置：**只改这两个键**，其他设置原样保留（与 set_print_method 同做法）。"""
+    s = load_settings() or {}
+    if on is not None:
+        s["auto_putaway_on"] = bool(on)
+    if secs is not None:
+        try:
+            v = int(float(secs))
+        except Exception:
+            v = AUTO_PUTAWAY_DEFAULT_SECS
+        s["auto_putaway_secs"] = max(AUTO_PUTAWAY_MIN_SECS, min(AUTO_PUTAWAY_MAX_SECS, v))
+    save_settings(s)
+    return auto_putaway_conf()
+
+
+def _load_shelf_map_now():
+    r"""从订单库现读一份货位索引（界面实例拿不到时兜底）。**找不到库就报错，不新建空库**。
+
+    坑：`ORDERS_DB_FILE` 在模块导入时就定死了 —— 源码模式下它会指向 desktop\，
+    而真实库在 %LOCALAPPDATA%\KuaimaiScan\。若直接把不存在的路径交给
+    `kuaimai_db.connect()`，它会**建一个空库**并返回空货位表，
+    后果是「每张单都推荐不出货位 → 静默全部跳过」。所以只挑**已存在**的库，
+    且有货位数据的优先；一个都没有就抛错（监听会记日志并跳过本轮，不用空表乱推）。
+    """
+    cands = []
+    for p in (ORDERS_DB_FILE,
+              os.path.join(os.environ.get("LOCALAPPDATA") or "", "KuaimaiScan", "kuaimai_data.db"),
+              os.path.join(BASE_DIR, "kuaimai_data.db")):
+        if p and os.path.isfile(p) and os.path.abspath(p) not in [os.path.abspath(x) for x in cands]:
+            cands.append(p)
+    if not cands:
+        raise RuntimeError("找不到订单库（货位索引读不到）")
+    cands.sort(key=lambda p: -os.path.getsize(p))     # 大的更可能是真库，空库排后面
+    best = None
+    for p in cands:
+        try:
+            conn = kuaimai_db.connect(p, check_same_thread=True)
+            try:
+                m = kuaimai_db.load_shelf(conn) or {}
+            finally:
+                conn.close()
+            if m:
+                return m
+            if best is None:
+                best = m
+        except Exception:
+            continue
+    if best is not None:
+        raise RuntimeError("订单库里没有货位数据（请先在主程序「刷新货位库存」）")
+    raise RuntimeError("订单库都读不开（货位索引读不到）")
+
+
+def start_auto_putaway_watcher(session=None, shelf_map_getter=None):
+    """自动上架（推荐货位）监听放进主程序 daemon 线程。
+
+    · 纯开放平台 API：`erp.purchase.shelf.query/get/save` + 本地货位索引，**不用浏览器**；
+    · 只在**主客户端**跑（子端没有开放平台 API 配置）；
+    · 开关与间隔每轮从设置里重读 → 界面改了立刻生效，不用重启；
+    · 推荐不出货位的单**整张跳过**，只记日志等人工，绝不乱猜货位。
+    """
+    if _WEB_STATE.get("auto_putaway_thread") is not None:
+        return _WEB_STATE.get("auto_putaway_thread")
+    mode = str(getattr(session, "mode", "") or "")
+    if session is not None and mode != "host":
+        print_jobs_log("自动上架只在主客户端运行（子端没有 API 配置）")
+        return None
+    try:
+        import auto_putaway as ap
+    except Exception as e:
+        print_jobs_log("自动上架模块加载失败：%s" % str(e)[:120])
+        return None
+
+    def api(method, biz, timeout=60):
+        return api_call_authed(method, biz, timeout=timeout)
+
+    def getter():
+        if shelf_map_getter is not None:
+            try:
+                m = shelf_map_getter() or {}
+                if m:
+                    return m
+            except Exception:
+                pass
+        return _load_shelf_map_now()
+
+    stop = threading.Event()
+    _WEB_STATE["auto_putaway_stop"] = stop
+
+    def run():
+        try:
+            ap.watch(api=api, shelf_map_getter=getter, stop_event=stop,
+                     log_path=os.path.join(BASE_DIR, "auto_putaway.log"),
+                     is_on=lambda: auto_putaway_conf()[0])
+        except BaseException:
+            pass
+
+    t = threading.Thread(target=run, daemon=True, name="auto-putaway-watcher")
+    _WEB_STATE["auto_putaway_thread"] = t
+    t.start()
+    _on, _secs = auto_putaway_conf()
+    print_jobs_log("自动上架监听已启动（开关 %s，每 %d 秒查一次待上架单）"
+                   % ("开" if _on else "关", _secs))
+    return t
+
+
 def start_auto_print_watcher(db_path=None, session=None):
     """把「打单」监听放进主程序的 daemon 线程（不再另发一个 exe）。
 
@@ -7879,7 +8063,7 @@ def main():
     try:
         session._port = int(_WEB_STATE.get("port") or WEB_PORT)
         root.deiconify()
-        ScanApp(root, session)
+        app = ScanApp(root, session)
         try:
             session.start_heartbeat()
         except Exception:
@@ -7889,6 +8073,12 @@ def main():
             # 主端没设身份时保持原来的「读本机 scan_record」模式。
             start_auto_print_watcher(DB_FILE if session.mode == "host" else None,
                                      session=session)
+        except Exception:
+            pass
+        try:
+            # 自动上架（推荐货位）：独立开关 + 可调间隔，纯开放平台 API（只在主客户端跑）
+            start_auto_putaway_watcher(
+                session, shelf_map_getter=lambda: getattr(app, "shelf_map", {}) or {})
         except Exception:
             pass
         _note_login(session.name, session.role, session.mode)
