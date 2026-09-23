@@ -1,10 +1,10 @@
 {
-  "version": "v1.27",
-  "notes": "打印分工「不自动打」彻底不推送（重要安全修复）：\n以前账号设了「不自动打」，取用时可能会落回「默认」那台电脑，网页点「可发」照样打单出来。\n现在：明确设「不自动打」的账号 → 网页可发也**不推送到任何电脑**、不建任务、任何电脑都不会认领（判定加有效电脑名白名单，非法/空值一律不派发）。\n另含：打单进度面板新增「暂停/恢复自动打单」按钮；打单页改按剩余时间排序（更快）；退款/售后单自动跳过。",
+  "version": "v1.28",
+  "notes": "防「多打单」（重要）：修复 178 单任务却多打 24 单的问题。\n① 大批量核对窗口按单量放大（原来固定 60 秒，178 单根本减不完→被误判失败）；\n② 部分成功也先记「已打」，重试不再重复出纸（多打的 24 张就是这条堵住的）；\n③ 跨机共享「已打订单」：两台电脑不会再各打一遍同一单；\n④ 打单期间心跳，长任务不再被超时回收后由别的电脑重领重打。\n另含上期：不自动打彻底不推送、进度面板暂停按钮、按剩余时间排序、退款单跳过。",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.27/kuaimai-scan-setup-v1.27.exe",
-  "sha256": "31794bfd1f54930e2722603fcd54fc399bd724ea27ae9f5930c15309d3028003",
-  "size": 28473054,
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.28/kuaimai-scan-setup-v1.28.exe",
+  "sha256": "cb033c972bacae6d1aa91b727e28433bb396afdf3d6ca1c01d2b9738dba5c4ec",
+  "size": 28476170,
   "mandatory": false,
-  "published_at": "2026-09-23 19:40"
+  "published_at": "2026-09-23 20:44"
 }
