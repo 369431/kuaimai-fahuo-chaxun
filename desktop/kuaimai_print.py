@@ -607,8 +607,13 @@ def do_print(code, want, dry_run=True, page_size=None, check_only=False, verdict
     真打时：**只有核对通过才记去重记忆**；失败时 logs 首行是「！！打印失败：…」，调用方据此判失败。
     注意：**不自动标「已打」**，由人工确认出纸后自己标。
     """
-    if page_size is None:                  # 按需要的单量缩短查询：want×3（至少 60，最多 500）
-        page_size = min(500, max(60, int(want or 0) * 3))
+    if page_size is None:
+        # 拉**全量候选**（500 = ERP 单次上限）。原先按 want×3 缩短（50 张→150 单），
+        # 但接口返回顺序**不是**剩余时间序（field/order 排序参数实测无效），负数/超时单
+        # 散落在 150 名之后 → 没进候选池，后面按剩余时间排序也救不回来
+        # （实测 2026-09-23：288 单里 79 个负剩余全是加急；截断到前 150 时挑出 50 单含 0 个负数）。
+        # 一次请求即可（pageSize=500），不比 pageSize=150 多花时间；且与预览共用同一 page_size 缓存。
+        page_size = MAX_BATCH
     _tm_reset()
     report_progress(reset=True, code=str(code), want=int(want or 0), picked=0, phase="开始",
                     checked=0, page=0, ok=None,
@@ -2439,7 +2444,7 @@ def ensure_browser(auto_start=True):
 
 def preview(code, want):
     """预演：只列会打哪几单、为什么，不取号不出纸。"""
-    orders = fetch_orders_live(code, page_size=min(500, max(60, int(want or 0) * 3)))
+    orders = fetch_orders_live(code, page_size=MAX_BATCH)   # 全量候选：截断会让「剩余时间优先」失效
     print("编码 %s | 要打 %s 单 | 实时查到 %d 单" % (code, want, len(orders)))
     for o in orders:
         can, why = is_single_item(o.get("items") or [])
