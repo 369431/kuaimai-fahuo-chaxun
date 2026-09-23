@@ -48,6 +48,13 @@ CREATE TABLE IF NOT EXISTS print_jobs(
   created_at TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_print_jobs_state ON print_jobs(status, target_client);
+-- 跨机共享的「已打订单」（防两台电脑把同一单各打一遍，2026-09-23）
+CREATE TABLE IF NOT EXISTS printed_sids(
+  sid TEXT PRIMARY KEY,
+  out_sid TEXT DEFAULT '',
+  client TEXT DEFAULT '',
+  ts INTEGER DEFAULT 0
+);
 """
 
 
@@ -205,6 +212,56 @@ def reclaim(conn, timeout=CLAIM_TIMEOUT, max_tries=MAX_TRIES):
         (cut, int(max_tries))).rowcount
     conn.commit()
     return n1, n2
+
+
+def heartbeat(conn, job_id, client):
+    """打单期间的心跳：刷新 claim_ts，防止长任务被 reclaim() 超时回收 → 被别的电脑重领重打。
+
+    只对「本机正在打的那条」生效（WHERE claimed_by=?），不影响别人。
+    """
+    init(conn)
+    try:
+        cur = conn.execute(
+            "UPDATE print_jobs SET claim_ts=? WHERE job_id=? AND claimed_by=? "
+            "AND status IN ('claimed','printing')",
+            (int(time.time()), int(job_id), str(client)))
+        conn.commit()
+        return cur.rowcount
+    except Exception:
+        return 0
+
+
+def mark_printed(conn, sids, out_sids=None, client="", keep_days=30):
+    """把「已出纸的订单」记进**主端权威**共享表（跨机防重）。返回写入条数。
+
+    与 scan_record.printed 无关：那是人工确认标记，这是自动链路自己的去重账本。
+    """
+    init(conn)
+    now = int(time.time())
+    n = 0
+    for s in (sids or []):
+        s = str(s or "").strip()
+        if not s:
+            continue
+        out = str((out_sids or {}).get(s) or "")
+        conn.execute("INSERT OR REPLACE INTO printed_sids(sid,out_sid,client,ts) VALUES(?,?,?,?)",
+                     (s, out, str(client), now))
+        n += 1
+    if n:
+        cut = now - int(keep_days) * 86400
+        conn.execute("DELETE FROM printed_sids WHERE ts < ?", (cut,))
+    conn.commit()
+    return n
+
+
+def printed_sids(conn, keep_days=30):
+    """主端权威的「已打订单」表：{sid: {outSid}}（供各端打单前同步，跨机防重）。"""
+    init(conn)
+    cut = int(time.time()) - int(keep_days) * 86400
+    out = {}
+    for r in conn.execute("SELECT sid, out_sid FROM printed_sids WHERE ts >= ?", (cut,)):
+        out[str(r["sid"])] = {"outSid": str(r["out_sid"] or "")}
+    return out
 
 
 def live_view(conn):

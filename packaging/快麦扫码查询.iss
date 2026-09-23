@@ -11,7 +11,7 @@
 ; 占位符：build.ps1 会 /DMyAppVersion=… 传进来；不传则用下面这行默认值。
 
 #ifndef MyAppVersion
-  #define MyAppVersion "1.27"
+  #define MyAppVersion "1.28"
 #endif
 
 #define MyAppName "快麦扫码查询"

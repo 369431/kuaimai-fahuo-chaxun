@@ -495,6 +495,37 @@ def remember_printed(sids, outSids=None, keep_days=30):
     return mem
 
 
+def merge_printed_memory(d, keep_days=30):
+    """把主端**共享**的「已打订单」并进本机去重记忆（跨机防重，2026-09-23）。
+
+    跨机场景：两台电脑身份相同（或旧版空派单）时，同一单可能被两台各打一遍。
+    主端权威库记着「谁打过哪些 sid」，各端打单前同步下来 → 第二台会跳过。
+    返回新增条数（已存在的不覆盖，保留本机自己的 ts）。
+    """
+    mem = load_printed_memory()
+    now = time.time()
+    added = 0
+    for k, v in (d or {}).items():
+        k = str(k)
+        if not k or k in mem:
+            continue
+        out = str((v or {}).get("outSid") or "") if isinstance(v, dict) else str(v or "")
+        mem[k] = {"ts": now, "outSid": out}
+        added += 1
+    if not added:
+        return 0
+    cut = now - float(keep_days) * 86400
+    mem = {k: v for k, v in mem.items() if float((v or {}).get("ts") or 0) >= cut}
+    try:
+        os.makedirs(os.path.dirname(PRINT_MEMO), exist_ok=True)
+        with open(PRINT_MEMO, "w", encoding="utf-8") as f:
+            json.dump(mem, f, ensure_ascii=False)
+    except Exception:
+        return 0
+    _CACHE.pop("printed", None)
+    return added
+
+
 def _printed_set():
     s = _cache_get("printed", 30)          # 本机打印记忆（30 秒缓存）
     if s is None:
@@ -733,8 +764,17 @@ def do_print(code, want, dry_run=True, page_size=None, check_only=False, verdict
     # 成败判定：必须「点到了打印」**且**「核对确认离开未打印队列」才算成功
     # 只有「真的点了打印」**且**「打印后核对确认离开未打印队列」才算成功 → 才写去重记忆。
     # check_only（只勾选验证）与任何失败路径**都不写**（旧版 exe 无条件写 → 会把没打印的单误记）。
+    _gone_n = int(v.get("gone") or 0)
     printed_ok = ((not check_only) and bool(v.get("clicked"))
-                  and (v.get("verified") is True) and (int(v.get("gone") or 0) > 0))
+                  and (v.get("verified") is True) and (_gone_n > 0))
+    # ★ 部分成功也要记去重记忆（防「重试重打」，2026-09-23）：
+    #   大批量核对窗口内 ERP 队列是慢慢减的，整批未必在窗口内减完 → 任务被判失败退回队列；
+    #   这时若不记「已出纸的单」，重试会把它们再打一遍（实测 178 单任务重试又打 24 张）。
+    #   只记「核对确认已离开未打印队列」且**队列读全**(complete) 的单 —— 读不全时宁可少记，
+    #   绝不错记（错记会导致漏打）。
+    _partial = []
+    if (not check_only) and bool(v.get("clicked")) and v.get("verify_complete"):
+        _partial = [s for s in (v.get("gone_sids") or []) if s]
     if printed_ok:
         logs.append("打印结果: 成功（已离开未打印队列 %s/%s）" % (v.get("gone"), v.get("checked")))
         report_progress(phase="完成", ok=True, checked=int(v.get("checked") or 0),
@@ -744,11 +784,20 @@ def do_print(code, want, dry_run=True, page_size=None, check_only=False, verdict
             logs.append("已记入本机去重记忆：%d 单" % len(ok_sids))
         except Exception as e:
             logs.append("去重记忆写入失败：%s" % str(e)[:80])
+        v["printed_sids"] = [s for s in ok_sids if s]
     else:
         why = v.get("reason") or ("没点到打印" if not v.get("clicked") else "队列未变化")
         report_progress(phase="失败", ok=False, checked=int(v.get("checked") or 0),
                         msg="打单失败：%s" % str(why)[:150])
-        logs.append("打印结果: 失败（%s）→ **未记去重记忆**，下次还会选中这些单" % str(why)[:80])
+        if _partial:
+            try:                           # 已出纸的那批先记下 → 重试不再打它们
+                remember_printed(_partial, gc.get("ok") or {})
+                logs.append("部分成功：已离开队列 %d 单已记入去重记忆（重试不会再打这些）"
+                            % len(_partial))
+            except Exception as e:
+                logs.append("部分成功后记去重记忆失败：%s" % str(e)[:80])
+        v["printed_sids"] = _partial
+        logs.append("打印结果: 失败（%s）→ 未离开队列的单下次还会重试" % str(why)[:80])
         if not any(str(x).startswith("！！打印失败") for x in logs):
             logs.insert(0, "！！打印失败：%s" % str(why)[:120])
     logs.append(_tm_line())
@@ -1970,7 +2019,16 @@ def verify_printed(code, sids, logs=None, max_secs=PRINT_VERIFY_SECS, page_size=
     if not total:
         return {"ok": False, "still": 0, "gone": 0, "total": 0, "why": "没有要核对的单"}
     t0 = time.time()
-    last = {"ok": False, "still": total, "gone": 0, "total": total, "why": ""}
+    # ★ 渐进判定（2026-09-23）：大批量（如 178 单）出纸时，ERP 队列是**一批批**减少的
+    #   （实测 70/178 → 80/178 → …），固定 60 秒窗口会把「其实打成功了」判成失败 →
+    #   任务退回队列 → 重试又打一遍（实测多打 24~48 张）。现在：
+    #   · 总窗口按单量放大（每单 1.5s，最少 max_secs，最多 300s）；
+    #   · 只要队列还在减少（gone 在增加）就持续续期，不再因「还没减完」判失败。
+    limit = max(float(max_secs), min(300.0, float(total) * 1.5))
+    last = {"ok": False, "still": total, "gone": 0, "total": total,
+            "gone_sids": [], "still_sids": [], "complete": None, "why": ""}
+    prog_ts = t0            # 最近一次「队列还在减少」的时刻
+    best_gone = 0
     while True:
         # 优先「按 sid 精确查」（实测快约 7 倍）；任何异常 → 回退全量翻页（保守，不据此判成功）
         cur, err, complete, n = fetch_queue_sids_by_ids(sorted(want), batch=100)
@@ -1982,12 +2040,17 @@ def verify_printed(code, sids, logs=None, max_secs=PRINT_VERIFY_SECS, page_size=
             q_total = len(want)
         if err:
             last = {"ok": False, "still": total, "gone": 0, "total": total,
+                    "gone_sids": [], "still_sids": [], "complete": None,
                     "why": "核对时读队列失败：%s" % err}
             logs.append("  打印后核对(+%.0fs): 读队列失败 %s" % (time.time() - t0, err))
         else:
             still, gone = want & cur, want - cur
             last = {"ok": (not still) and complete, "still": len(still), "gone": len(gone),
-                    "total": total, "why": ""}
+                    "total": total, "gone_sids": sorted(gone), "still_sids": sorted(still),
+                    "complete": bool(complete), "why": ""}
+            if len(gone) > best_gone:                  # 队列还在减少 → 续期
+                best_gone = len(gone)
+                prog_ts = time.time()
             logs.append("  打印后核对(+%.0fs)[%s]: 已离开队列 %d/%d，仍在队列 %d%s"
                         % (time.time() - t0, mode, len(gone), total, len(still),
                            "" if complete else "（未读全：队列共 %s 条，读到 %d 条）"
@@ -1998,10 +2061,15 @@ def verify_printed(code, sids, logs=None, max_secs=PRINT_VERIFY_SECS, page_size=
             if (not still) and (not complete):
                 last["why"] = ("队列未读全（共 %s 条，读到 %d 条）→ 无法确认是否出纸"
                                 % (q_total if q_total is not None else "?", n))
-        if (time.time() - t0) >= float(max_secs):
+        _now = time.time()
+        # 结束条件：到总窗口上限；或（已过基础窗口 且 基础窗口内无任何进展）
+        if (_now - t0) >= limit or ((_now - t0) >= float(max_secs)
+                                    and (_now - prog_ts) >= float(max_secs)):
             if not last.get("why"):
                 last["why"] = ("ERP 队列未变化" if last.get("still") == total
                                else "仍有 %d/%d 单在未打印队列" % (last.get("still"), total))
+            logs.append("  核对结束：窗口 %.0fs（单量 %d，已离开 %d）"
+                        % (_now - t0, total, last.get("gone") or 0))
             return last
         time.sleep(float(interval))
 
@@ -2396,6 +2464,10 @@ def _print_one_batch(c, code, sids, shorts, logs, v, wait_rows=12.0, check_only=
     v["verified"] = bool(r.get("ok"))
     v["still_unprinted"] = r.get("still")
     v["gone"] = r.get("gone")
+    # 跨批累积「已离开 / 仍在」的 sid：do_print 据此记去重记忆（防重试重打，2026-09-23）
+    v["gone_sids"] = list(v.get("gone_sids") or []) + list(r.get("gone_sids") or [])
+    v["still_sids"] = list(r.get("still_sids") or [])
+    v["verify_complete"] = r.get("complete")
     v["reason"] = r.get("why") or ""
     logs.append("打印后核对结论: %s（已离开队列 %s/%s）" % (
         "成功" if r.get("ok") else "失败", r.get("gone"), r.get("total")))
@@ -2426,7 +2498,9 @@ def print_selected(code, sids, shorts=None, wait_rows=12.0, check_only=False, ve
     v.update({"clicked": False, "checked": 0, "model_count": None, "verified": None,
               "still_unprinted": None, "gone": None, "reason": "",
               "page_size": None, "page_size_max": None, "page_size_ok": None,
-              "rows_window": 0, "rows_total": None, "batches": 1})
+              "rows_window": 0, "rows_total": None, "batches": 1,
+              "gone_sids": [], "still_sids": [], "verify_complete": None,
+              "printed_sids": []})
     sids = [s for s in (sids or []) if s]
     shorts = list(shorts or [])
     if len(shorts) < len(sids):

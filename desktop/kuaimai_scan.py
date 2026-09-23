@@ -2936,6 +2936,21 @@ class _WebHandler(BaseHTTPRequestHandler):
                 if not self._can(me, "desktop.admin"):
                     return self._deny("desktop.admin")
                 return self._json(self._devices_payload())
+            if parsed.path == "/api/print/memory":
+                # 跨机共享的「已打订单」：各端打单前同步下来，合并进本机去重记忆。
+                # 防两台电脑身份相同（或旧版空派单）时把同一单各打一遍。
+                deny = self._need(me, "scan.printed")
+                if deny:
+                    return deny
+                try:
+                    import kuaimai_print_jobs as pj
+                    conn = pj.connect(DB_FILE)
+                    try:
+                        return self._json({"ok": True, "sids": pj.printed_sids(conn)})
+                    finally:
+                        conn.close()
+                except Exception as e:
+                    return self._json({"error": "共享去重记忆失败：%s" % str(e)[:120]}, 500)
             if parsed.path == "/api/print/stats":
                 # 打单任务看板（各端/各状态计数）
                 _me = self._auth(urllib.parse.parse_qs(parsed.query))
@@ -3234,6 +3249,41 @@ class _WebHandler(BaseHTTPRequestHandler):
                 except Exception as e:
                     return self._json({"error": "回写失败：%s" % str(e)[:120]}, 500)
                 return self._json({"ok": True, "job_id": job_id})
+            if path == "/api/print/memory":
+                # 打完把「已出纸的 sid」报上来 → 写进主端权威库（供所有电脑同步，跨机防重）
+                deny = self._need(me, "scan.printed")
+                if deny:
+                    return deny
+                sids = body.get("sids") or []
+                if isinstance(sids, (str, int)):
+                    sids = [sids]
+                try:
+                    import kuaimai_print_jobs as pj
+                    conn = pj.connect(DB_FILE)
+                    try:
+                        n = pj.mark_printed(conn, list(sids), body.get("out_sids") or {},
+                                            client=str(body.get("client") or ""))
+                    finally:
+                        conn.close()
+                except Exception as e:
+                    return self._json({"error": "共享去重记忆失败：%s" % str(e)[:120]}, 500)
+                return self._json({"ok": True, "marked": n})
+            if path == "/api/print/heartbeat":
+                # 打单期间心跳：刷新 claim_ts，防长任务被超时回收后别的电脑重领重打
+                deny = self._need(me, "scan.printed")
+                if deny:
+                    return deny
+                try:
+                    import kuaimai_print_jobs as pj
+                    conn = pj.connect(DB_FILE)
+                    try:
+                        n = pj.heartbeat(conn, int(body.get("job_id")),
+                                         str(body.get("client") or ""))
+                    finally:
+                        conn.close()
+                except Exception as e:
+                    return self._json({"error": "心跳失败：%s" % str(e)[:120]}, 500)
+                return self._json({"ok": True, "refreshed": n})
             if path == "/api/print/jobs_add":
                 # 提交一个打单任务（主端权威）：按 print_clients.json 的账号映射决定派给谁
                 deny = self._need(me, "scan.printed")

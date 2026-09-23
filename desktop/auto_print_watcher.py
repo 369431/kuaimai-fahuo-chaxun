@@ -266,6 +266,69 @@ def _classify_no_pick(code):
     return False, "挑不到可打单（队列 %d 单，均不符合「一单一件/同编码」）" % qcount
 
 
+def _sync_shared_memory(api):
+    """打单前把主端权威库的「已打订单」同步下来，合并进本机去重记忆（跨机防重）。
+
+    跨机场景：两台电脑身份相同（或旧版空派单）时，同一单可能被两台各打一遍。
+    同步后本机 pick_orders 的 _printed_set() 会跳过别台打过的单。
+    """
+    try:
+        ok, res = api("/api/print/memory", "GET", timeout=20)
+        if not ok or not isinstance(res, dict) or res.get("error"):
+            return 0
+        n = K.merge_printed_memory(res.get("sids") or {})
+        if n:
+            log("  跨机去重：同步了 %d 单（别台已打，本次不再打）" % n)
+        return n
+    except BaseException as e:
+        log("  跨机去重同步失败（不影响打单）：%s" % str(e)[:120])
+        return 0
+
+
+def _report_printed(api, client, sids, out_sids=None):
+    """把本次**确证已出纸**的 sid 报给主端权威库（供别的电脑同步，跨机防重）。"""
+    sids = [s for s in (sids or []) if s]
+    if not sids:
+        return 0
+    try:
+        ok, res = api("/api/print/memory", "POST",
+                      body={"client": client, "sids": sids, "out_sids": out_sids or {}}, timeout=20)
+        if ok and isinstance(res, dict) and not res.get("error"):
+            log("  跨机去重：已上报 %s 单（别台不会再打）" % (res.get("marked") or len(sids)))
+            return int(res.get("marked") or 0)
+        log("  跨机去重上报失败：%s" % _err_text(res))
+    except BaseException as e:
+        log("  跨机去重上报异常：%s" % str(e)[:120])
+    return 0
+
+
+class _Heartbeat(object):
+    """打单期间每 60s 上报一次心跳（刷新 claim_ts），防止长任务被 reclaim() 超时回收
+    → 被别的电脑重新认领后重打（2026-09-23）。"""
+
+    def __init__(self, api, client, job_id, every=60.0):
+        self.api, self.client, self.jid = api, client, job_id
+        self.every = float(every)
+        self._stop = threading.Event()
+        self._t = None
+
+    def __enter__(self):
+        def loop():
+            while not self._stop.wait(self.every):
+                try:
+                    self.api("/api/print/heartbeat", "POST",
+                             body={"job_id": int(self.jid), "client": self.client}, timeout=15)
+                except BaseException:
+                    pass
+        self._t = threading.Thread(target=loop, daemon=True)
+        self._t.start()
+        return self
+
+    def __exit__(self, *a):
+        self._stop.set()
+        return False
+
+
 def _report(api, client, job_id, ok, msg="", out_sid=""):
     """回写结果；回写本身失败就写日志（任务在主端会超时回收，不会丢）。"""
     try:
@@ -307,8 +370,10 @@ def _do_claim_one(api, client, job):
             _report(api, client, jid, False, "浏览器未就绪：%s" % str(msg)[:160])
             return
         verdict = {}
+        _sync_shared_memory(api)               # 先同步别台已打的单（跨机防重）
         _t_job = time.time()
-        picked, skipped, logs = K.do_print(code, qty, dry_run=False, verdict=verdict)
+        with _Heartbeat(api, client, jid):     # 打单期间心跳，防超时回收被别台重领
+            picked, skipped, logs = K.do_print(code, qty, dry_run=False, verdict=verdict)
         _job_secs = time.time() - _t_job
         good, why = _job_verdict(picked, logs)
         if good is None:                       # 0 单：必须分类，**绝不判 done**
@@ -318,6 +383,10 @@ def _do_claim_one(api, client, job):
                                       " | ".join(str(x)[:140] for x in (logs or []) if x not in _tmline)))
         for _t in _tmline:          # 耗时分解单独整行：别被上面的 140 字截断（实测被砍掉尾巴）
             log("  " + str(_t))
+        # 把「确证已出纸」的 sid 报给主端权威库（跨机防重，成功/部分成功都报）
+        _printed = [s for s in (verdict.get("printed_sids") or []) if s]
+        if _printed:
+            _report_printed(api, client, _printed, {})
         if good:
             sid = _extract_out_sid(picked)
             log("  任务 #%s 完成：%s%s" % (jid, why, ("（运单号 %s）" % sid) if sid else ""))
