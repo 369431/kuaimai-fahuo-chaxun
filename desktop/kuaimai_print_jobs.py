@@ -29,6 +29,7 @@ from datetime import datetime
 
 CLAIM_TIMEOUT = 300        # 认领后多久没回写算超时（秒）
 MAX_TRIES = 3
+DUP_WINDOW = 60            # 同编码去重窗口（秒）：队列里已有未完成、或窗口内刚打完 → 不再建新任务
 
 DDL = """
 CREATE TABLE IF NOT EXISTS print_jobs(
@@ -95,6 +96,70 @@ def add_job(conn, code, qty, who="", target_client="", msg=""):
          datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     conn.commit()
     return cur.lastrowid
+
+
+def dup_reason(conn, code, window_secs=None):
+    """这条提交该不该被当作「重复」挡下；算重复就返回给人看的说明，否则返回 ''。
+
+    用户口径（2026-09-23）：**同一编码短时间内被提交多次**会各建一个任务、各打一遍
+    （实测 9681-燕麦色S ×5 提交 3 次 → #16/#17/#18 各打 5 张 = 15 张）。判定两条：
+      1) 同编码**已有未完成任务**（pending/claimed/printing）→ 队列里还没打完，别再加一个；
+      2) 同编码**窗口内刚打完**（done 且 done_ts 在窗口内）→ 大概率是误触/重试，别又打一遍。
+    窗口内的追加打印需求会被挡（用户已知并选择这个取舍）；确要追加用 force=True 绕过。
+
+    调用方必须先 init(conn)；本函数不做 DDL（要在事务里跑）。
+    """
+    c = str(code or "").strip()
+    if not c:
+        return ""
+    w = DUP_WINDOW if window_secs is None else int(window_secs)
+    now = int(time.time())
+    r = conn.execute("SELECT job_id,status FROM print_jobs "
+                     "WHERE code=? AND status IN ('pending','claimed','printing') "
+                     "ORDER BY job_id LIMIT 1", (c,)).fetchone()
+    if r:
+        return "该编码已有未完成任务 #%s（%s）" % (r["job_id"], r["status"])
+    r = conn.execute("SELECT job_id,done_ts FROM print_jobs "
+                     "WHERE code=? AND status='done' AND done_ts>=? "
+                     "ORDER BY done_ts DESC LIMIT 1", (c, now - w)).fetchone()
+    if r:
+        return "该编码 %d 秒内刚打完（任务 #%s）" % (now - int(r["done_ts"] or now), r["job_id"])
+    return ""
+
+
+def add_job_checked(conn, code, qty, who="", target_client="", msg="",
+                    window_secs=None, force=False):
+    """建任务 + 去重（查与插在同一把 BEGIN IMMEDIATE 里，防并发双建）。
+
+    返回 (job_id, reason)：reason == '' 表示**已建**（job_id > 0）；
+    否则 job_id == 0、reason 是「为什么没建」（直接显示给网页/写日志）。
+    force=True 时跳过去重（人工确认要追加时用）。
+    """
+    init(conn)
+    c = str(code or "").strip()
+    old_level = conn.isolation_level
+    conn.isolation_level = None                      # 手动事务
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        why = "" if force else dup_reason(conn, c, window_secs)
+        if why:
+            conn.execute("COMMIT")
+            return 0, why
+        cur = conn.execute(
+            "INSERT INTO print_jobs(code,qty,who,target_client,status,last_msg,created_at) "
+            "VALUES(?,?,?,?,'pending',?,?)",
+            (c, int(qty), str(who), str(target_client), str(msg)[:200],
+             datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        conn.execute("COMMIT")
+        return cur.lastrowid, ""
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.isolation_level = old_level
 
 
 def _parse_sids(raw):

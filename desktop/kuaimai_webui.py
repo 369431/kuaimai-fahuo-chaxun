@@ -311,7 +311,8 @@ async function sendFree(undo){
     if(!r.ok||!j.ok){ alert('保存失败：'+((j&&j.error)||('HTTP '+r.status))); return; }
     if($('rfreeMsg')){
       $('rfreeMsg').textContent = undo ? ('已撤回：'+code+'（电脑端不会出现这条）')
-        : ('已提交：'+code+' 可发 '+$('rqty').value+' 件，'+(window.KM_HOLD||10)+' 秒内点「撤回」就不写进电脑端');
+        : (j.dup ? ('已记可打单，但'+j.dup_msg+'：本次未新建打单任务（避免重复出纸）')
+        : ('已提交：'+code+' 可发 '+$('rqty').value+' 件，'+(window.KM_HOLD||10)+' 秒内点「撤回」就不写进电脑端'));
     }
     if($('btnFreeUndo')) $('btnFreeUndo').style.display = undo ? 'none' : '';
     beep(!undo);
@@ -1362,8 +1363,12 @@ function render(){
                                   pending: row.p || 0, shelf: row.s || 0})})
             .then(function(r2){ return r2.json(); })
             .then(function(j){
-              if(j && j.ok){ flash('已记可打单：' + code + ' ' + q + '（电脑端扫码记录已更新）'); }
-              else { flash('记录失败：' + ((j && j.msg) || '未知')); alert('没能写入扫码记录：' + ((j && j.msg) || '未知')); }
+              if(j && j.ok){
+                if(j.dup){ flash('已记可打单：' + code + ' ' + q + '，但' + j.dup_msg
+                                 + '：本次未新建打单任务（避免重复出纸）'); }
+                else { flash('已记可打单：' + code + ' ' + q + '（电脑端扫码记录已更新）'); }
+              }
+              else { flash('记录失败：' + ((j && (j.msg || j.error)) || '未知')); alert('没能写入扫码记录：' + ((j && (j.msg || j.error)) || '未知')); }
             })
             .catch(function(){ flash('网络错误，扫码记录未写入'); });
         }

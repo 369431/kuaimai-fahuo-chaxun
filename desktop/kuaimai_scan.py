@@ -3309,11 +3309,15 @@ class _WebHandler(BaseHTTPRequestHandler):
                                                     "或用 target 明确指定"}, 400)
                     conn = pj.connect(DB_FILE)
                     try:
-                        jid = pj.add_job(conn, code, qty, who=who, target_client=tgt)
+                        jid, why = pj.add_job_checked(conn, code, qty, who=who,
+                                                      target_client=tgt,
+                                                      force=bool(body.get("force")))
                     finally:
                         conn.close()
                 except Exception as e:
                     return self._json({"error": "建任务失败：%s" % str(e)[:120]}, 500)
+                if not jid:
+                    return self._json({"error": why, "dup": True}, 409)
                 return self._json({"ok": True, "job_id": jid, "target_client": tgt})
             if path == "/api/print/jobs_del":
                 # 删除打单任务（主端权威）：job_id 单条 / ids 列表 / status 批量（如清空 failed）。
@@ -3395,6 +3399,7 @@ class _WebHandler(BaseHTTPRequestHandler):
                 # 同一条路径上再建一个打单任务（主端权威）：按 print_clients.json 派给对应电脑，
                 # 各端启动后向本机主端认领 → 打单 → 回写（一台只打一次）。
                 # 「桌面版」自己扫的记录不建任务（那是电脑端人工点数字才打）。
+                dup = ""                      # 非空 = 重复提交、本次没建任务（回给网页提示）
                 if not who.startswith("桌面版"):
                     try:
                         import kuaimai_print_jobs as pj
@@ -3408,15 +3413,26 @@ class _WebHandler(BaseHTTPRequestHandler):
                         else:
                             _pc = pj.connect(DB_FILE)
                             try:
-                                jid = pj.add_job(_pc, code, qty, who=who, target_client=tgt,
-                                                 msg="网页提交")
+                                jid, _why = pj.add_job_checked(_pc, code, qty, who=who,
+                                                               target_client=tgt,
+                                                               msg="网页提交",
+                                                               force=bool(body.get("force")))
                             finally:
                                 _pc.close()
-                            print_jobs_log("建任务 #%s：%s ×%s（来源 %s → %s）"
-                                           % (jid, code, qty, who or "-", tgt))
+                            if jid:
+                                print_jobs_log("建任务 #%s：%s ×%s（来源 %s → %s）"
+                                               % (jid, code, qty, who or "-", tgt))
+                                dup = ""
+                            else:
+                                # 重复提交（同编码已在队列 / 窗口内刚打完）→ 不建第二个任务，
+                                # 否则每次都各自去打一遍同一编码（实测 9681 ×5 提交 3 次打了 3 遍）
+                                dup = str(_why or "重复提交")
+                                print_jobs_log("不建任务（重复提交）：%s ×%s（来源 %s）→ %s"
+                                               % (code, qty, who or "-", dup))
                     except Exception as e:
                         print_jobs_log("建任务失败（扫码记录已写，不影响提交）：%s" % str(e)[:120])
-                return self._json({"ok": True, "code": code, "qty": qty, "hold": hold})
+                return self._json({"ok": True, "code": code, "qty": qty, "hold": hold,
+                                   "dup": bool(dup), "dup_msg": (dup or None)})
             if path == "/api/stock/adjust":
                 # 改库存（盘点接口，按货位）。必须带 confirm 二次确认，改完写操作日志。
                 try:
