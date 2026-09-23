@@ -242,9 +242,14 @@ def _verify_done(api, we_code):
     return False, "未在已完成列表中找到（可能仍在处理）"
 
 
-def process_once(api, shelf_map, dry_run=False):
-    """跑一轮：返回本轮的 (处理单数, 成功上架单数, 跳过单数) 与日志文字列表。"""
+def process_once(api, shelf_map, dry_run=False, on_done=None):
+    """跑一轮：返回本轮的 (处理单数, 成功上架单数, 跳过单数) 与日志文字列表。
+
+    `on_done(codes)`：本轮**上架成功**涉及的商品编码（去重）会回调一次；
+    用于接「上架后自动智能审核」（用户在 kuaimai_scan 里接进来）。回调异常不影响上架。
+    """
     lines = []
+    done_codes = []
     orders, err = _query_pending(api)
     if err:
         lines.append("！！%s" % err)
@@ -317,21 +322,35 @@ def process_once(api, shelf_map, dry_run=False):
         if okv:
             lines.append("  单 %s（%s）**上架成功**：%s" % (sid, we, whyv))
             done += 1
+            for r in rows:
+                c = _up(r["outerId"])
+                if c and c not in done_codes:
+                    done_codes.append(c)
         else:
             lines.append("  单 %s（%s）接口返回成功，但核对未通过：%s"
                          "（请人工确认）" % (sid, we, whyv))
             done += 1
+            for r in rows:
+                c = _up(r["outerId"])
+                if c and c not in done_codes:
+                    done_codes.append(c)
+    if done_codes and on_done is not None:
+        try:
+            on_done(done_codes)
+        except BaseException as e:
+            lines.append("  ！！上架后处理失败（不影响上架）：%s" % str(e)[:150])
     return len(orders), done, skipped, lines
 
 
 def watch(api, shelf_map_getter, stop_event=None, log_path=None,
-          interval=None, dry_run=False, quiet=False, is_on=None):
+          interval=None, dry_run=False, quiet=False, is_on=None, on_done=None):
     """自动上架监听循环（放主程序 daemon 线程里跑）。
 
     api(method, business)  → 已鉴权的接口调用（主程序传 kuaimai_scan.api_call 的包装）
     shelf_map_getter()     → 返回当前货位索引（主程序传 lambda: self.shelf_map）
     is_on()                → 返回开关是否打开（每轮读设置，改设置不用重启）
     interval               → 固定间隔；None = 每轮从设置里读
+    on_done(codes)         → 上架成功后回调（主程序在这里接「自动智能审核」）
     """
     global _LOG_PATH
     if log_path:
@@ -364,7 +383,7 @@ def watch(api, shelf_map_getter, stop_event=None, log_path=None,
                 log("读货位索引失败（本轮跳过，不用空表乱推）：%s" % str(e)[:120])
                 _sleep(stop_event, iv)
                 continue
-            n, ok, skip, lines = process_once(api, smap, dry_run=dry_run)
+            n, ok, skip, lines = process_once(api, smap, dry_run=dry_run, on_done=on_done)
             for ln in lines:
                 log(ln)
             if lines and n:

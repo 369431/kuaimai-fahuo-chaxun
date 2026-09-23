@@ -7,8 +7,8 @@
 注意：
 - 传了 .spec 就**不能再传 --onefile / --onedir**（报 makespec options not valid when a .spec file is given）。
 - hiddenimports 必须带上「只在运行时 import」的自建模块（kuaimai_print / kuaimai_print_ui /
-  kuaimai_print_jobs / auto_print_watcher / auto_putaway），否则打出来的 exe 点「打单」或
-  开「自动上架」会 ModuleNotFoundError。
+  kuaimai_print_jobs / auto_print_watcher / auto_putaway / auto_audit），否则打出来的 exe 点「打单」或
+  开「自动上架」「上架后自动智能审核」会 ModuleNotFoundError。
   websocket = websocket-client，内联 CDP 连 9222 要用。
   ✅ 所以**不要**用 README 里那条裸 --onefile 命令打正式包。
 - 路径用 SPECPATH（spec 所在目录）推，换电脑/换目录都不用改。
@@ -32,7 +32,7 @@ a = Analysis(
                    'kuaimai_admin_panel', 'kuaimai_gateway', 'kuaimai_gateway_ui',
                    'kuaimai_update', 'kuaimai_update_ui', 'kuaimai_uikit',
                    'kuaimai_print', 'kuaimai_print_ui', 'kuaimai_print_jobs',
-                   'auto_print_watcher', 'auto_putaway'],
+                   'auto_print_watcher', 'auto_putaway', 'auto_audit'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

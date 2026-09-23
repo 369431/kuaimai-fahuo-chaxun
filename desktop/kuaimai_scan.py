@@ -5208,6 +5208,10 @@ class ScanApp:
                             increment=10, width=4, textvariable=self.ap_secs_var)
         _apsb.pack(side=tk.LEFT, padx=(6, 0))
         ttk.Label(_apbox, text="秒").pack(side=tk.LEFT, padx=(4, 0))
+        # 上架后自动智能审核（跟「自动上架」同一组，因为它是上架的后续动作）
+        self.auto_audit_var = tk.BooleanVar(value=self._auto_audit_on())
+        ttk.Checkbutton(_apbox, text="· 上架后自动智能审核", variable=self.auto_audit_var,
+                        command=self._toggle_auto_audit).pack(side=tk.LEFT, padx=(14, 0))
         for _ev in ("<FocusOut>", "<Return>", "<<Increment>>", "<<Decrement>>"):
             try:
                 _apsb.bind(_ev, lambda e: self._on_ap_secs())
@@ -5452,6 +5456,28 @@ class ScanApp:
             self.status_text.set("自动上架刷新间隔：%d 秒" % v)
         except Exception as e:
             self.status_text.set("保存刷新间隔失败：%s" % str(e)[:80])
+
+    # ---------- 上架后自动智能审核（上架的后续动作）----------
+    def _auto_audit_on(self):
+        try:
+            return auto_audit_conf()
+        except Exception:
+            return False
+
+    def _toggle_auto_audit(self):
+        """上架成功后要不要顺手把那批编码的待审核单智能审掉。
+
+        审的是 ERP 自己的审单规则（规则不放行的会留着），**不强制放行**。
+        需要打单浏览器（Edge 9222）在跑；没开就只记日志、不影响上架。
+        """
+        from tkinter import messagebox
+        try:
+            on = bool(self.auto_audit_var.get())
+            set_auto_audit_conf(on=on)
+            self.status_text.set("上架后自动智能审核：%s" % ("已开启" if on else "已关闭"))
+            print_jobs_log("上架后自动智能审核：%s" % ("已开启" if on else "已关闭"))
+        except Exception as e:
+            messagebox.showerror("自动审核", "切换失败：%s" % str(e)[:120])
 
     # ---------- 网页自动打单 总开关（与监听器共用「暂停文件」） ----------
     def _auto_pause_flag(self):
@@ -7806,6 +7832,7 @@ def auto_print_pause_flag():
 AUTO_PUTAWAY_DEFAULT_SECS = 60        # 默认间隔（秒）
 AUTO_PUTAWAY_MIN_SECS = 10
 AUTO_PUTAWAY_MAX_SECS = 3600
+AUTO_AUDIT_LOOKBACK_DAYS = 7          # 「上架后自动智能审核」找待审核单的回溯天数
 
 
 def auto_putaway_conf():
@@ -7832,6 +7859,25 @@ def set_auto_putaway_conf(on=None, secs=None):
         s["auto_putaway_secs"] = max(AUTO_PUTAWAY_MIN_SECS, min(AUTO_PUTAWAY_MAX_SECS, v))
     save_settings(s)
     return auto_putaway_conf()
+
+
+def auto_audit_conf():
+    """上架后自动智能审核 → 开关（默认 **关**）。
+
+    用户口径：「操作完上架单还要智能审核才能去打印快递单」。
+    只在上架成功且本开关打开时才触发；审核走 ERP 自己的审单规则（不强制放行）。
+    """
+    s = load_settings() or {}
+    return bool(s.get("auto_audit_on", False))
+
+
+def set_auto_audit_conf(on=None):
+    """写自动审核开关（只改这一个键，其他设置原样保留）。"""
+    s = load_settings() or {}
+    if on is not None:
+        s["auto_audit_on"] = bool(on)
+    save_settings(s)
+    return auto_audit_conf()
 
 
 def _load_shelf_map_now():
@@ -7907,11 +7953,38 @@ def start_auto_putaway_watcher(session=None, shelf_map_getter=None):
     stop = threading.Event()
     _WEB_STATE["auto_putaway_stop"] = stop
 
+    def on_done(codes):
+        """上架成功后：若开了「上架后自动智能审核」→ 把这批编码的待审核单智能审掉。
+
+        用户口径：「操作完上架单还要智能审核才能去打印快递单」。
+        **未开开关就直接返回**（不影响上架）；审核异常也不影响上架（process_once 已兜住）。
+        """
+        if not auto_audit_conf():
+            return
+        try:
+            import auto_audit as aa
+        except Exception as e:
+            print_jobs_log("自动审核模块加载失败：%s" % str(e)[:120])
+            return
+
+        def cdp_factory():
+            import kuaimai_print as KP
+            return KP.open_cdp_page()
+
+        n, lines = aa.audit_codes(cdp_factory, api, codes,
+                                  days=AUTO_AUDIT_LOOKBACK_DAYS)
+        for ln in lines:
+            print_jobs_log("[自动审核]%s" % ln)
+        if n:
+            print_jobs_log("[自动审核] 已审 %d 单（编码：%s）"
+                           % (n, "、".join(list(codes)[:8])))
+
     def run():
         try:
             ap.watch(api=api, shelf_map_getter=getter, stop_event=stop,
                      log_path=os.path.join(BASE_DIR, "auto_putaway.log"),
-                     is_on=lambda: auto_putaway_conf()[0])
+                     is_on=lambda: auto_putaway_conf()[0],
+                     on_done=on_done)
         except BaseException:
             pass
 
