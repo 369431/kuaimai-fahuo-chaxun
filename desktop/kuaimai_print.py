@@ -2,7 +2,7 @@
 """打单核心：选单规则（一单一件/加急/剩余时间优先）+ 取号 + 结果留痕。
 
 规则（用户口径，见 docs/打单对接.md）：
- 1) 加急优先；其次剩余时间少优先（负数=超时 最优先）
+ 1) 已超时（剩余<0）绝对最优先；其次加急；再按剩余时间少优先
  2) 只打「一单一件」：订单里只有一个非赠品编码（7107-黑色M ✅ / 7107-黑色M,1166 ✅ / 7107-黑色M,7107-白色M ❌）
  3) 一次最多 500 单；取号分批（每批 ≤20 个 sids）
  4) 打印完成后**不自动标「已打」**，等人工确认
@@ -341,9 +341,16 @@ def parse_remain_hours(v):
 
 
 def sort_key(order):
-    """排序键：加急最先，其次剩余时间升序（负数/超时最优先）。"""
-    return (0 if order.get("urgent") else 1,
-            parse_remain_hours(order.get("remain")),
+    """排序键：已超时(剩余<0)绝对最前 → 加急 → 剩余时间升序 → sid。
+
+    负数剩余 = 已超时（平台可能处罚/自动取消），比加急更硬，故排在加急之前。
+    实测 2026-09-23：288 个候选里 79 个负剩余单全部带加急，两规则暂不冲突；
+    但加急标记来自本地库（可能滞后），负数剩余是接口实时算出，更可靠。
+    """
+    h = parse_remain_hours(order.get("remain"))
+    return (0 if h < 0 else 1,                 # 已超时绝对最优先
+            0 if order.get("urgent") else 1,   # 其次加急
+            h,                                 # 再按剩余时间升序
             str(order.get("sid") or ""))
 
 
@@ -397,16 +404,16 @@ def selftest():
            {"sid": "F", "remain": "5小时", "outSid": "7703", "print_count": 0,
             "items": parse_items("7107-黑色M 7107-黑色M 1明细")}]
     order = [o["sid"] for o in sorted(os_, key=sort_key)]
-    print("排序(期望 C,A,B,F,D):", order)
-    if order != ["C", "A", "B", "F", "D"]:
+    print("排序(期望 A,C,B,F,D):", order)   # A=-2h 已超时 → 排 C(加急) 之前
+    if order != ["A", "C", "B", "F", "D"]:
         bad += 1
     ok3, skip3 = pick_orders(os_, 3)
     print("挑 3 单 → 要打:", [o["sid"] for o in ok3], " 跳过:", skip3)
-    if [o["sid"] for o in ok3] != ["C", "A", "B"]:
+    if [o["sid"] for o in ok3] != ["A", "C", "B"]:
         bad += 1
-    ok4, skip4 = pick_orders(os_, 4)          # 优先取 C,A,B,F（D 已打印过，排最后）
+    ok4, skip4 = pick_orders(os_, 4)          # 优先取 A(超时),C(加急),B,F（D 已打印过，排最后）
     print("挑 4 单 → 要打:", [o["sid"] for o in ok4], " 跳过:", skip4)
-    if [o["sid"] for o in ok4] != ["C", "A", "B", "F"]:
+    if [o["sid"] for o in ok4] != ["A", "C", "B", "F"]:
         bad += 1
     ok5, skip5 = pick_orders(os_, 5)      # 预发货：有运单号但没打印过 → 应该照打
     print("挑 5 单 → 要打:", [o["sid"] for o in ok5], " 跳过:", skip5)
