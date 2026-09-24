@@ -1,10 +1,10 @@
 {
-  "version": "v1.32",
-  "notes": "新增「自动上架到推荐货位」：在「打单进度」旁边有**独立开关**和可调刷新间隔（默认 60 秒，可设 10～3600 秒），打开后每隔设定时间自动查一次待上架的上架单，有就按推荐货位自动上架，不用再手动去 ERP 点。\n· 推荐货位取「该编码自己现有的货位（在架最多的那个）」；自己没有货位时，按同款同尺码的规律（如 6618 的 S/M/L/XL 各自固定货位）推；**推不出来就整张单跳过、只记日志等人工，绝不乱猜货位。**\n· 上架前后都会核对（写之前确认单还在待上架、写之后核对已完成的实际上架数），和人工在 ERP 同时操作也不会打架。\n· 走开放平台 API，**不需要开打单浏览器**；默认是关的，要用请在界面上勾选。\n· 该功能只在主客户端生效。",
+  "version": "v1.33",
+  "notes": "新增「上架后自动智能审核」（默认关，在界面上勾选开）：上架成功后自动把这批编码的待审核单智能审掉，不用再回 ERP 手点。\n· **只走智能审核**（等于平时手点那一下），绝不碰缺货审核 / 强制审核 / 其他审核类。\n· 按规则筛选：**缺货异常单跳过**，**有留言/备注且未人工处理的跳过**，其余才送审。\n· 审核走 ERP 自己的审单规则，不放行异常单；审核失败只记日志，不影响上架。\n· 该功能只在主客户端生效。\n新增「自动上架 / 智能审核日志」：在「打单进度」面板底部，直接看得到自动上架和智能审核的实时日志（auto_putaway.log + auto_audit.log 尾部合并），不用再去翻数据目录找文件。",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.32/kuaimai-scan-setup-v1.32.exe",
-  "sha256": "7b2111ac733cf39390411666b15a79df307faf0e496e4df16906a371d76eb7bb",
-  "size": 28748909,
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.33/kuaimai-scan-setup-v1.33.exe",
+  "sha256": "b4e3e3d3a49f34dae8f83887429ddd8e0d73454f23c8178c8072f9b3ca25a2a0",
+  "size": 28765926,
   "mandatory": false,
-  "published_at": "2026-09-24 03:46"
+  "published_at": "2026-09-24 14:44"
 }
