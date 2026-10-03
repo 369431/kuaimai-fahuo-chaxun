@@ -2169,13 +2169,30 @@ function addCode(code){
       const per = d.carriers || {};
       const cnum = parseInt(per[CARRIER], 10) || 0;
       const all = Object.keys(per).map(function(k){ return k + ' ' + per[k] + ' 件'; }).join('　/　');
-      ITEMS.push({code: d.code || code, qty: cnum > 0 ? cnum : 0, max: cnum});
-      render();
-      $('hint').innerHTML = cnum > 0
-        ? (esc(d.code || code) + '：快递 <b>' + esc(CARRIER) + '</b> 最大可生成 <b>' + cnum + ' 件</b>'
-           + (all ? '（全部：' + esc(all) + '）' : ''))
-        : ('<span class="badtext">' + esc(d.code || code) + '：' + esc(CARRIER)
-           + ' 无可成波订单' + (all ? '（全部：' + esc(all) + '）' : '') + '</span>');
+      if(cnum > 0){
+        ITEMS.push({code: d.code || code, qty: cnum, max: cnum});
+        render();
+        $('hint').innerHTML = esc(d.code || code) + '：快递 <b>' + esc(CARRIER)
+          + '</b> 最大可生成 <b>' + cnum + ' 件</b>' + (all ? '（全部：' + esc(all) + '）' : '');
+        return;
+      }
+      const others = Object.keys(per).filter(function(k){
+        return k !== CARRIER && (parseInt(per[k], 10) || 0) > 0;
+      });
+      if(others.length){
+        const o = others[0], n = parseInt(per[o], 10) || 0;
+        $('hint').innerHTML = '<span class="badtext">' + esc(d.code || code) + '：快递 <b>'
+          + esc(CARRIER) + '</b> 没有可成波订单</span>，但 <b>' + esc(o) + '</b> 有 <b>' + n + '</b> 件'
+          + ' — <button class="ghost" id="swBtn" style="padding:7px 12px;font-size:14px">切到 '
+          + esc(o) + ' 并添加</button>';
+        const b = $('swBtn');
+        if(b){ b.onclick = function(){ setCarrier(o); setTimeout(function(){ addCode(d.code || code); }, 80); }; }
+        return;
+      }
+      $('hint').innerHTML = '<span class="badtext">' + esc(d.code || code)
+        + '：没有可成波订单</span>'
+        + '<div class="muted">该编码在火火火仓库没有「待发货 + 未成波 + 一单一件」的订单'
+        + '（可能已生成波次 / 已打印 / 是多件单）。</div>';
     })
     .catch(function(e){ $('hint').textContent = '查询失败：' + e.message; });
 }
