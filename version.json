@@ -1,10 +1,10 @@
 {
-  "version": "v1.35",
-  "notes": "网页端：首页「生成波次」入口改名为「**扫码添加**」，页内按钮同样改成「扫码添加」（先选快递 → 扫码/输入编码 → 填件数 → 预览 → 生成，一个波次只含一种快递）。\n电脑端新增「**登录 ERP**」按钮：一键打开/聚焦打单浏览器（独立配置目录，CDP 9222）并定位到 ERP 登录页，不用再去命令行或翻目录找浏览器。\n· 打单与生成波次都依赖这个浏览器窗口，**请保持开着并登录**；窗口被关掉后，点一下「登录 ERP」就能重新打开。\n· 启动时自动带上 9222 调试端口与专用配置目录，不影响你日常用的浏览器。",
+  "version": "v1.36",
+  "notes": "修复：电脑端「**登录 ERP**」按钮被「自动上架推荐货位」那一组控件压住、看不见的问题（操作区改成一行 6 个按钮，不再挤位）。\n· 登录 ERP 按钮在主界面「操作」区，一键打开/聚焦打单浏览器并定位到 ERP 登录页；窗口被关掉后点它就能重开。\n· 打单、生成波次都依赖这个浏览器窗口，请保持开着并登录。",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.35/kuaimai-scan-setup-v1.35.exe",
-  "sha256": "631edf908d0c823d993d346511b8ed272db81f3048b4a0d634d48c38ff546155",
-  "size": 28787663,
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.36/kuaimai-scan-setup-v1.36.exe",
+  "sha256": "b76e3650bd4612b582698b510af3290ab9932a3c0938c611d697997b5ceb41ef",
+  "size": 28790502,
   "mandatory": false,
-  "published_at": "2026-10-04 03:28"
+  "published_at": "2026-10-04 03:33"
 }
