@@ -1,10 +1,10 @@
 {
-  "version": "v1.37",
-  "notes": "网页「生成波次」体验调整：\n· 首页按钮**改回「生成波次」**（点它进入操作页）。\n· 商家编码框支持两种方式：**手动输入回车即添加**；或点「**扫码添加**」**调用摄像头扫码**（带 ZXing 兜底，微信/部分国产浏览器也能扫）。\n· 波次仍按快递拆开（中通 / 申通不混）、只挑「一单一件」、件数超上限按最大可生成成波，生成后可回读波次号核对。",
+  "version": "v1.38",
+  "notes": "网页「生成波次」扫码体验修复：**扫出来是 0 时不再一头雾水**。\n· 原因：波次按快递拆（中通/申通各一个波次），页面默认停在「中通」；扫到全是申通的货就会显示 0 —— 其实货是有的。\n· 现在：当前快递没货、另一种有货时，直接提示「**XX 有 N 件**」并给一个「**切到 XX 并添加**」按钮，一键换快递加上；\n· 两种快递都没有时，明确写明原因：该编码没有「待发货 + 未成波 + 一单一件」的订单（可能已生成波次 / 已打印 / 是多件单），并且**不再往清单里塞 0 件的行**。",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.37/kuaimai-scan-setup-v1.37.exe",
-  "sha256": "e6226340b9c22bc1243958a3509c12263ef5767fef043a5d9436d42cc7d74749",
-  "size": 28791527,
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.38/kuaimai-scan-setup-v1.38.exe",
+  "sha256": "8ebe4e568fc37fa5df6880687555cd9596b80976bbbeef8ad219c26decb2cf15",
+  "size": 28793202,
   "mandatory": false,
-  "published_at": "2026-10-04 03:35"
+  "published_at": "2026-10-04 03:51"
 }
