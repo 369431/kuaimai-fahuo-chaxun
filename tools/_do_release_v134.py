@@ -1,0 +1,33 @@
+# -*- coding: utf-8 -*-
+"""发布 v1.34：调用 release.py 的 main()，中文说明走 UTF-8 字面量（不过控制台代码页）。
+
+本机网络：与 v1.32 / v1.33 两轮一致 —— **直连 github.com 可用**，不设 HTTPS_PROXY。
+"""
+import os
+import sys
+
+REPO = r"C:\Users\Kerwin\Desktop\kuaimai发货查询"
+INSTALLER = r"C:\Users\Kerwin\Desktop\发布\快麦扫码查询_安装版_v1.34.exe"
+NOTES = ("新增「扫码生成波次」（网页版，手机/电脑都能用）：不用再回 ERP 手点，"
+         "在工具网页上就能完成。\n"
+         "· **按快递拆波次**：一个波次只含一种快递（**中通 / 申通**），绝不混；"
+         "页面顶部选快递，切换会清空当前清单并提醒。\n"
+         "· **只挑「一单一件」**的订单（赠品、占位/补偿商品不计入），多件单不参与凑数。\n"
+         "· 填的件数超过实际可生成 → **按最大可生成件数成波**（不报错）；"
+         "扫码时直接提示该快递下的**最大可生成件数**。\n"
+         "· 挑单优先级沿用打单口径：**已超时最优先 → 加急 → 剩余时间少的先**。\n"
+         "· 可先点「预览」干跑核对将挑中的订单，再点「生成波次」；"
+         "生成后回读波次号核对（订单数 / 件数）。\n"
+         "· 仓库固定火火火服饰仓库；需要「生成波次」权限（默认给管理员）；"
+         "打单用的自动化浏览器需开着并登录 ERP。")
+
+assert os.path.isfile(INSTALLER), INSTALLER
+sys.path.insert(0, REPO)
+os.chdir(REPO)
+sys.argv = ["release.py", "--version", "v1.34", "--installer", INSTALLER, "--notes", NOTES]
+
+import release  # noqa: E402
+
+rc = release.main()
+print("\nrelease.main() returned", rc)
+sys.exit(rc)

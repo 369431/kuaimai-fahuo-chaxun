@@ -24,6 +24,8 @@ CATALOG = [
     ("stock.canprint", "现货可发 · 可发 / 撤回（写扫码记录）",     "动作类（默认关闭）", False),
     ("stock.edit",     "改库存",                                 "动作类（默认关闭）", False),
     ("stock.zero",     "盘0",                                    "动作类（默认关闭）", False),
+    ("wave.view",      "生成波次（进入页面 / 预览 / 查最大可生成）",  "查询类（默认开放）", True),
+    ("wave.create",    "生成波次 · 真正成波（写 ERP 波次）",          "动作类（默认关闭）", False),
     ("pick.view",      "拣货（进入拣货页）",                      "动作类（默认关闭）", False),
     ("pick.start",     "拣货 · 开始拣货 / 重新拉取",              "动作类（默认关闭）", False),
     ("pick.mark",      "拣货 · 拣货完成 / 无货",                  "动作类（默认关闭）", False),

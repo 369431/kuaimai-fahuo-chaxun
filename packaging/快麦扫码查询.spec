@@ -31,7 +31,7 @@ a = Analysis(
                    'kuaimai_perms', 'kuaimai_client', 'kuaimai_login_window',
                    'kuaimai_admin_panel', 'kuaimai_gateway', 'kuaimai_gateway_ui',
                    'kuaimai_update', 'kuaimai_update_ui', 'kuaimai_uikit',
-                   'kuaimai_print', 'kuaimai_print_ui', 'kuaimai_print_jobs',
+                   'kuaimai_print', 'kuaimai_print_ui', 'kuaimai_print_jobs', 'kuaimai_wave',
                    'auto_print_watcher', 'auto_putaway', 'auto_audit'],
     hookspath=[],
     hooksconfig={},

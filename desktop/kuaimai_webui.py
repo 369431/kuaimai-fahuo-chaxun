@@ -126,6 +126,9 @@ WEB_INDEX_HTML = r"""<!DOCTYPE html>
       <button id="btnTake" class="ghost" data-perm="stocktake.view">库存盘点</button>
       <button id="btnSound" class="ghost" data-perm="ui.sound">声音：开</button>
     </div>
+    <div class="toolbar" style="margin-top:6px">
+      <button id="btnWave" class="ghost" data-perm="wave.view">生成波次</button>
+    </div>
     <div id="camBox" class="hidden" style="margin-top:8px">
       <video id="video" playsinline muted></video>
       <div class="toolbar"><button id="btnCamStop" class="ghost" data-perm="scan.camera">关闭摄像头</button></div>
@@ -340,6 +343,12 @@ $('btnOrder').onclick = () => {
 $('btnStock').onclick = () => {
   const sid = (function(){ try { return localStorage.getItem('km_sid') || ''; } catch(e){ return ''; } })();
   location.href = '/stock' + (sid ? ('?sid=' + encodeURIComponent(sid)) : '');
+};
+/* ---------------- 生成波次：独立页面 /wave ---------------- */
+const _btnWave = $('btnWave');
+if(_btnWave) _btnWave.onclick = () => {
+  const sid = (function(){ try { return localStorage.getItem('km_sid') || ''; } catch(e){ return ''; } })();
+  location.href = '/wave' + (sid ? ('?sid=' + encodeURIComponent(sid)) : '');
 };
 /* ---------------- 打印记录：独立页面 /prints ---------------- */
 const _lnkPrints = $('lnkPrints');
@@ -2004,6 +2013,258 @@ function load(){
 load();
 setInterval(function(){ if(!document.hidden) load(); }, 5000);
 document.addEventListener('visibilitychange', function(){ if(!document.hidden) load(); });
+</script>
+</body></html>
+"""
+
+
+# ====================== 网页端：生成波次（扫编码 → 填写件数 → 一个波次） ======================
+WAVE_HTML = r"""<!doctype html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>生成波次 · 快麦</title>
+<style>
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  :root { --blue:#007AFF; --green:#34C759; --red:#FF3B30; --ink:#1d1d1f; --sub:#6e6e73;
+          --line:rgba(60,60,67,.12); --fill:rgba(120,120,128,.12); --glass:rgba(255,255,255,.80); }
+  body { margin:0; padding:12px; min-height:100vh; color:var(--ink);
+         font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+         letter-spacing:-.01em; -webkit-font-smoothing:antialiased;
+         background:linear-gradient(170deg,#eef3fa 0%,#e6edf8 45%,#e1e8f4 100%) fixed; }
+  .card { background:var(--glass); backdrop-filter:saturate(180%) blur(20px);
+          -webkit-backdrop-filter:saturate(180%) blur(20px); border:1px solid rgba(255,255,255,.62);
+          border-radius:14px; padding:12px; margin-bottom:10px; box-shadow:0 8px 24px rgba(24,39,75,.10); }
+  .bar { display:flex; gap:8px; }
+  .bar input { flex:1; min-width:0; padding:13px 14px; font-size:19px; color:var(--ink);
+               background:rgba(255,255,255,.92); border:1px solid var(--line); border-radius:12px; }
+  .bar input:focus { outline:none; border-color:var(--blue); box-shadow:0 0 0 3.5px rgba(0,122,255,.16); }
+  .bar button { padding:13px 18px; font-size:16px; font-weight:600; border:0; border-radius:12px;
+                background:var(--blue); color:#fff; box-shadow:0 1px 2px rgba(0,0,0,.10); }
+  button { font-family:inherit; font-weight:600; border:0; border-radius:11px; padding:11px 16px;
+           font-size:15px; background:var(--blue); color:#fff; box-shadow:0 1px 2px rgba(0,0,0,.10); }
+  button.ghost { background:var(--fill); color:var(--blue); box-shadow:none; }
+  button.del { background:rgba(255,59,48,.12); color:#C7362E; box-shadow:none; padding:8px 12px; font-size:13px; }
+  button:active { transform:scale(.97); }
+  button:disabled { opacity:.45; }
+  .seg { flex:0 0 auto; }
+  .seg.on { background:var(--blue); color:#fff; }
+  h2 { font-size:15px; margin:0 0 8px; font-weight:700; color:var(--ink);
+       border-left:3px solid var(--blue); padding-left:8px; }
+  .muted { font-size:12.5px; color:var(--sub); line-height:1.7; }
+  .rowitem { display:flex; align-items:center; gap:8px; padding:9px 0; border-top:1px solid rgba(60,60,67,.10); }
+  .rowitem:first-child { border-top:0; }
+  .rowitem .c { flex:1; min-width:0; }
+  .rowitem .ccode { font-size:15px; font-weight:600; word-break:break-all; }
+  .rowitem .cmax { font-size:12px; color:var(--sub); margin-top:2px; }
+  .rowitem input { width:74px; padding:9px 10px; font-size:16px; text-align:center; color:var(--ink);
+                   background:rgba(255,255,255,.92); border:1px solid var(--line); border-radius:10px; }
+  .actions { display:flex; gap:8px; margin-top:12px; }
+  .actions button { flex:1; padding:13px; font-size:16px; }
+  .tag { display:inline-block; font-size:12px; padding:2px 9px; border-radius:8px; background:var(--fill);
+         color:var(--sub); margin:0 6px 4px 0; }
+  .tag.warn { background:rgba(255,59,48,.15); color:#c62828; }
+  .tag.ok { background:rgba(52,199,89,.18); color:#1B7F35; }
+  .tag.red { background:#FF3B30; color:#fff; font-weight:800; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th,td { padding:6px 4px; border-bottom:1px solid rgba(60,60,67,.10); text-align:left; word-break:break-all; }
+  th { color:var(--sub); font-weight:500; }
+  .big { font-size:22px; font-weight:800; letter-spacing:-.02em; }
+  .oktext { color:#1B7F35; }
+  .badtext { color:#C7362E; }
+  @media (prefers-color-scheme: dark) {
+    body { background:linear-gradient(170deg,#1c1c1e,#151517 60%,#1a1a1c) fixed; color:#f2f2f7; }
+    .card { background:rgba(28,28,30,.74); border-color:rgba(255,255,255,.08); }
+    h2 { color:#f2f2f7; }
+    .muted, .rowitem .cmax { color:#a1a1a6; }
+    .bar input, .rowitem input { background:rgba(118,118,128,.24); border-color:rgba(255,255,255,.12); color:#f2f2f7; }
+  }
+</style></head>
+<body>
+<div class="card">
+  <h2>快递（一个波次只能同一种）</h2>
+  <div class="bar" id="cbar">
+    <button class="ghost seg on" data-car="中通">中通</button>
+    <button class="ghost seg" data-car="申通">申通</button>
+  </div>
+  <div class="bar" style="margin-top:8px">
+    <input id="code" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="扫/手动输入商家编码">
+    <button id="add">添加</button>
+  </div>
+  <div class="muted" id="hint" style="margin-top:8px">先选快递 → 扫码/输入编码回车即添加；自动查该编码在该快递下的<b>最大可生成件数</b>。</div>
+</div>
+<div class="card">
+  <h2>待成波清单 <span class="muted" id="cnt"></span></h2>
+  <div id="list"><div class="muted">还没有添加编码</div></div>
+  <div class="actions">
+    <button id="prev" class="ghost">预览（不建波）</button>
+    <button id="mk" data-perm="wave.create">生成波次</button>
+  </div>
+  <div class="muted" style="margin-top:8px">填的件数超过最大可生成 → 自动按最大可生成成波；多个编码合并成<b>同一个波次</b>。</div>
+</div>
+<div id="out"></div>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const SID = (function(){
+  try { const q = new URLSearchParams(location.search).get('sid');
+        if(q) localStorage.setItem('km_sid', q);
+        return localStorage.getItem('km_sid') || ''; } catch(e){ return ''; }
+})();
+function withSid(u){ return SID ? (u + (u.indexOf('?') >= 0 ? '&' : '?') + 'sid=' + encodeURIComponent(SID)) : u; }
+let ITEMS = [];
+let CARRIER = '中通';   // 一个波次只能同一种快递（与服务端 kuaimai_wave.CARRIERS 一致）
+
+function setCarrier(c){
+  if(c === CARRIER) return;
+  if(ITEMS.length && !confirm('切换快递会清空当前清单（一个波次只能同一种快递）。继续？')) return;
+  CARRIER = c; ITEMS = []; render();
+  document.querySelectorAll('#cbar .seg').forEach(function(b){
+    b.classList.toggle('on', b.getAttribute('data-car') === c);
+  });
+  $('hint').innerHTML = '当前快递：<b>' + esc(c) + '</b>。扫/输入编码回车即添加。';
+}
+
+function render(){
+  $('cnt').textContent = ITEMS.length ? ('共 ' + ITEMS.length + ' 个编码') : '';
+  if(!ITEMS.length){ $('list').innerHTML = '<div class="muted">还没有添加编码</div>'; return; }
+  let h = '';
+  ITEMS.forEach(function(it, i){
+    h += '<div class="rowitem">'
+       + '<div class="c"><div class="ccode">' + esc(it.code) + '</div>'
+       + '<div class="cmax">最大可生成 ' + esc(it.max) + ' 件（' + esc(CARRIER) + '）</div></div>'
+       + '<input type="number" min="0" value="' + esc(it.qty) + '" data-i="' + i + '">'
+       + '<button class="del" data-d="' + i + '">删除</button></div>';
+  });
+  $('list').innerHTML = h;
+  $('list').querySelectorAll('input[data-i]').forEach(function(el){
+    el.onchange = function(){ const i = +el.getAttribute('data-i'); ITEMS[i].qty = Math.max(0, parseInt(el.value,10) || 0); };
+  });
+  $('list').querySelectorAll('button[data-d]').forEach(function(el){
+    el.onclick = function(){ ITEMS.splice(+el.getAttribute('data-d'), 1); render(); };
+  });
+}
+
+function addCode(code){
+  code = (code || '').trim();
+  if(!code){ $('hint').textContent = '请先输入商家编码'; return; }
+  if(ITEMS.some(function(x){ return x.code.toUpperCase() === code.toUpperCase(); })){
+    $('hint').textContent = code + ' 已在清单里'; return;
+  }
+  $('hint').textContent = '正在查 ' + code + ' 的最大可生成件数…';
+  fetch(withSid('/api/wave/lookup?code=' + encodeURIComponent(code)), {cache:'no-store'})
+    .then(function(r){ if(r.status === 401){ location.href = '/login'; throw new Error('请重新登录'); } return r.json(); })
+    .then(function(d){
+      if(d.error){ $('hint').innerHTML = '<span class="badtext">' + esc(d.error) + '</span>'; return; }
+      const per = d.carriers || {};
+      const cnum = parseInt(per[CARRIER], 10) || 0;
+      const all = Object.keys(per).map(function(k){ return k + ' ' + per[k] + ' 件'; }).join('　/　');
+      ITEMS.push({code: d.code || code, qty: cnum > 0 ? cnum : 0, max: cnum});
+      render();
+      $('hint').innerHTML = cnum > 0
+        ? (esc(d.code || code) + '：快递 <b>' + esc(CARRIER) + '</b> 最大可生成 <b>' + cnum + ' 件</b>'
+           + (all ? '（全部：' + esc(all) + '）' : ''))
+        : ('<span class="badtext">' + esc(d.code || code) + '：' + esc(CARRIER)
+           + ' 无可成波订单' + (all ? '（全部：' + esc(all) + '）' : '') + '</span>');
+    })
+    .catch(function(e){ $('hint').textContent = '查询失败：' + e.message; });
+}
+
+function bodyItems(){
+  return ITEMS.filter(function(x){ return parseInt(x.qty,10) > 0; })
+              .map(function(x){ return {code:x.code, qty:parseInt(x.qty,10)}; });
+}
+
+function post(path, obj){
+  return fetch(withSid(path), {method:'POST', cache:'no-store',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify(obj)})
+    .then(function(r){ if(r.status === 401){ location.href = '/login'; throw new Error('请重新登录'); } return r.json(); });
+}
+
+function renderPlan(p){
+  const cs = p.codes || [];
+  let h = '<div class="card"><h2>预览（干跑，不建波）' + (p.carrier ? '　·　快递 ' + esc(p.carrier) : '') + '</h2>';
+  h += '<table><thead><tr><th>编码</th><th>目标</th><th>最大</th><th>实际成波</th></tr></thead><tbody>';
+  cs.forEach(function(c){
+    const capped = c.target > c.max;
+    h += '<tr><td>' + esc(c.code) + '</td><td>' + esc(c.target) + '</td><td>' + esc(c.max) + '</td>'
+       + '<td class="' + (c.actual < c.target ? 'badtext' : 'oktext') + '">' + esc(c.actual)
+       + (capped ? ' <span class="tag warn">按最大</span>' : '') + '</td></tr>';
+  });
+  h += '</tbody></table>';
+  h += '<div style="margin-top:8px">将成波 <b>' + (p.sids || []).length + '</b> 张订单（1 个波次）</div>';
+  h += '<div class="muted" style="margin-top:6px">挑单顺序：已超时 → 加急 → 剩余时间少优先</div>';
+  h += '<table style="margin-top:8px"><thead><tr><th>sid</th><th>剩余</th><th>加急</th><th>贡献</th></tr></thead><tbody>';
+  (p.picks || []).forEach(function(k){
+    const r = (k.remain == null) ? '?' : (Math.round(k.remain * 10) / 10 + 'h');
+    const cs2 = Object.keys(k.contribute || {}).map(function(c){ return c + '×' + k.contribute[c]; }).join(' ');
+    h += '<tr><td>' + esc(k.sid) + '</td><td>' + esc(r) + '</td><td>' + (k.urgent ? '是' : '') + '</td><td>' + esc(cs2) + '</td></tr>';
+  });
+  h += '</tbody></table></div>';
+  $('out').innerHTML = h;
+}
+
+document.querySelectorAll('#cbar .seg').forEach(function(b){
+  b.onclick = function(){ setCarrier(b.getAttribute('data-car')); };
+});
+$('add').onclick = function(){ addCode($('code').value); $('code').value=''; $('code').focus(); };
+$('code').addEventListener('keydown', function(e){
+  if(e.key === 'Enter'){ e.preventDefault(); addCode($('code').value); $('code').value=''; }
+});
+
+$('prev').onclick = function(){
+  const items = bodyItems();
+  if(!items.length){ alert('请先添加编码并填写件数'); return; }
+  $('out').innerHTML = '<div class="card"><div class="muted">正在干跑挑单…</div></div>';
+  post('/api/wave/preview', {items:items, carrier:CARRIER}).then(function(p){
+    if(p.error){ $('out').innerHTML = '<div class="card"><div class="badtext">' + esc(p.error) + '</div></div>'; return; }
+    renderPlan(p);
+  }).catch(function(e){ $('out').innerHTML = '<div class="card"><div class="badtext">预览失败：' + esc(e.message) + '</div></div>'; });
+};
+
+$('mk').onclick = function(){
+  const items = bodyItems();
+  if(!items.length){ alert('请先添加编码并填写件数'); return; }
+  if(!confirm('将用「' + CARRIER + '」生成 1 个波次（清单里所有编码合并成一个波次，只含该快递）。真要建波吗？')) return;
+  $('out').innerHTML = '<div class="card"><div class="muted">正在挑单并成波…（请稍候）</div></div>';
+  post('/api/wave/create', {items:items, carrier:CARRIER, confirm:true}).then(function(p){
+    let h = '';
+    if(!p.save_ok){
+      h += '<div class="card"><h2>成波失败</h2><div class="badtext">' + esc(p.error || '未返回 success') + '</div>';
+      if(p.save_msg) h += '<div class="muted" style="margin-top:6px">' + esc(p.save_msg) + '</div>';
+      h += '</div>';
+      $('out').innerHTML = h + planCard(p);
+      return;
+    }
+    const v = p.verify || {};
+    h += '<div class="card"><h2>成波成功</h2>';
+    if(v.ok){
+      h += '<div class="big oktext">波次号：' + esc(v.wave_code) + '</div>'
+         + '<div style="margin-top:6px"><span class="tag ok">核对一致 ' + esc(v.matched) + ' 张</span>'
+         + '<span class="tag">订单数 ' + esc(v.tradesCount) + '</span>'
+         + '<span class="tag">件数 ' + esc(v.itemCount) + '</span>';
+      if(v.extra) h += '<span class="tag warn">额外 ' + esc(v.extra) + ' 张</span>';
+      if((v.missing || []).length) h += '<span class="tag warn">缺 ' + esc(v.missing.length) + ' 张</span>';
+      h += '</div>';
+    } else {
+      h += '<div><span class="tag warn">已提交成波，但回读未确认</span></div>'
+         + '<div class="muted" style="margin-top:6px">' + esc(v.error || '回读失败') + '</div>';
+    }
+    h += '</div>';
+    $('out').innerHTML = h + planCard(p);
+  }).catch(function(e){ $('out').innerHTML = '<div class="card"><div class="badtext">成波请求失败：' + esc(e.message) + '</div></div>'; });
+};
+
+function planCard(p){
+  const cs = p.codes || [];
+  let h = '<div class="card"><h2>本次挑单</h2><table><thead><tr><th>编码</th><th>目标</th><th>实际</th></tr></thead><tbody>';
+  cs.forEach(function(c){ h += '<tr><td>' + esc(c.code) + '</td><td>' + esc(c.target) + '</td><td>' + esc(c.actual) + '</td></tr>'; });
+  h += '</tbody></table><div class="muted" style="margin-top:6px">sid：' + esc((p.sids || []).join(', ')) + '</div></div>';
+  return h;
+}
+
+render();
+$('code').focus();
 </script>
 </body></html>
 """

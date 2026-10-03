@@ -32,7 +32,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 try:
     from kuaimai_webui import (WEB_INDEX_HTML, PICK_HTML, ORDER_HTML, STOCK_HTML,
-                               STOCKTAKE_HTML, PERMS_HTML, PRINTS_HTML)
+                               STOCKTAKE_HTML, PERMS_HTML, PRINTS_HTML, WAVE_HTML)
     from kuaimai_login_ui import LOGIN_HTML
 except Exception:
     WEB_INDEX_HTML = "<h1>缺少 kuaimai_webui.py</h1>"
@@ -42,6 +42,7 @@ except Exception:
     STOCKTAKE_HTML = WEB_INDEX_HTML
     PERMS_HTML = WEB_INDEX_HTML
     PRINTS_HTML = WEB_INDEX_HTML
+    WAVE_HTML = WEB_INDEX_HTML
     LOGIN_HTML = WEB_INDEX_HTML
 try:
     import kuaimai_auth as auth
@@ -2967,6 +2968,26 @@ class _WebHandler(BaseHTTPRequestHandler):
                 if not self._can(me, "scan.printed"):
                     return self._forbidden_page("这个账号没有打印记录权限")
                 return self._send(self._page(PRINTS_HTML, me), "text/html; charset=utf-8")
+            if parsed.path in ("/wave", "/wave.html"):
+                # 生成波次：扫编码 → 填件数 → 一个波次（真正成波另需 wave.create 权限）
+                if not self._can(me, "wave.view"):
+                    return self._forbidden_page("这个账号没有生成波次权限")
+                return self._send(self._page(WAVE_HTML, me), "text/html; charset=utf-8")
+            if parsed.path == "/api/wave/lookup":
+                # 扫一个编码：查它在火火火仓库的最大可生成件数（只读，走 CDP 登录态）
+                if not self._can(me, "wave.view"):
+                    return self._deny("wave.view")
+                code = ((qs.get("code") or [""])[0] or "").strip()
+                if not code:
+                    return self._json({"error": "缺少 code"}, 400)
+                try:
+                    import kuaimai_wave as wv
+                    return self._json(wv.lookup(code))
+                except SystemExit:
+                    return self._json({"error": "打单浏览器没开（Edge 9222 不通）："
+                                                "请先打开自动化浏览器并登录 ERP 后再试"}, 503)
+                except Exception as e:
+                    return self._json({"error": "查询失败：%s" % str(e)[:200]}, 500)
             if parsed.path == "/api/perms":
                 if not self._can(me, "admin.perms"):
                     return self._deny("admin.perms")
@@ -3325,6 +3346,49 @@ class _WebHandler(BaseHTTPRequestHandler):
                 except Exception as e:
                     return self._json({"error": "心跳失败：%s" % str(e)[:120]}, 500)
                 return self._json({"ok": True, "refreshed": n})
+            if path == "/api/wave/preview":
+                # 干跑挑单（只读，不建波）：列出将挑中的 sid 与每个编码实际成波件数
+                deny = self._need(me, "wave.view")
+                if deny:
+                    return deny
+                items = body.get("items") or []
+                try:
+                    import kuaimai_wave as wv
+                    return self._json(wv.plan(items, str(body.get("carrier") or "")))
+                except SystemExit:
+                    return self._json({"error": "打单浏览器没开（Edge 9222 不通）："
+                                                "请先打开自动化浏览器并登录 ERP"}, 503)
+                except Exception as e:
+                    return self._json({"error": "预览失败：%s" % str(e)[:200]}, 500)
+            if path == "/api/wave/create":
+                # 真正成波（写 ERP）：需 wave.create 权限 + confirm=true；多个编码合并成一个波次
+                deny = self._need(me, "wave.create")
+                if deny:
+                    return deny
+                if not body.get("confirm"):
+                    return self._json({"error": "需要 confirm 确认后才建波"}, 400)
+                items = body.get("items") or []
+                try:
+                    import kuaimai_wave as wv
+                    out = wv.create(items, str(body.get("carrier") or ""))
+                    if out.get("save_ok"):
+                        try:
+                            out["verify"] = wv.verify_wave(out.get("sids") or [], api_call_authed)
+                        except Exception as e:
+                            out["verify"] = {"ok": False, "error": str(e)[:150]}
+                    try:
+                        print_jobs_log("生成波次：快递=%s sids=%d save=%s 波次=%s" % (
+                            out.get("carrier") or "-",
+                            len(out.get("sids") or []), out.get("save_ok"),
+                            (out.get("verify") or {}).get("wave_code") or "-"))
+                    except Exception:
+                        pass
+                    return self._json(out)
+                except SystemExit:
+                    return self._json({"error": "打单浏览器没开（Edge 9222 不通）："
+                                                "请先打开自动化浏览器并登录 ERP"}, 503)
+                except Exception as e:
+                    return self._json({"error": "成波失败：%s" % str(e)[:200]}, 500)
             if path == "/api/print/jobs_add":
                 # 提交一个打单任务（主端权威）：按 print_clients.json 的账号映射决定派给谁
                 deny = self._need(me, "scan.printed")
