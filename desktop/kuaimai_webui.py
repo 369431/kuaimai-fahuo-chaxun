@@ -127,7 +127,7 @@ WEB_INDEX_HTML = r"""<!DOCTYPE html>
       <button id="btnSound" class="ghost" data-perm="ui.sound">声音：开</button>
     </div>
     <div class="toolbar" style="margin-top:6px">
-      <button id="btnWave" class="ghost" data-perm="wave.view">生成波次</button>
+      <button id="btnWave" class="ghost" data-perm="wave.view">扫码添加</button>
     </div>
     <div id="camBox" class="hidden" style="margin-top:8px">
       <video id="video" playsinline muted></video>
@@ -2089,7 +2089,7 @@ WAVE_HTML = r"""<!doctype html>
   </div>
   <div class="bar" style="margin-top:8px">
     <input id="code" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="扫/手动输入商家编码">
-    <button id="add">添加</button>
+    <button id="add">扫码添加</button>
   </div>
   <div class="muted" id="hint" style="margin-top:8px">先选快递 → 扫码/输入编码回车即添加；自动查该编码在该快递下的<b>最大可生成件数</b>。</div>
 </div>

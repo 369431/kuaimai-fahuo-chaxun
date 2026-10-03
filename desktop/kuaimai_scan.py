@@ -5160,6 +5160,27 @@ class ScanApp:
         st.configure("TSpinbox", fieldbackground="#ffffff", padding=4)
         st.configure("TProgressbar", background=UI_BLUE, troughcolor=UI_FILL, borderwidth=0)
 
+    def on_erp_login(self):
+        """打开/聚焦打单浏览器并定位到 ERP，供人工登录（这个窗口不要关，打单/生成波次都靠它）。"""
+        try:
+            import kuaimai_print as kp
+            st, msg = kp.open_erp_browser()
+        except Exception as e:
+            st, msg = "no_browser", "打开失败：%s" % str(e)[:120]
+        try:
+            self.status_text.set(msg)
+        except Exception:
+            pass
+        try:
+            from tkinter import messagebox
+            if st == "no_browser":
+                messagebox.showwarning("登录 ERP", msg)
+            else:
+                messagebox.showinfo("登录 ERP", msg + "\n\n登录后这个窗口请不要关闭："
+                                    "打单、生成波次都要用它；关了这两样都会不可用。")
+        except Exception:
+            pass
+
     def _build_ui(self):
         self._setup_style()
         # 外层套一层可滚动区域：窗口右侧竖滚动条；默认看到的区域里就是扫码记录，
@@ -5286,7 +5307,8 @@ class ScanApp:
                      ("检查更新", self.on_check_update, "TButton", "__any"),
                      ("重新登录", self.on_relogin, "TButton", "__any"),
                      ("打印分工", self.on_print_clients, "TButton", "__any"),
-                     ("打单进度", self.on_print_progress, "TButton", "__any"))
+                     ("打单进度", self.on_print_progress, "TButton", "__any"),
+                     ("登录 ERP", self.on_erp_login, "TButton", "__any"))
         for i, (txt, cmd, sty, perm) in enumerate(_ops_list):
             _b = ttk.Button(ops, text=txt, command=cmd, style=sty)
             _b.grid(row=i // 5, column=i % 5, sticky="ew", padx=5, pady=5)

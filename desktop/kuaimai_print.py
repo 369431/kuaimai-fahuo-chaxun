@@ -2873,6 +2873,51 @@ EDGE_CANDIDATES = [r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.ex
                    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"]
 # EDGE_PROFILE 已在文件顶部定义（= BASE_DIR\edge-automation，与主程序数据目录同处）
 PRINT_URL = "https://erpb.superboss.cc/index.html#/trade/printv2"
+ERP_HOME_URL = "https://erpb.superboss.cc/"      # 登录 ERP 用（入口页，会自动跳到实际租户域名）
+
+
+def open_erp_browser():
+    """打开/聚焦「打单浏览器」（独立配置目录 + CDP 9222）并定位到 ERP，供人工登录。
+
+    返回 (状态, 说明)：
+      ok           已在跑（已把 ERP 页开出来）
+      opened       刚启动（请在弹出的窗口登录 ERP）
+      no_browser   没找到 Edge / 启动超时
+    注意：这里**不加 --start-minimized**（登录要看得见窗口）；窗口关掉后打单/生成波次都会不可用。
+    """
+    import subprocess
+    import urllib.request
+
+    def alive():
+        try:
+            op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            op.open("http://127.0.0.1:9222/json/version", timeout=3).read()
+            return True
+        except Exception:
+            return False
+
+    exe = next((p for p in EDGE_CANDIDATES if os.path.isfile(p)), None)
+    if not exe:
+        return "no_browser", "没找到 Edge：%s" % EDGE_CANDIDATES[0]
+    try:
+        os.makedirs(EDGE_PROFILE, exist_ok=True)
+    except Exception:
+        pass
+    was = alive()
+    try:
+        # 同一配置目录 + 同一端口：已在跑就只是新开/聚焦一个标签并导航
+        subprocess.Popen([exe, "--remote-debugging-port=9222",
+                          "--user-data-dir=" + EDGE_PROFILE,
+                          "--no-first-run", "--no-default-browser-check", ERP_HOME_URL])
+    except Exception as e:
+        return "no_browser", "启动浏览器失败：%s" % str(e)[:80]
+    if was:
+        return "ok", "打单浏览器已经在跑，已把 ERP 页面打开"
+    for _ in range(25):
+        time.sleep(1)
+        if alive():
+            return "opened", "已打开打单浏览器，请在弹出的窗口登录 ERP"
+    return "no_browser", "浏览器启动超时"
 
 
 def ensure_browser(auto_start=True):
