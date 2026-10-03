@@ -1,10 +1,10 @@
 {
-  "version": "v1.36",
-  "notes": "修复：电脑端「**登录 ERP**」按钮被「自动上架推荐货位」那一组控件压住、看不见的问题（操作区改成一行 6 个按钮，不再挤位）。\n· 登录 ERP 按钮在主界面「操作」区，一键打开/聚焦打单浏览器并定位到 ERP 登录页；窗口被关掉后点它就能重开。\n· 打单、生成波次都依赖这个浏览器窗口，请保持开着并登录。",
+  "version": "v1.37",
+  "notes": "网页「生成波次」体验调整：\n· 首页按钮**改回「生成波次」**（点它进入操作页）。\n· 商家编码框支持两种方式：**手动输入回车即添加**；或点「**扫码添加**」**调用摄像头扫码**（带 ZXing 兜底，微信/部分国产浏览器也能扫）。\n· 波次仍按快递拆开（中通 / 申通不混）、只挑「一单一件」、件数超上限按最大可生成成波，生成后可回读波次号核对。",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.36/kuaimai-scan-setup-v1.36.exe",
-  "sha256": "b76e3650bd4612b582698b510af3290ab9932a3c0938c611d697997b5ceb41ef",
-  "size": 28790502,
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.37/kuaimai-scan-setup-v1.37.exe",
+  "sha256": "e6226340b9c22bc1243958a3509c12263ef5767fef043a5d9436d42cc7d74749",
+  "size": 28791527,
   "mandatory": false,
-  "published_at": "2026-10-04 03:33"
+  "published_at": "2026-10-04 03:35"
 }
