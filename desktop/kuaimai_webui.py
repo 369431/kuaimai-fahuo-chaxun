@@ -127,7 +127,7 @@ WEB_INDEX_HTML = r"""<!DOCTYPE html>
       <button id="btnSound" class="ghost" data-perm="ui.sound">声音：开</button>
     </div>
     <div class="toolbar" style="margin-top:6px">
-      <button id="btnWave" class="ghost" data-perm="wave.view">扫码添加</button>
+      <button id="btnWave" class="ghost" data-perm="wave.view">生成波次</button>
     </div>
     <div id="camBox" class="hidden" style="margin-top:8px">
       <video id="video" playsinline muted></video>
@@ -2047,6 +2047,7 @@ WAVE_HTML = r"""<!doctype html>
   button.del { background:rgba(255,59,48,.12); color:#C7362E; box-shadow:none; padding:8px 12px; font-size:13px; }
   button:active { transform:scale(.97); }
   button:disabled { opacity:.45; }
+  .hidden { display:none !important; }
   .seg { flex:0 0 auto; }
   .seg.on { background:var(--blue); color:#fff; }
   h2 { font-size:15px; margin:0 0 8px; font-weight:700; color:var(--ink);
@@ -2089,9 +2090,17 @@ WAVE_HTML = r"""<!doctype html>
   </div>
   <div class="bar" style="margin-top:8px">
     <input id="code" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="扫/手动输入商家编码">
-    <button id="add">扫码添加</button>
+    <button id="add">添加</button>
+    <button id="camBtn" class="ghost">扫码添加</button>
   </div>
-  <div class="muted" id="hint" style="margin-top:8px">先选快递 → 扫码/输入编码回车即添加；自动查该编码在该快递下的<b>最大可生成件数</b>。</div>
+  <div class="muted" id="hint" style="margin-top:8px">手动输入编码回车即添加；也可以点「扫码添加」用摄像头扫。添加后自动查该编码在该快递下的<b>最大可生成件数</b>。</div>
+</div>
+<div id="camBox" class="hidden" style="position:fixed;left:0;top:0;right:0;bottom:0;background:rgba(0,0,0,.72);z-index:999;display:flex;align-items:center;justify-content:center">
+  <div style="background:#000;border-radius:14px;padding:10px;width:min(92vw,430px)">
+    <video id="video" playsinline muted style="width:100%;border-radius:10px;background:#000"></video>
+    <div class="muted" id="camMsg" style="color:#eee;margin-top:8px">对准条码…</div>
+    <div class="bar" style="margin-top:8px"><button id="camStop" class="ghost" style="flex:1">关闭</button></div>
+  </div>
 </div>
 <div class="card">
   <h2>待成波清单 <span class="muted" id="cnt"></span></h2>
@@ -2103,6 +2112,7 @@ WAVE_HTML = r"""<!doctype html>
   <div class="muted" style="margin-top:8px">填的件数超过最大可生成 → 自动按最大可生成成波；多个编码合并成<b>同一个波次</b>。</div>
 </div>
 <div id="out"></div>
+<script src="/km/zxing.js?v=8"></script>
 <script>
 const $ = id => document.getElementById(id);
 const esc = s => String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -2208,6 +2218,44 @@ document.querySelectorAll('#cbar .seg').forEach(function(b){
   b.onclick = function(){ setCarrier(b.getAttribute('data-car')); };
 });
 $('add').onclick = function(){ addCode($('code').value); $('code').value=''; $('code').focus(); };
+
+/* ---------- 摄像头扫码添加（优先 BarcodeDetector，不支持则用中转注入的 ZXing）---------- */
+let stream=null, scanTimer=null, zxReader=null;
+function camShow(on){ $('camBox').classList.toggle('hidden', !on); }
+function camHit(v){
+  stopCam();
+  const code=String(v||'').trim();
+  if(code){ addCode(code); }
+}
+async function startCam(){
+  $('camMsg').textContent='正在打开摄像头…';
+  try { stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}}); }
+  catch(e){ alert('无法打开摄像头：'+e.message+'\n（手机浏览器需用 https 打开本页）'); return; }
+  camShow(true);
+  try { $('video').srcObject=stream; await $('video').play(); } catch(e){}
+  if('BarcodeDetector' in window){
+    $('camMsg').textContent='对准条码…';
+    const det=new window.BarcodeDetector();
+    scanTimer=setInterval(async function(){
+      try { const c=await det.detect($('video')); if(c&&c.length){ camHit(c[0].rawValue); } } catch(e){}
+    }, 400);
+  } else if(window.ZXing && window.ZXing.BrowserMultiFormatReader){
+    $('camMsg').textContent='对准条码…（ZXing）';
+    try {
+      zxReader=new window.ZXing.BrowserMultiFormatReader();
+      zxReader.decodeFromVideoDevice(null, $('video'), function(res,err){ if(res){ camHit(res.getText()); } });
+    } catch(e){ $('camMsg').textContent='本浏览器扫不出码，请用扫码枪或手动输入'; }
+  } else {
+    $('camMsg').textContent='此浏览器不支持摄像头识别条码，请用扫码枪或手动输入';
+  }
+}
+function stopCam(){
+  if(scanTimer){ clearInterval(scanTimer); scanTimer=null; }
+  try { if(zxReader){ zxReader.reset(); zxReader=null; } } catch(e){}
+  if(stream){ try { stream.getTracks().forEach(function(t){ t.stop(); }); } catch(e){} stream=null; }
+  camShow(false);
+}
+$('camBtn').onclick=startCam; $('camStop').onclick=stopCam;
 $('code').addEventListener('keydown', function(e){
   if(e.key === 'Enter'){ e.preventDefault(); addCode($('code').value); $('code').value=''; }
 });
