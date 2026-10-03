@@ -5292,7 +5292,7 @@ class ScanApp:
         # 操作按钮（网格排布：窄窗口/小屏也不会被切掉）
         ops = ttk.LabelFrame(main, text="操作")
         ops.grid(row=6, column=0, sticky="ew", pady=6)
-        for c in range(5):
+        for c in range(6):
             ops.columnconfigure(c, weight=1)
         # 现货可发 / 批次查询 两个按钮按要求隐藏（功能代码保留：on_stock_dialog / on_batch_dialog）
         _ops_list = (("增量刷新", lambda: self.sync_pending(background=True), "TButton", "data.refresh"),
@@ -5311,11 +5311,11 @@ class ScanApp:
                      ("登录 ERP", self.on_erp_login, "TButton", "__any"))
         for i, (txt, cmd, sty, perm) in enumerate(_ops_list):
             _b = ttk.Button(ops, text=txt, command=cmd, style=sty)
-            _b.grid(row=i // 5, column=i % 5, sticky="ew", padx=5, pady=5)
+            _b.grid(row=i // 6, column=i % 6, sticky="ew", padx=5, pady=5)
             self._gate(perm, _b)
         # 网页「可发」撤回宽限：放在「重新登录」右边（同一片操作区）
         _holdbox = ttk.Frame(ops)
-        _holdbox.grid(row=2, column=4, sticky="w", padx=5, pady=5)
+        _holdbox.grid(row=2, column=5, sticky="w", padx=5, pady=5)
         ttk.Label(_holdbox, text="可发撤回宽限").pack(side=tk.LEFT, padx=(0, 4))
         self.hold_var = tk.StringVar(value=str(get_web_hold()))
         _hsp = ttk.Spinbox(_holdbox, from_=0, to=600, width=4, textvariable=self.hold_var)
@@ -5359,7 +5359,7 @@ class ScanApp:
             except Exception:
                 pass
         chk = ttk.Frame(ops)
-        chk.grid(row=3, column=0, columnspan=5, sticky="w", padx=5, pady=(2, 4))
+        chk.grid(row=3, column=0, columnspan=6, sticky="w", padx=5, pady=(2, 4))
         _hk = ttk.Checkbutton(chk, text="后台扫码监听（最小化也能扫）", variable=self.hook_on,
                               command=self.on_hook_toggle)
         _hk.pack(side=tk.LEFT, padx=(0, 14))
