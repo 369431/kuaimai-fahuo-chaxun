@@ -2244,11 +2244,40 @@ function camHit(v){
   const code=String(v||'').trim();
   if(code){ addCode(code); }
 }
+function zxHints(){
+  const Z=window.ZXing, F=Z.BarcodeFormat;
+  const list=[F.CODE_128,F.CODE_39,F.CODE_93,F.ITF,F.EAN_13,F.EAN_8,F.UPC_A,F.UPC_E,F.QR_CODE,F.DATA_MATRIX];
+  const h=new Map();
+  h.set(Z.DecodeHintType.POSSIBLE_FORMATS, list);
+  h.set(Z.DecodeHintType.TRY_HARDER, true);
+  return h;
+}
 async function startCam(){
-  $('camMsg').textContent='正在打开摄像头…';
-  try { stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}}); }
-  catch(e){ alert('无法打开摄像头：'+e.message+'\n（手机浏览器需用 https 打开本页）'); return; }
   camShow(true);
+  $('camMsg').textContent='正在打开摄像头…';
+  /* ① 优先 ZXing（首页那套）。小米/部分国产浏览器自带 BarcodeDetector 是空壳：
+        画面打得开但永远识别不到 —— 所以不能先试它。 */
+  if(window.ZXing && window.ZXing.BrowserMultiFormatReader){
+    try {
+      zxReader=new window.ZXing.BrowserMultiFormatReader();
+      try { if(zxReader.reader && zxReader.reader.setHints) zxReader.reader.setHints(zxHints()); } catch(e){}
+      const cb=function(res,err){ if(res){ camHit(res.getText()); } };
+      if(zxReader.decodeFromConstraints){
+        zxReader.decodeFromConstraints({video:{facingMode:'environment'}}, $('video'), cb);
+      } else {
+        zxReader.decodeFromVideoDevice(null, $('video'), cb);
+      }
+      $('camMsg').textContent='对准条码…';
+      return;
+    } catch(e){
+      $('camMsg').textContent='ZXing 启动失败，改用浏览器自带识别…';
+      try { if(zxReader){ zxReader.reset(); } } catch(_){}
+      zxReader=null;
+    }
+  }
+  /* ② 退回 BarcodeDetector（桌面 Chrome/Edge 一般可用） */
+  try { stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}}); }
+  catch(e){ alert('无法打开摄像头：'+e.message+'\n（手机浏览器需用 https 打开本页）'); camShow(false); return; }
   try { $('video').srcObject=stream; await $('video').play(); } catch(e){}
   if('BarcodeDetector' in window){
     $('camMsg').textContent='对准条码…';
@@ -2256,12 +2285,6 @@ async function startCam(){
     scanTimer=setInterval(async function(){
       try { const c=await det.detect($('video')); if(c&&c.length){ camHit(c[0].rawValue); } } catch(e){}
     }, 400);
-  } else if(window.ZXing && window.ZXing.BrowserMultiFormatReader){
-    $('camMsg').textContent='对准条码…（ZXing）';
-    try {
-      zxReader=new window.ZXing.BrowserMultiFormatReader();
-      zxReader.decodeFromVideoDevice(null, $('video'), function(res,err){ if(res){ camHit(res.getText()); } });
-    } catch(e){ $('camMsg').textContent='本浏览器扫不出码，请用扫码枪或手动输入'; }
   } else {
     $('camMsg').textContent='此浏览器不支持摄像头识别条码，请用扫码枪或手动输入';
   }
