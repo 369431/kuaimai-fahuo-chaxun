@@ -1,10 +1,10 @@
 {
-  "version": "v1.39",
-  "notes": "修复：**小米等手机上波次页「扫码添加」识别不到**（画面能开、就是扫不出来）。\n· 原因：波次页原来先试浏览器自带的条码识别，而部分国产浏览器这个能力是空壳 —— 能开画面但永远识别不到；首页那套之所以能用，是因为它用的是本地 ZXing 解码。\n· 现在：波次页的「扫码添加」也**改成优先用 ZXing 解码**（和首页同一套码制：CODE_128/39/93、ITF、EAN/UPC、QR、DataMatrix，并开 TRY_HARDER），浏览器自带识别只作为兜底。\n· 桌面 Chrome/Edge 不受影响；打单浏览器与波次功能照旧。",
+  "version": "v1.40",
+  "notes": "修复：波次页「扫码添加」在手机上扫不出来（多台手机都不行）。\n· 原因：首页能用是因为中转注入了本地 ZXing 的扫码增强层（scan.js，靠 `btnCam` / `video` / `camBox` 三个元素接管）；波次页元素名不一样、也没引它，所以走的是浏览器自带识别（部分手机是空壳，扫不出）。\n· 现在：波次页按钮改名为 `btnCam`（并补 `btnCamStop`），页面自己引 `/km/scan.js`，扫码增强层直接接管 —— 和首页**同一套解码**；扫到码后回调页面 `window.query` 自动加入清单。\n· 原来那套（ZXing→原生识别）保留作兜底：经 8790 直连或脚本没加载时仍可用。\n· 注意：手机浏览器请**刷新页面**再试。",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.39/kuaimai-scan-setup-v1.39.exe",
-  "sha256": "86a13368b836c95ad2f3f8a37217f91bcf681304e67bac1eb39a8e2e99823877",
-  "size": 28788305,
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.40/kuaimai-scan-setup-v1.40.exe",
+  "sha256": "75a171267e160003b6198d2993b4cb876a2ea01c385455f0b724fb7992ecadd3",
+  "size": 28790938,
   "mandatory": false,
-  "published_at": "2026-10-04 14:28"
+  "published_at": "2026-10-04 15:20"
 }
