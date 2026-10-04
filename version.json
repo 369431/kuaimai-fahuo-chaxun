@@ -1,10 +1,10 @@
 {
-  "version": "v1.44",
-  "notes": "波次挑单改成「零本地缓存」（**加急优先不变，反而更实时**）：\n· 排序键仍是：**已超时 → 加急 → 剩余时间最短 → sid**。\n· 「加急」原来有 60 秒内存缓存，现在改成一键/每次生成都**直读本机库**（加急标记只能本地补，ERP 打单数据里没有这个字段）。\n· 「剩余时间」原来可能复用 120 秒内的查单缓存，波次场景改为**强制实时查**。\n· 扫码/手输的件数、候选单、能否成波、波次号/状态 —— 本来就是实时取快麦 ERP，未变。\n· 打单（订单打印V2 / 后置打印）的取数逻辑**完全没动**。",
+  "version": "v1.45",
+  "notes": "PDA 扫码枪直接扫到输入框（网页端）：\n· 之前页面只认「回车」，而多数 PDA 扫码枪默认**不带回车后缀** —— 字打进去了但没人提交，看起来「没反应」。\n· 现在加了扫码枪模式：① **一串快速输入停下（~150ms）就自动提交**（≥6 字符才算，人手慢打不会误触发）② 输入框**没聚焦也在页面层接住**（打字落到页面上也认）③ 点页面空白处**自动把焦点放回编码框**（PDA 浏览器常丢焦点）。\n· 带回车后缀的枪照旧只提交一次；首页与波次页都生效。\n· 提示：PDA 的扫码设置里如果能把「后缀/结束符」设成 Enter，体验最稳（两条都兜住了）。",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.44/kuaimai-scan-setup-v1.44.exe",
-  "sha256": "7dbb2d14d3a72f8aad9bada80dbc77a9d5984bf930de96d33c7a4c5fc48c6748",
-  "size": 28809796,
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.45/kuaimai-scan-setup-v1.45.exe",
+  "sha256": "ff2d57bc75ecf6ef528a5fd80218cbd1fe77574c1125c964fd24502edb737d85",
+  "size": 28810594,
   "mandatory": false,
-  "published_at": "2026-10-04 16:20"
+  "published_at": "2026-10-04 20:37"
 }
