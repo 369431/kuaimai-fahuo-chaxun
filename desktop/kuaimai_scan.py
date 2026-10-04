@@ -3008,7 +3008,7 @@ class _WebHandler(BaseHTTPRequestHandler):
                             "wave_id": lw.get("wave_id", rec.get("wave_id")),
                             "status": lw.get("status", rec.get("status")),
                             "status_cn": (lw.get("status_cn")
-                                          or wv.status_cn(lw.get("status", rec.get("status")))),
+                                          or wv.status_cn(lw.get("status", rec.get("status")), lw.get("pickEndTime", rec.get("pickEndTime")))),
                             "live": bool(lw),
                             "tradesCount": lw.get("tradesCount", rec.get("tradesCount")),
                             "itemCount": lw.get("itemCount", rec.get("itemCount")),
@@ -3422,10 +3422,22 @@ class _WebHandler(BaseHTTPRequestHandler):
                     import kuaimai_wave as wv
                     out = wv.create(items, str(body.get("carrier") or ""))
                     if out.get("save_ok"):
-                        try:
-                            out["verify"] = wv.verify_wave(out.get("sids") or [], api_call_authed)
-                        except Exception as e:
-                            out["verify"] = {"ok": False, "error": str(e)[:150]}
+                        # 回读波次号：ERP 侧可能有几秒延迟 → 最多重试 3 次（等 2s/3s）。
+                        # 目的：生成的波次能直接拿到波次号，网页端「一键拣完」不用人工输入。
+                        v = {}
+                        for _wait in (0, 2, 3):
+                            if _wait:
+                                try:
+                                    time.sleep(_wait)
+                                except Exception:
+                                    pass
+                            try:
+                                v = wv.verify_wave(out.get("sids") or [], api_call_authed)
+                            except Exception as e:
+                                v = {"ok": False, "error": str(e)[:150]}
+                            if v.get("ok") and (v.get("wave_id") or v.get("wave_code")):
+                                break
+                        out["verify"] = v
                         # 本机只记「我自己生成过哪些波次号」；状态/内容 记录页每次实时回读 ERP。
                         try:
                             v = out.get("verify") or {}
@@ -3433,7 +3445,7 @@ class _WebHandler(BaseHTTPRequestHandler):
                                 "wave_code": v.get("wave_code") or "",
                                 "wave_id": v.get("wave_id"),
                                 "status": v.get("status"),
-                                "status_cn": v.get("status_cn") or wv.status_cn(v.get("status")),
+                                "status_cn": v.get("status_cn") or wv.status_cn(v.get("status"), v.get("pickEndTime")),
                                 "tradesCount": v.get("tradesCount"),
                                 "itemCount": v.get("itemCount"),
                                 "carrier": out.get("carrier") or "",
@@ -3462,7 +3474,7 @@ class _WebHandler(BaseHTTPRequestHandler):
                 if deny:
                     return deny
                 try:
-                    wid = body.get("wave_id", body.get("waveId"))
+                    wid = body.get("wave_id", body.get("waveId", body.get("wave_code")))
                     if wid in (None, "", 0):
                         return self._json({"error": "缺少 wave_id（波次ID）"}, 400)
                     do_write = bool(body.get("confirm"))

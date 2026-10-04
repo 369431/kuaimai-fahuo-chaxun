@@ -2374,13 +2374,14 @@ $('mk').onclick = function(){
       h += '</div>';
       h += '<h2 style="margin-top:12px">配货明细（每个 SKU 一行）</h2>' + skuLines(p)
          + '<div class="muted" style="margin-top:6px">状态/内容均为实时回读快麦 ERP。</div>';
-      if(v.wave_id && v.status !== 3 && v.status !== '3'){
+      if((v.wave_id || v.wave_code) && v.status !== 3 && v.status !== '3'){
         h += '<div class="actions" style="margin-top:10px"><button id="fwFromCreate" class="ghost" data-wid="'
-           + esc(v.wave_id) + '">货配齐了 → 一键拣完</button></div>';
+           + esc(v.wave_id || v.wave_code) + '">一键拣完（不用输入）</button></div>';
       }
     } else {
       h += '<div><span class="tag warn">已提交成波，但回读未确认</span></div>'
          + (v.wave_code ? '<div class="big oktext">波次号：' + esc(v.wave_code) + '</div>' : '')
+         + '<div class="muted">稍后到「波次记录」页点「一键拣完」即可（不用输入波次号）。</div>'
          + '<div class="muted" style="margin-top:6px">' + esc(v.error || '回读失败') + '</div>';
     }
     h += '</div>';
@@ -2410,28 +2411,23 @@ function skuLines(p){
   return h;
 }
 
-/* ---------------- 一键拣完：两段（先只读预览分拣明细 → 再确认提交） ---------------- */
+/* ---------------- 一键拣完：两段（先只读回读预览 → 再确认提交） ---------------- */
 function finishRenderPreview(d){
   if(!d || d.ok === false){
     return '<div class="card"><h2>一键拣完 · 预览</h2><div class="badtext">'
       + esc((d && d.error) || '预览失败') + '</div></div>';
   }
   let h = '<div class="card"><h2>一键拣完 · 预览（只读，尚未提交）</h2>';
-  h += '<div style="margin-top:6px"><span class="tag">波次 ' + esc(d.wave_id) + '</span>'
-     + '<span class="tag">分拣位置 ' + esc(d.total_positions) + '</span>'
-     + '<span class="tag">明细行 ' + esc(d.seed_lines) + '</span>'
-     + '<span class="tag">件数 ' + esc(d.seed_total) + '</span></div>';
-  h += '<table style="margin-top:8px"><thead><tr><th>位置号</th><th>编码</th><th>件数</th></tr></thead><tbody>';
-  (d.list || []).forEach(function(p){
-    (p.details || []).forEach(function(x, i){
-      h += '<tr><td>' + (i === 0 ? esc(p.positionNo) : '') + '</td><td>' + esc(x.outerId)
-         + '</td><td>' + esc(x.matchedNum) + '</td></tr>';
-    });
-  });
-  h += '</tbody></table>';
+  h += '<div style="margin-top:6px"><span class="tag">波次 ' + esc(d.wave_code || d.wave_id) + '</span>'
+     + '<span class="tag">订单数 ' + esc(d.tradesCount == null ? '-' : d.tradesCount) + '</span>'
+     + '<span class="tag">件数 ' + esc(d.itemCount == null ? '-' : d.itemCount) + '</span>'
+     + '<span class="tag' + (d.picked ? ' ok' : '') + '">' + (d.picked ? '已拣' : '未拣') + '</span></div>';
+  h += '<div class="muted" style="margin-top:6px">拣货完成时间：' + esc(d.pickEndTime || '（无）') + '</div>';
+  h += '<div style="margin-top:8px">将执行：<b>'
+     + esc(d.will_execute || ('手动拣选(ids=' + d.wave_id + ')')) + '</b>　—　只读预览，尚未提交（不会写）</div>';
   if(d.warning) h += '<div class="badtext" style="margin-top:6px">' + esc(d.warning) + '</div>';
   h += '<div class="muted" style="margin-top:8px">点「确认拣完」会真的把该波次标记为 <b>拣选完成</b>'
-     + '（网页随即显示<b>等待验货</b>，订单数不变、件数按已拣显示），<b>不可撤销</b>。</div>'
+     + '（网页随即显示<b>等待验货</b>），<b>不可撤销</b>。</div>'
      + '<div class="actions"><button id="fwGo" class="ghost">确认拣完（不可撤销）</button></div></div>';
   return h;
 }
@@ -2443,19 +2439,20 @@ function finishCommit(wid){
     if(d && d.ok){
       h += '<div class="big oktext">波次 ' + esc(d.wave_code || d.wave_id) + ' 拣选完成（等待验货）</div>'
          + '<div style="margin-top:6px"><span class="tag ok">新状态 ' + esc(d.status_cn || d.status || '?')
-         + '</span><span class="tag">件数 ' + esc(d.seed_total) + '</span></div>';
+         + '</span><span class="tag">' + (d.picked ? '已拣' : '未拣') + '</span>'
+         + '<span class="tag">件数 ' + esc(d.itemCount == null ? '-' : d.itemCount) + '</span></div>'
+         + '<div class="muted" style="margin-top:6px">拣货完成时间：' + esc(d.pickEndTime || '（无）') + '</div>';
       if(d.warning) h += '<div class="muted" style="margin-top:6px">' + esc(d.warning) + '</div>';
     } else {
       h += '<div class="badtext">未成功：' + esc((d && d.error) || '未知失败') + '</div>';
       if(d && d.pick_hand) h += '<div class="muted" style="margin-top:6px">pick.hand：' + esc(JSON.stringify(d.pick_hand)) + '</div>';
-      if(d && d.seed) h += '<div class="muted" style="margin-top:6px">seed：' + esc(JSON.stringify(d.seed)) + '</div>';
     }
     h += '<div class="muted" style="margin-top:8px">状态为实时回读快麦 ERP。</div></div>';
     $('fwOut').innerHTML = h;
   }).catch(function(e){ $('fwOut').innerHTML = '<div class="card"><div class="badtext">提交失败：' + esc(e.message) + '</div></div>'; });
 }
 function finishPreview(wid){
-  $('fwOut').innerHTML = '<div class="card"><div class="muted">正在只读预览分拣明细…</div></div>';
+  $('fwOut').innerHTML = '<div class="card"><div class="muted">正在只读回读波次…</div></div>';
   post('/api/wave/finish', {wave_id: wid, confirm: false}).then(function(d){
     $('fwOut').innerHTML = finishRenderPreview(d);
     const b = $('fwGo');
@@ -2635,21 +2632,22 @@ function load(){
 
 $('refresh').onclick = function(e){ if(e) e.preventDefault(); load(); return false; };
 
-/* ---------------- 一键拣完：先只读预览分拣明细 → 再确认提交（不可撤销） ---------------- */
+/* ---------------- 一键拣完：先只读回读预览 → 再确认提交（不可撤销） ---------------- */
 function fwPreview(wid, wcode){
   $('recBody').insertAdjacentHTML('beforeend',
-    '<tr id="fwRow"><td colspan="8"><div id="fwBox"><span class="muted">正在只读预览分拣明细…</span></div></td></tr>');
+    '<tr id="fwRow"><td colspan="8"><div id="fwBox"><span class="muted">正在只读回读波次…</span></div></td></tr>');
   $('fwBox').scrollIntoView({behavior:'smooth', block:'center'});
   fetch(bust(withSid('/api/wave/finish')), {method:'POST', cache:'no-store',
       headers:{'Content-Type':'application/json'}, body:JSON.stringify({wave_id:wid, confirm:false})})
     .then(function(r){ if(r.status === 401){ location.href = '/login'; throw new Error('请重新登录'); } return r.json(); })
     .then(function(d){
       if(!d || d.ok === false){ $('fwBox').innerHTML = '<span class="badtext">' + esc((d&&d.error)||'预览失败') + '</span>'; return; }
-      let h = '<div><b>波次 ' + esc(wcode || wid) + '</b> 分拣 ' + esc(d.total_positions) + ' 个位置 / '
-         + esc(d.seed_lines) + ' 行 / ' + esc(d.seed_total) + ' 件</div>';
-      h += '<div class="muted">' + (d.list || []).map(function(p){
-        return '位置' + esc(p.positionNo) + '：' + (p.details||[]).map(function(x){ return esc(x.outerId) + '×' + esc(x.matchedNum); }).join('　');
-      }).join('<br>') + '</div>';
+      let h = '<div><b>波次 ' + esc(d.wave_code || wcode || wid) + '</b>'
+         + '　订单数 ' + esc(d.tradesCount == null ? '-' : d.tradesCount)
+         + '　件数 ' + esc(d.itemCount == null ? '-' : d.itemCount)
+         + '　' + (d.picked ? '已拣' : '未拣') + '</div>';
+      h += '<div class="muted">拣货完成时间：' + esc(d.pickEndTime || '（无）')
+         + '　将执行：' + esc(d.will_execute || ('手动拣选(ids=' + wid + ')')) + '（只读预览，未提交）</div>';
       if(d.warning) h += '<div class="badtext">' + esc(d.warning) + '</div>';
       h += '<div class="bar" style="margin-top:6px"><button class="fin" id="fwGo">确认拣完（不可撤销）</button>'
          + '<button class="fin" id="fwCancel">取消</button></div>';
@@ -2664,7 +2662,9 @@ function fwPreview(wid, wcode){
           .then(function(d2){
             if(d2 && d2.ok){
               $('fwBox').innerHTML = '<div style="color:#1B7F35"><b>拣选完成（等待验货）</b> '
-                + esc(d2.wave_code || wid) + '　新状态：' + esc(d2.status_cn || d2.status || '?') + '</div>';
+                + esc(d2.wave_code || wid) + '　新状态：' + esc(d2.status_cn || d2.status || '?')
+                + '　件数 ' + esc(d2.itemCount == null ? '-' : d2.itemCount)
+                + '　拣货完成 ' + esc(d2.pickEndTime || '（无）') + '</div>';
               setTimeout(load, 1500);
             } else {
               $('fwBox').innerHTML = '<span class="badtext">未成功：' + esc((d2&&d2.error)||'未知失败') + '</span>';

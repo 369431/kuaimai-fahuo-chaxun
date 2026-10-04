@@ -50,7 +50,13 @@ def wave_state(status, pick_end_time=None):
         return {"status": raw, "status_cn": str(raw), "picked": bool(pick_end_time),
                 "pick_end_time": pick_end_time}
     pet = pick_end_time
-    has_pet = bool(str(pet).strip()) if pet is not None else False
+    try:
+        pet_ms = int(pet or 0)
+    except Exception:
+        pet_ms = 0
+    # ERP 用 0 / 946656000000（2000-01-01）当「没有时间」的占位；真实毫秒时间戳远大于 1e12。
+    # 所以只能按数值判断，不能用“非空字符串”——否则 0 会被当成已拣（v1.42 踩过）。
+    has_pet = pet_ms > 1000000000000
     if iv == 3:
         cn, picked = "已完成", True
     elif iv == 4:
@@ -406,7 +412,7 @@ def verify_wave(sids, caller, minutes=20):
                 "waves": len(res.get("list") or []), "code": res.get("code"), "msg": res.get("msg")}
     inter, w, ws = best
     return {"ok": True, "wave_id": w.get("id"), "wave_code": w.get("code"),
-            "status": w.get("status"), "status_cn": status_cn(w.get("status")),
+            "status": w.get("status"), "status_cn": status_cn(w.get("status"), w.get("pickEndTime")),
             "tradesCount": w.get("tradesCount"),
             "itemCount": w.get("itemCount"), "matched": inter,
             "missing": sorted(want - ws), "extra": len(ws - want)}
@@ -438,7 +444,7 @@ def waves_list(caller, minutes=1440, page_size=100):
     for w in (res.get("list") or []):
         out.append({
             "wave_code": w.get("code"), "wave_id": w.get("id"),
-            "status": w.get("status"), "status_cn": status_cn(w.get("status")),
+            "status": w.get("status"), "status_cn": status_cn(w.get("status"), w.get("pickEndTime")),
             "tradesCount": w.get("tradesCount"), "itemCount": w.get("itemCount"),
             "pickEndTime": w.get("pickEndTime"),
             "sids": [x.get("sid") for x in (w.get("list") or [])],
