@@ -541,7 +541,11 @@ def _printed_set():
     return s
 
 
-def load_urgent_sids():
+def load_urgent_sids(fresh=False):
+    # fresh=True：跳过 60 秒内存缓存，每次直读本机库
+    # （波次挑单用它 —— 保证每次都是最新的加急标记；打单仍走缓存）
+    if fresh:
+        return _load_urgent_raw()
     s = _cache_get("urgent", 60)          # 加急 sid 缓存 60 秒
     if s is not None:
         return s
@@ -591,23 +595,25 @@ def refund_reason(o):
     return ""
 
 
-def fetch_orders_live(code, page_size=500):
+def fetch_orders_live(code, page_size=500, fresh=False):
     key = ("orders", str(code), int(page_size))
-    hit = _cache_get(key, ORDERS_TTL)      # 预取 / 重复点击都复用
+    # fresh=True：跳过内存缓存，强制实时查（波次挑单用它算「剩余时间」，不允许 120 秒陈旧）
+    hit = None if fresh else _cache_get(key, ORDERS_TTL)   # 预取 / 重复点击都复用
     if hit is not None:
         _tm_count("订单列表-命中缓存")
         return list(hit)
     # 按编码复用：同一次点击里「预览」用默认 page_size=500 查过，真打时 do_print 会按
     # want×3 换成更小的 page_size（10 张→60），键不同 → 原来会把刚查的结果白白丢掉再查一遍。
     # 更大的 page_size 结果天然覆盖更小的需求（都是同一编码的结果集），可直接复用。
-    try:
-        prev = _cache_get(("orders_by_code", str(code)), ORDERS_TTL)
-        if prev and int(prev.get("page_size") or 0) >= int(page_size):
-            rows = list(prev.get("rows") or [])
-            _cache_put(key, rows)          # 顺手补上精确键
-            return rows
-    except Exception:
-        pass
+    if not fresh:
+        try:
+            prev = _cache_get(("orders_by_code", str(code)), ORDERS_TTL)
+            if prev and int(prev.get("page_size") or 0) >= int(page_size):
+                rows = list(prev.get("rows") or [])
+                _cache_put(key, rows)          # 顺手补上精确键
+                return rows
+        except Exception:
+            pass
     """从打单页**实时**查该商家编码的订单（/trade/search + outerId，queryId=77）。
 
     返回 [{sid, items[{code,qty,gift}], remain(小时,可负), print_count, express, urgent}]
@@ -632,7 +638,7 @@ def fetch_orders_live(code, page_size=500):
         print("  (实时查单返回解析失败: %s，长度 %d)" % (str(e)[:60], len(raw)))
         return []
     now = time.time()
-    urgent_set = load_urgent_sids()
+    urgent_set = load_urgent_sids(fresh=fresh)
     out = []
     for o in arr:
         items = []

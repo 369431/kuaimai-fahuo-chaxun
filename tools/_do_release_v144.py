@@ -1,0 +1,25 @@
+# -*- coding: utf-8 -*-
+"""发布 v1.44：调用 release.py 的 main()，中文说明走 UTF-8 字面量（不过控制台代码页）。"""
+import os
+import sys
+
+REPO = r"C:\Users\Kerwin\Desktop\kuaimai发货查询"
+INSTALLER = r"C:\Users\Kerwin\Desktop\发布\快麦扫码查询_安装版_v1.44.exe"
+NOTES = ("波次挑单改成「零本地缓存」（**加急优先不变，反而更实时**）：\n"
+         "· 排序键仍是：**已超时 → 加急 → 剩余时间最短 → sid**。\n"
+         "· 「加急」原来有 60 秒内存缓存，现在改成一键/每次生成都**直读本机库**"
+         "（加急标记只能本地补，ERP 打单数据里没有这个字段）。\n"
+         "· 「剩余时间」原来可能复用 120 秒内的查单缓存，波次场景改为**强制实时查**。\n"
+         "· 扫码/手输的件数、候选单、能否成波、波次号/状态 —— 本来就是实时取快麦 ERP，未变。\n"
+         "· 打单（订单打印V2 / 后置打印）的取数逻辑**完全没动**。")
+
+assert os.path.isfile(INSTALLER), INSTALLER
+sys.path.insert(0, REPO)
+os.chdir(REPO)
+sys.argv = ["release.py", "--version", "v1.44", "--installer", INSTALLER, "--notes", NOTES]
+
+import release  # noqa: E402
+
+rc = release.main()
+print("\nrelease.main() returned", rc)
+sys.exit(rc)

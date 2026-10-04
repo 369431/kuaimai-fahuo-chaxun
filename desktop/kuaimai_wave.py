@@ -251,7 +251,7 @@ def _priority(codes):
     rem = {}
     for code in codes:
         try:
-            rows = KP.fetch_orders_live(code)
+            rows = KP.fetch_orders_live(code, fresh=True)
         except BaseException:
             continue
         for o in rows or []:
@@ -325,7 +325,7 @@ def plan(items, carrier=""):
 
     rem = _priority(list(targets.keys()))
     try:
-        urg = KP.load_urgent_sids()
+        urg = KP.load_urgent_sids(fresh=True)
     except BaseException:
         urg = set()
 
