@@ -255,35 +255,25 @@ $('rmain').innerHTML = `待发货一单一件：${onePiece}<br>待发货一单�
    2) 有些 PDA 浏览器不给/丢失自动聚焦：没聚焦时在页面层也接住（打字落到 body）；
    3) 点页面空白处自动把焦点放回编码框。 */
 function kmWedge(el, submit, clearAfter){
+  /* 扫码枪**带回车后缀**：只认回车提交，不做「快输入自动提交」（避免误触发）。 */
   if(!el || !submit) return;
-  var last=0, cnt=0, timer=null;
   el.addEventListener('keydown', function(e){
-    if(e.key === 'Enter'){ e.preventDefault(); if(timer){clearTimeout(timer);timer=null;}
-      var v=(el.value||'').trim(); if(v){ submit(v); if(clearAfter){ el.value=''; } } last=0; cnt=0; return; }
-    var now=Date.now();
-    if(now-last > 120){ cnt=0; }          /* 间隔太久 = 人手输入，重新计数 */
-    last=now; cnt++;
-    if(timer){ clearTimeout(timer); }
-    timer=setTimeout(function(){           /* 停 150ms：刚才是≥6 字符的快输入 → 当扫完 */
-      timer=null;
+    if(e.key === 'Enter'){
+      e.preventDefault();
       var v=(el.value||'').trim();
-      if(v && cnt>=6){ submit(v); if(clearAfter){ el.value=''; } }
-      last=0; cnt=0;
-    }, 150);
+      if(v){ submit(v); if(clearAfter){ el.value=''; } }
+    }
   });
 }
 kmWedge($('code'), function(v){ query(v); }, false);
 /* 没聚焦时也接住（打字落到 body）：回车 / 一串≥6 字符快输入 就提交 */
 (function(){
-  var buf='', last=0, t=null;
+  var buf='';
   document.addEventListener('keydown', function(e){
     var tg=e.target||{};
     if(tg.tagName==='INPUT'||tg.tagName==='TEXTAREA'||tg.isContentEditable) return;
     if(e.key==='Enter'){ var v=buf.trim(); buf=''; if(v.length>=4){ query(v); } return; }
-    if(!e.key || e.key.length!==1) return;
-    var now=Date.now(); if(now-last>120){ buf=''; } last=now; buf+=e.key;
-    if(t){ clearTimeout(t); }
-    t=setTimeout(function(){ t=null; var v=buf.trim(); buf=''; if(v.length>=6){ query(v); } }, 180);
+    if(e.key && e.key.length===1){ buf += e.key; }   /* 没聚焦时先攒着，等回车再提交 */
   });
   /* 点空白处把焦点放回编码框（PDA 浏览器常丢焦点） */
   document.addEventListener('click', function(e){
@@ -2381,35 +2371,25 @@ window.query = function(code){ if(code){ addCode(String(code).trim()); } };
    2) 有些 PDA 浏览器不给/丢失自动聚焦：没聚焦时在页面层也接住（打字落到 body）；
    3) 点页面空白处自动把焦点放回编码框。 */
 function kmWedge(el, submit, clearAfter){
+  /* 扫码枪**带回车后缀**：只认回车提交，不做「快输入自动提交」（避免误触发）。 */
   if(!el || !submit) return;
-  var last=0, cnt=0, timer=null;
   el.addEventListener('keydown', function(e){
-    if(e.key === 'Enter'){ e.preventDefault(); if(timer){clearTimeout(timer);timer=null;}
-      var v=(el.value||'').trim(); if(v){ submit(v); if(clearAfter){ el.value=''; } } last=0; cnt=0; return; }
-    var now=Date.now();
-    if(now-last > 120){ cnt=0; }          /* 间隔太久 = 人手输入，重新计数 */
-    last=now; cnt++;
-    if(timer){ clearTimeout(timer); }
-    timer=setTimeout(function(){           /* 停 150ms：刚才是≥6 字符的快输入 → 当扫完 */
-      timer=null;
+    if(e.key === 'Enter'){
+      e.preventDefault();
       var v=(el.value||'').trim();
-      if(v && cnt>=6){ submit(v); if(clearAfter){ el.value=''; } }
-      last=0; cnt=0;
-    }, 150);
+      if(v){ submit(v); if(clearAfter){ el.value=''; } }
+    }
   });
 }
 kmWedge($('code'), function(v){ addCode(v); }, true);
 /* 没聚焦时也接住（打字落到 body）：回车 / 一串≥6 字符快输入 就提交 */
 (function(){
-  var buf='', last=0, t=null;
+  var buf='';
   document.addEventListener('keydown', function(e){
     var tg=e.target||{};
     if(tg.tagName==='INPUT'||tg.tagName==='TEXTAREA'||tg.isContentEditable) return;
     if(e.key==='Enter'){ var v=buf.trim(); buf=''; if(v.length>=4){ addCode(v); } return; }
-    if(!e.key || e.key.length!==1) return;
-    var now=Date.now(); if(now-last>120){ buf=''; } last=now; buf+=e.key;
-    if(t){ clearTimeout(t); }
-    t=setTimeout(function(){ t=null; var v=buf.trim(); buf=''; if(v.length>=6){ addCode(v); } }, 180);
+    if(e.key && e.key.length===1){ buf += e.key; }   /* 没聚焦时先攒着，等回车再提交 */
   });
   /* 点空白处把焦点放回编码框（PDA 浏览器常丢焦点） */
   document.addEventListener('click', function(e){
