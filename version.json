@@ -1,10 +1,10 @@
 {
-  "version": "v1.38",
-  "notes": "网页「生成波次」扫码体验修复：**扫出来是 0 时不再一头雾水**。\n· 原因：波次按快递拆（中通/申通各一个波次），页面默认停在「中通」；扫到全是申通的货就会显示 0 —— 其实货是有的。\n· 现在：当前快递没货、另一种有货时，直接提示「**XX 有 N 件**」并给一个「**切到 XX 并添加**」按钮，一键换快递加上；\n· 两种快递都没有时，明确写明原因：该编码没有「待发货 + 未成波 + 一单一件」的订单（可能已生成波次 / 已打印 / 是多件单），并且**不再往清单里塞 0 件的行**。",
+  "version": "v1.39",
+  "notes": "修复：**小米等手机上波次页「扫码添加」识别不到**（画面能开、就是扫不出来）。\n· 原因：波次页原来先试浏览器自带的条码识别，而部分国产浏览器这个能力是空壳 —— 能开画面但永远识别不到；首页那套之所以能用，是因为它用的是本地 ZXing 解码。\n· 现在：波次页的「扫码添加」也**改成优先用 ZXing 解码**（和首页同一套码制：CODE_128/39/93、ITF、EAN/UPC、QR、DataMatrix，并开 TRY_HARDER），浏览器自带识别只作为兜底。\n· 桌面 Chrome/Edge 不受影响；打单浏览器与波次功能照旧。",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.38/kuaimai-scan-setup-v1.38.exe",
-  "sha256": "8ebe4e568fc37fa5df6880687555cd9596b80976bbbeef8ad219c26decb2cf15",
-  "size": 28793202,
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.39/kuaimai-scan-setup-v1.39.exe",
+  "sha256": "86a13368b836c95ad2f3f8a37217f91bcf681304e67bac1eb39a8e2e99823877",
+  "size": 28788305,
   "mandatory": false,
-  "published_at": "2026-10-04 03:51"
+  "published_at": "2026-10-04 14:28"
 }
