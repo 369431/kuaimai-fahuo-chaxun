@@ -1,10 +1,10 @@
 {
-  "version": "v1.40",
-  "notes": "修复：波次页「扫码添加」在手机上扫不出来（多台手机都不行）。\n· 原因：首页能用是因为中转注入了本地 ZXing 的扫码增强层（scan.js，靠 `btnCam` / `video` / `camBox` 三个元素接管）；波次页元素名不一样、也没引它，所以走的是浏览器自带识别（部分手机是空壳，扫不出）。\n· 现在：波次页按钮改名为 `btnCam`（并补 `btnCamStop`），页面自己引 `/km/scan.js`，扫码增强层直接接管 —— 和首页**同一套解码**；扫到码后回调页面 `window.query` 自动加入清单。\n· 原来那套（ZXing→原生识别）保留作兜底：经 8790 直连或脚本没加载时仍可用。\n· 注意：手机浏览器请**刷新页面**再试。",
+  "version": "v1.41",
+  "notes": "波次功能补齐（都在网页端）：\n· **成波后直接显示波次号**（成波即回读，不用再回 ERP 找）。\n· **配货明细逐行显示**：`7107-燕麦色S　38 件` 一个 SKU 一行，多个 SKU 自动换行，照着配货。\n· **新增「生成波次记录」页**：列出你生成过的波次号 + 状态 + 件数/时间。\n· **波次状态**中文化显示（未完成 / 已完成 / 已取消；认不出的状态原样显示，不瞎猜）。\n· 数据**实时取 ERP**：记录页每次打开都实时回读，不走本地缓存；本机只记「你自己生成过哪些波次号」。",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.40/kuaimai-scan-setup-v1.40.exe",
-  "sha256": "75a171267e160003b6198d2993b4cb876a2ea01c385455f0b724fb7992ecadd3",
-  "size": 28790938,
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.41/kuaimai-scan-setup-v1.41.exe",
+  "sha256": "1fc839af9ab63bc57c98c4d4d3e42638ac14115c4bf23ab93f6ef11829836e72",
+  "size": 28794346,
   "mandatory": false,
-  "published_at": "2026-10-04 15:20"
+  "published_at": "2026-10-04 15:48"
 }
