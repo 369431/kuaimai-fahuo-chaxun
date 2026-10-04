@@ -3421,12 +3421,18 @@ class _WebHandler(BaseHTTPRequestHandler):
                 if not body.get("confirm"):
                     return self._json({"error": "需要 confirm 确认后才建波"}, 400)
                 items = body.get("items") or []
-                # 同一时刻只允许一个成波请求：抢不到锁立即返回（不长时间阻塞）
-                if not _WAVE_CREATE_LOCK.acquire(timeout=1):
-                    return self._json({"error": "正在生成波次，请稍候再试", "busy": True})
+                # v1.46c 多账号并发：成波都走同一个 ERP 自动化浏览器，必须串行。
+                # 后来者**排队等待**（最多 180 秒）而不是被直接挡掉；真的等太久才让重试。
+                _t_wait = time.time()
+                if not _WAVE_CREATE_LOCK.acquire(timeout=180):
+                    return self._json({"error": "前面还有波次在生成（排队超过 3 分钟），请稍后再试",
+                                       "busy": True})
+                _waited = time.time() - _t_wait
                 try:
                     import kuaimai_wave as wv
                     out = wv.create(items, str(body.get("carrier") or ""))
+                    if _waited > 1:
+                        out["waited_s"] = round(_waited, 1)   # 排队等了多久（多账号并发的交代）
                     # v1.46：波次号由 wv.create 在 ERP「波次管理」列表回读（含未拣选波次，最多重试 3 次）。
                     # save 返回 success 但回读不到 → HTTP 200 + ok:false + error（前端显示未确认、可重试）。
                     if out.get("wave_code"):
@@ -3478,7 +3484,21 @@ class _WebHandler(BaseHTTPRequestHandler):
                         return self._json({"error": "缺少 wave_id（波次ID）"}, 400)
                     do_write = bool(body.get("confirm"))
                     import kuaimai_wave as wv
-                    out = wv.finish_pick(api_call_authed, wid, do_write=do_write)
+                    # v1.46c 一键拣完也走同一个 ERP 自动化浏览器 → 与成波共用同一把锁（写入才排队）
+                    _lk_hold = False
+                    if do_write:
+                        if not _WAVE_CREATE_LOCK.acquire(timeout=180):
+                            return self._json({"error": "前面还有波次在生成/拣完（排队超过 3 分钟），"
+                                                        "请稍后再试", "busy": True})
+                        _lk_hold = True
+                    try:
+                        out = wv.finish_pick(api_call_authed, wid, do_write=do_write)
+                    finally:
+                        if _lk_hold:
+                            try:
+                                _WAVE_CREATE_LOCK.release()
+                            except Exception:
+                                pass
                     try:
                         print_jobs_log("一键拣完：波次=%s 写入=%s ok=%s 状态=%s" % (
                             wid, do_write, out.get("ok"), out.get("status_cn") or "-"))
