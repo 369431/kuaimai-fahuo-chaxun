@@ -52,3 +52,6 @@ packaging/*.log
 https/km_https.exe# ä½†æ‰“åŒ…é…ç½®è¦å…¥åº“ï¼ˆspec å†³å®š hiddenimportsï¼Œç¼ºäº†æ‰“å‡ºæ¥çš„åŒ…ç‚¹ã€Œæ‰“å•ã€ä¼š ModuleNotFoundErrorï¼‰
 !packaging/*.spec
 !packaging/assets/kuaimai_gateway.json
+# Ô´Ä¿Â¼ÀïÅÜ³ÌĞòÊ±Éú³ÉµÄ¶«Î÷£¨×Ô¶¯»¯ä¯ÀÀÆ÷ÅäÖÃ/¼ÇÒä£©¡ª¡ª²»Èë¿â
+desktop/edge-automation/
+memory/

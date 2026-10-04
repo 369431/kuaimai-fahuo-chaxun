@@ -2435,8 +2435,16 @@ $('mk').onclick = function(){
   if(!items.length){ alert('请先添加编码并填写件数'); return; }
   if(!confirm('将用「' + CARRIER + '」生成 1 个波次（清单里所有编码合并成一个波次，只含该快递）。真要建波吗？')) return;
   $('out').innerHTML = '<div class="card"><div class="muted">正在挑单并成波…（请稍候）</div></div>';
+  /* v1.46：波次号由 ERP「波次管理」列表回读（含未拣选波次）。created=true 才显示成功样式；
+     save 返回 success 但回读不到 → 显示「ERP 未建出波次（未确认），请重试」，不冒充成功。 */
   post('/api/wave/create', {items:items, carrier:CARRIER, confirm:true}).then(function(p){
     let h = '';
+    if(p.busy){
+      h += '<div class="card"><h2>正在生成波次</h2><div class="badtext">'
+         + esc(p.error || '正在生成波次，请稍候再试') + '</div></div>';
+      $('out').innerHTML = h + planCard(p);
+      return;
+    }
     if(!p.save_ok){
       h += '<div class="card"><h2>成波失败</h2><div class="badtext">' + esc(p.error || '未返回 success') + '</div>';
       if(p.save_msg) h += '<div class="muted" style="margin-top:6px">' + esc(p.save_msg) + '</div>';
@@ -2445,29 +2453,27 @@ $('mk').onclick = function(){
       return;
     }
     const v = p.verify || {};
-    h += '<div class="card"><h2>成波成功</h2>';
-    if(v.ok){
-      h += '<div class="big oktext">波次号：' + esc(v.wave_code) + '</div>'
-         + '<div style="margin-top:6px"><span class="tag">状态 ' + esc(v.status_cn || v.status || '?') + '</span>'
-         + '<span class="tag ok">核对一致 ' + esc(v.matched) + ' 张</span>'
-         + '<span class="tag">订单数 ' + esc(v.tradesCount) + '</span>'
-         + '<span class="tag">件数 ' + esc(v.itemCount) + '</span>';
-      if(v.extra) h += '<span class="tag warn">额外 ' + esc(v.extra) + ' 张</span>';
-      if((v.missing || []).length) h += '<span class="tag warn">缺 ' + esc(v.missing.length) + ' 张</span>';
+    if(p.created === true || v.ok){
+      h += '<div class="card"><h2>成波成功</h2>';
+      h += '<div class="big oktext">波次号：' + esc(p.wave_code || v.wave_code || p.wave_id || '-') + '</div>'
+         + '<div style="margin-top:6px"><span class="tag">状态 ' + esc(v.status_cn || v.status || '未拣') + '</span>'
+         + '<span class="tag ok">已建出 ' + esc(v.item_count == null ? (p.sids || []).length : v.item_count) + ' 件</span>'
+         + '<span class="tag">订单数 ' + esc((p.sids || []).length) + '</span>';
       h += '</div>';
       h += '<h2 style="margin-top:12px">配货明细（每个 SKU 一行）</h2>' + skuLines(p)
-         + '<div class="muted" style="margin-top:6px">状态/内容均为实时回读快麦 ERP。</div>';
-      if((v.wave_id || v.wave_code) && v.status !== 3 && v.status !== '3'){
+         + '<div class="muted" style="margin-top:6px">波次号实时回读快麦 ERP「波次管理」。</div>';
+      const wid = p.wave_id || v.wave_id || p.wave_code;
+      if(wid){
         h += '<div class="actions" style="margin-top:10px"><button id="fwFromCreate" class="ghost" data-wid="'
-           + esc(v.wave_id || v.wave_code) + '">一键拣完（不用输入）</button></div>';
+           + esc(wid) + '">一键拣完（不用输入）</button></div>';
       }
+      h += '</div>';
     } else {
-      h += '<div><span class="tag warn">已提交成波，但回读未确认</span></div>'
-         + (v.wave_code ? '<div class="big oktext">波次号：' + esc(v.wave_code) + '</div>' : '')
-         + '<div class="muted">稍后到「波次记录」页点「一键拣完」即可（不用输入波次号）。</div>'
-         + '<div class="muted" style="margin-top:6px">' + esc(v.error || '回读失败') + '</div>';
+      h += '<div class="card"><h2>成波未确认</h2>'
+         + '<div class="badtext">ERP 未建出波次（未确认），请重试</div>'
+         + '<div class="muted" style="margin-top:6px">' + esc(p.verify_error || v.error || '回读未找到新波次') + '</div>'
+         + '</div>';
     }
-    h += '</div>';
     $('out').innerHTML = h + planCard(p);
     wireFinishFromCreate();
   }).catch(function(e){ $('out').innerHTML = '<div class="card"><div class="badtext">成波请求失败：' + esc(e.message) + '</div></div>'; });

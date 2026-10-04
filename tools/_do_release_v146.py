@@ -1,0 +1,30 @@
+# -*- coding: utf-8 -*-
+"""发布 v1.46：调用 release.py 的 main()，中文说明走 UTF-8 字面量（不过控制台代码页）。"""
+import os
+import sys
+
+REPO = r"C:\Users\Kerwin\Desktop\kuaimai发货查询"
+INSTALLER = r"C:\Users\Kerwin\Desktop\发布\快麦扫码查询_安装版_v1.46.exe"
+NOTES = ("波次三修：**波次号能读到了 + 不再谎报成功 + 货位库存提前拦**\n"
+         "\n"
+         "· **拿不到波次号的根因**：回读用的是开放平台接口，它**只返回「已拣选」的波次** → "
+         "刚生成、还没拣的波次永远查不到。现在改用 ERP「波次管理」列表接口（"
+         "`POST /trade/wave/manager/list`），**含未拣选波次**，生成后立刻显示波次号（最多重试 3 次）。\n"
+         "· **不再谎报成功**：ERP 的成波接口回 `success` 时**不代表真建出了波次**。现在生成后会真校验，"
+         "读不到就明确显示「**ERP 未建出波次（未确认），请重试**」，而不是默默没有波次号。\n"
+         "· **新增货位库存预检**（这次你遇到的就是它）：成波**前**先查该编码的**拣货位在架数**，"
+         "不足就直接提示「**货位库存不足（在架 X 件、需 Y 件），需先上架/补货**」，根本不会发那个注定失败的请求。\n"
+         "  （实测：`9693-咖色L` 可生成 85 单，但拣货位在架 **0** 件 → ERP 一直不成波。）\n"
+         "· **加「成波锁」**：多账号/多页面同时点不会撞车，后来者提示「正在生成波次，请稍候再试」。\n"
+         "· 打单/后置打印链路未动。")
+
+assert os.path.isfile(INSTALLER), INSTALLER
+sys.path.insert(0, REPO)
+os.chdir(REPO)
+sys.argv = ["release.py", "--version", "v1.46", "--installer", INSTALLER, "--notes", NOTES]
+
+import release  # noqa: E402
+
+rc = release.main()
+print("\nrelease.main() returned", rc)
+sys.exit(rc)

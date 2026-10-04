@@ -10,17 +10,24 @@
   · 填的件数 > 最大可生成 → 以最大可生成件数成波（不报错）；
   · 一次成波把全部挑中的 sids 一次传给 /trade/wave/checked/trade/save（一个波次）。
 
-只走 **CDP 页面内 fetch**，不碰开放平台密钥；波次回读（erp.trade.waves.query）由调用方传入
-caller（主程序用 api_call_authed），本模块不自带凭据。
+只走 **CDP 页面内 fetch**，不碰开放平台密钥。
+
+**波次号回读（v1.46）**：save 返回 success ≠ ERP 真的建出波次，且开放平台 erp.trade.waves.query
+**只返回已拣选波次**（新波次永远读不到）。所以改走 ERP 网页「波次管理」接口
+/trade/wave/manager/list（登录态、含未拣选波次）回读。
+verify_wave（开放平台）保留导出，别处可能引用，但 create() 不再调它。
 
 对外：
   lookup(code)               某编码最大可生成件数 + 候选订单明细
   plan(items)                干跑（只读）：按 targets 挑单，返回 sids 与每码实际件数，不建波
-  create(items)              真正成波：save 一个波次（全部 sids）
-  verify_wave(sids, caller)  用开放平台回读核对（只读）
+  manager_waves(...)         ERP 网页「波次管理」列表（只读，含未拣选波次）
+  readback_new_wave(...)     在网页列表里回读本次新建的波次（只读）
+  create(items)              真正成波：save 一个波次（全部 sids）+ 网页列表回读波次号
+  verify_wave(sids, caller)  用开放平台回读核对（只读；只返回已拣选波次，保留导出）
 """
 import json
 import os
+import time
 import urllib.parse
 
 import kuaimai_print as KP
@@ -74,6 +81,7 @@ def status_cn(s, pick_end_time=None):
 CARRIERS = ("中通", "申通")            # 波次按快递拆开：一个波次只含一种快递（名称子串匹配）
 QUERY_PATH = "/trade/wave/checked/trade/query"
 SAVE_PATH = "/trade/wave/checked/trade/save"
+MANAGER_PATH = "/trade/wave/manager/list"   # ERP 网页「波次管理」列表（登录态，含未拣选波次）
 DEFAULT_PAGE_SIZE = 600               # 与服务端 queryWaveTradeByCondition 的 limit 600 对齐
 
 
@@ -352,8 +360,94 @@ def plan(items, carrier=""):
             "candidates": len(cand), "warehouseId": WAREHOUSE_ID}
 
 
+def manager_waves(page_no=1, page_size=20, c=None, warehouse_id=None):
+    """ERP 网页「波次管理」列表（只读）：含未拣选波次，替代开放平台 verify_wave 回读。
+
+    POST /trade/wave/manager/list（页面内 fetch，登录态）。
+    c 传入则复用（**不要关它**），否则自己开 CDP 页并在结束时关闭。
+    返回规范化 [{code,id,status,item_count,plan_num,picked_num,created_ms,express,tags}]；
+    解析不出列表时返回 []。最新创建的排最前（服务端顺序，原样保留）。
+    """
+    own = c is None
+    if own:
+        c = KP.open_cdp_page()
+    try:
+        body = json.dumps({"pageNo": page_no, "pageSize": page_size,
+                           "warehouseId": warehouse_id or WAREHOUSE_ID})
+        res = _post(c, MANAGER_PATH, body, "application/json")
+    finally:
+        if own:
+            try:
+                c.close()
+            except Exception:
+                pass
+    try:
+        j = json.loads((res or {}).get("text") or "")
+    except Exception:
+        return []
+    data = j.get("data")
+    arr = None
+    if isinstance(data, dict):
+        for k in ("list", "rows", "records"):
+            if isinstance(data.get(k), list):
+                arr = data[k]
+                break
+    elif isinstance(data, list):
+        arr = data
+    if not isinstance(arr, list):
+        return []
+    out = []
+    for w in arr:
+        if not isinstance(w, dict):
+            continue
+        tags = w.get("tagNames")
+        if isinstance(tags, str):
+            tags = [t for t in tags.replace("，", ",").split(",") if t]
+        out.append({
+            "code": str(w.get("code") or ""),
+            "id": w.get("id"),
+            "status": w.get("status"),
+            "item_count": _int(w.get("itemCount")),
+            "plan_num": _int(w.get("planPickNum")),
+            "picked_num": _int(w.get("pickedNum")),
+            "created_ms": _int(w.get("created")),
+            "express": w.get("expressName") or "",
+            "tags": tags or [],
+        })
+    return out
+
+
+def readback_new_wave(since_ms, item_count=None, page_no=1, page_size=20, c=None):
+    """在「波次管理」列表里回读本次新建的波次（只读）。
+
+    找 created_ms >= since_ms - 5000 的波次（created 是毫秒时间戳）；item_count 给了就再按它
+    过滤；取第一条（列表最新创建排最前）。返回 {ok, wave_code, wave_id, item_count, created_ms}；
+    找不到返回 {ok:False, error:"..."}。c 传入则复用（不关它）。
+    """
+    try:
+        since = int(since_ms) - 5000
+    except Exception:
+        since = 0
+    try:
+        rows = manager_waves(page_no=page_no, page_size=page_size, c=c)
+    except Exception as e:
+        return {"ok": False, "error": "回读波次列表失败：%s" % str(e)[:150]}
+    for w in rows:
+        if _int(w.get("created_ms")) < since:
+            continue
+        if item_count is not None and _int(w.get("item_count")) != _int(item_count):
+            continue
+        return {"ok": True, "wave_code": w.get("code") or "", "wave_id": w.get("id"),
+                "item_count": w.get("item_count"), "created_ms": w.get("created_ms")}
+    return {"ok": False, "error": "波次列表里未找到本次新建的波次（created>=%s）" % since}
+
+
 def create(items, carrier=""):
-    """真正成波：先算挑单，再把全部 sids 一次 save（一个波次，只含选定的那一种快递）。"""
+    """真正成波：先算挑单，再把全部 sids 一次 save（一个波次，只含选定的那一种快递）。
+
+    save 后用**同一个 CDP 页**在「波次管理」列表回读新波次号（最多 3 次，等 2s/3s）；
+    不回读开放平台 erp.trade.waves.query（只返回已拣选波次，新波次永远读不到）。
+    """
     p = plan(items, carrier)
     if p.get("error"):
         return p
@@ -362,28 +456,74 @@ def create(items, carrier=""):
         return {"error": "没有可成波的订单（可能已全部成波 / 已打印 / 该编码无可生成订单）"}
     c = KP.open_cdp_page()
     try:
+        # v1.46b 货位库存预检：拣货位在架不足时 ERP 会静默不成波（回 success 却不建）
+        # → 提前给明确原因，别发那个注定失败的请求。
+        try:
+            _need = {}
+            for _c2 in (p.get("codes") or []):
+                _k2 = str(_c2.get("code") or "")
+                if _k2:
+                    _need[_k2] = int(_c2.get("actual") or _c2.get("max") or 0)
+            if _need:
+                _st = pick_stock(c, list(_need.keys()))
+                _short = [(k3, _st.get(k3), n3) for k3, n3 in _need.items()
+                          if _st.get(k3) is not None and _st.get(k3) < n3]
+                if _short:
+                    _o = dict(p)
+                    _o["save_ok"] = False
+                    _o["created"] = False
+                    _o["stock_short"] = _short
+                    _o["error"] = "货位库存不足（需先上架/补货）：" + "；".join(
+                        "%s 在架 %s 件、需 %s 件" % (a, b, c3) for a, b, c3 in _short)
+                    return _o
+        except Exception:
+            pass
+        t0 = time.time() * 1000                  # save 前记时点：只认这之后新建的波次
         body = json.dumps({"warehouseId": WAREHOUSE_ID, "ruleId": "", "sids": sids,
                            "hasFilter": False})
         res = _post(c, SAVE_PATH, body, "application/json")
+        text = (res or {}).get("text") or ""
+        ok, status = False, ""
+        try:
+            j = json.loads(text)
+            d = j.get("data") or {}
+            status = str(d.get("status") or "")
+            ok = (status == "success") or bool(j.get("success"))
+        except Exception:
+            pass
+        out = dict(p)
+        out["save_ok"] = ok
+        out["save_status"] = status
+        out["save_http"] = (res or {}).get("status")
+        if not ok:
+            out["error"] = "成波接口未返回 success（code/msg 见下）"
+            out["save_msg"] = text[:300]
+            return out
+        # save 返回 success ≠ ERP 真的建出波次 → 必须在「波次管理」列表回读核对（最多 3 次）
+        rb = {}
+        for _wait in (0, 2, 3):
+            if _wait:
+                try:
+                    time.sleep(_wait)
+                except Exception:
+                    pass
+            try:
+                rb = readback_new_wave(t0, len(sids), c=c)
+            except Exception as e:
+                rb = {"ok": False, "error": str(e)[:150]}
+            if rb.get("ok"):
+                break
+        out["verify"] = rb
+        if rb.get("ok"):
+            out["wave_code"] = rb.get("wave_code")
+            out["wave_id"] = rb.get("wave_id")
+            out["created"] = True
+        else:
+            out["created"] = False
+            out["verify_error"] = "ERP 未建出波次（可能权限/订单状态）"
+        return out
     finally:
         c.close()
-    text = (res or {}).get("text") or ""
-    ok, status = False, ""
-    try:
-        j = json.loads(text)
-        d = j.get("data") or {}
-        status = str(d.get("status") or "")
-        ok = (status == "success") or bool(j.get("success"))
-    except Exception:
-        pass
-    out = dict(p)
-    out["save_ok"] = ok
-    out["save_status"] = status
-    out["save_http"] = (res or {}).get("status")
-    if not ok:
-        out["error"] = "成波接口未返回 success（code/msg 见下）"
-        out["save_msg"] = text[:300]
-    return out
 
 
 def verify_wave(sids, caller, minutes=20):
@@ -727,3 +867,36 @@ def append_record(rec):
         os.replace(tmp, p)
     except Exception:
         pass
+
+
+# ---------- v1.46b 货位库存预检 ----------
+SKU_LIST_PATH = "/trade/wave/checked/sku/list"
+
+
+def pick_stock(c, codes):
+    """各编码在**拣货位**的在架数（ERP「按商品生成」清单的 pickStock）。
+
+    只返回查到的编码；查不到（不在清单里）就不出现该键，调用方按"不拦"处理。
+    查库位失败时返回 {}（绝不让预检本身把成波搞挂）。
+    """
+    need = set(str(x) for x in (codes or []) if str(x or "").strip())
+    if not need:
+        return {}
+    body = {"warehouseId": WAREHOUSE_ID, "conditionId": "", "itemNumUp": "", "itemNumDown": "",
+            "sysSkuRemark": "", "sysItemRemark": "", "bindGoodsSectionCode": "",
+            "titles": "", "skuPropertiesNames": "", "outerIdStr": "", "mainOuterId": "",
+            "isAccurate": 0, "specifyShipperIds": "", "pageSize": 2000}
+    try:
+        res = _post(c, SKU_LIST_PATH, json.dumps(body), "application/json")
+        rows = json.loads((res or {}).get("text") or "{}").get("data") or []
+    except Exception:
+        return {}
+    out = {}
+    for r in rows:
+        oid = str(r.get("outerId") or "")
+        if oid in need:
+            try:
+                out[oid] = int(r.get("pickStock") or 0)
+            except Exception:
+                pass
+    return out

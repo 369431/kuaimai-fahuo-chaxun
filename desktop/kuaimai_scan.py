@@ -1708,6 +1708,9 @@ def fetch_all_scans():
 _ODB_CONN = None
 _ODB_LOCK = threading.RLock()
 
+# v1.46：同一时刻只允许一个成波请求（写 ERP，耗时且不该并发）。抢不到锁立即返回 busy，不长时间阻塞。
+_WAVE_CREATE_LOCK = threading.Lock()
+
 
 def orders_db():
     """订单库连接（首次调用时建库建表）。"""
@@ -3418,47 +3421,38 @@ class _WebHandler(BaseHTTPRequestHandler):
                 if not body.get("confirm"):
                     return self._json({"error": "需要 confirm 确认后才建波"}, 400)
                 items = body.get("items") or []
+                # 同一时刻只允许一个成波请求：抢不到锁立即返回（不长时间阻塞）
+                if not _WAVE_CREATE_LOCK.acquire(timeout=1):
+                    return self._json({"error": "正在生成波次，请稍候再试", "busy": True})
                 try:
                     import kuaimai_wave as wv
                     out = wv.create(items, str(body.get("carrier") or ""))
-                    if out.get("save_ok"):
-                        # 回读波次号：ERP 侧可能有几秒延迟 → 最多重试 3 次（等 2s/3s）。
-                        # 目的：生成的波次能直接拿到波次号，网页端「一键拣完」不用人工输入。
-                        v = {}
-                        for _wait in (0, 2, 3):
-                            if _wait:
-                                try:
-                                    time.sleep(_wait)
-                                except Exception:
-                                    pass
-                            try:
-                                v = wv.verify_wave(out.get("sids") or [], api_call_authed)
-                            except Exception as e:
-                                v = {"ok": False, "error": str(e)[:150]}
-                            if v.get("ok") and (v.get("wave_id") or v.get("wave_code")):
-                                break
-                        out["verify"] = v
+                    # v1.46：波次号由 wv.create 在 ERP「波次管理」列表回读（含未拣选波次，最多重试 3 次）。
+                    # save 返回 success 但回读不到 → HTTP 200 + ok:false + error（前端显示未确认、可重试）。
+                    if out.get("wave_code"):
                         # 本机只记「我自己生成过哪些波次号」；状态/内容 记录页每次实时回读 ERP。
                         try:
-                            v = out.get("verify") or {}
                             wv.append_record({
-                                "wave_code": v.get("wave_code") or "",
-                                "wave_id": v.get("wave_id"),
-                                "status": v.get("status"),
-                                "status_cn": v.get("status_cn") or wv.status_cn(v.get("status"), v.get("pickEndTime")),
-                                "tradesCount": v.get("tradesCount"),
-                                "itemCount": v.get("itemCount"),
+                                "wave_code": out.get("wave_code") or "",
+                                "wave_id": out.get("wave_id"),
+                                "status": out.get("status"),
+                                "itemCount": (out.get("verify") or {}).get("item_count"),
                                 "carrier": out.get("carrier") or "",
                                 "codes": out.get("codes") or [],
                                 "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
                             })
                         except Exception:
                             pass
+                    if not out.get("save_ok"):
+                        out["ok"] = False
+                    elif not out.get("created"):
+                        out["ok"] = False
+                        out["error"] = out.get("verify_error") or "ERP 未建出波次（未确认），请重试"
                     try:
-                        print_jobs_log("生成波次：快递=%s sids=%d save=%s 波次=%s" % (
+                        print_jobs_log("生成波次：快递=%s sids=%d save=%s 波次=%s created=%s" % (
                             out.get("carrier") or "-",
                             len(out.get("sids") or []), out.get("save_ok"),
-                            (out.get("verify") or {}).get("wave_code") or "-"))
+                            out.get("wave_code") or "-", out.get("created")))
                     except Exception:
                         pass
                     return self._json(out)
@@ -3467,6 +3461,11 @@ class _WebHandler(BaseHTTPRequestHandler):
                                                 "请先打开自动化浏览器并登录 ERP"}, 503)
                 except Exception as e:
                     return self._json({"error": "成波失败：%s" % str(e)[:200]}, 500)
+                finally:
+                    try:
+                        _WAVE_CREATE_LOCK.release()
+                    except Exception:
+                        pass
             if path == "/api/wave/finish":
                 # 一键拣完（写 ERP）：把波次推成「等待验货」（拣选完成）；需 wave.create 权限 + confirm。
                 # 无 confirm 只做只读预览（回读 waves.query），绝不写；confirm=true 才 pick.hand 并回读状态。
