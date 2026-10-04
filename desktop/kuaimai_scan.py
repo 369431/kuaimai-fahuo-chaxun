@@ -3005,6 +3005,7 @@ class _WebHandler(BaseHTTPRequestHandler):
                         lw = live.get(code) or {}
                         recs.append({
                             "wave_code": code,
+                            "wave_id": lw.get("wave_id", rec.get("wave_id")),
                             "status": lw.get("status", rec.get("status")),
                             "status_cn": (lw.get("status_cn")
                                           or wv.status_cn(lw.get("status", rec.get("status")))),
@@ -3430,6 +3431,7 @@ class _WebHandler(BaseHTTPRequestHandler):
                             v = out.get("verify") or {}
                             wv.append_record({
                                 "wave_code": v.get("wave_code") or "",
+                                "wave_id": v.get("wave_id"),
                                 "status": v.get("status"),
                                 "status_cn": v.get("status_cn") or wv.status_cn(v.get("status")),
                                 "tradesCount": v.get("tradesCount"),
@@ -3453,6 +3455,27 @@ class _WebHandler(BaseHTTPRequestHandler):
                                                 "请先打开自动化浏览器并登录 ERP"}, 503)
                 except Exception as e:
                     return self._json({"error": "成波失败：%s" % str(e)[:200]}, 500)
+            if path == "/api/wave/finish":
+                # 一键拣完（写 ERP）：把波次推成「等待验货」（拣选完成）；需 wave.create 权限 + confirm。
+                # 无 confirm 只做只读预览（回读 waves.query），绝不写；confirm=true 才 pick.hand 并回读状态。
+                deny = self._need(me, "wave.create")
+                if deny:
+                    return deny
+                try:
+                    wid = body.get("wave_id", body.get("waveId"))
+                    if wid in (None, "", 0):
+                        return self._json({"error": "缺少 wave_id（波次ID）"}, 400)
+                    do_write = bool(body.get("confirm"))
+                    import kuaimai_wave as wv
+                    out = wv.finish_pick(api_call_authed, wid, do_write=do_write)
+                    try:
+                        print_jobs_log("一键拣完：波次=%s 写入=%s ok=%s 状态=%s" % (
+                            wid, do_write, out.get("ok"), out.get("status_cn") or "-"))
+                    except Exception:
+                        pass
+                    return self._json(out)
+                except Exception as e:
+                    return self._json({"error": "一键拣完失败：%s" % str(e)[:200]}, 500)
             if path == "/api/print/jobs_add":
                 # 提交一个打单任务（主端权威）：按 print_clients.json 的账号映射决定派给谁
                 deny = self._need(me, "scan.printed")

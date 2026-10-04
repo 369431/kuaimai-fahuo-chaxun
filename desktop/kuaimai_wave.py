@@ -27,19 +27,44 @@ import kuaimai_print as KP
 
 WAREHOUSE_ID = 556677                 # 火火火服饰仓库（本次只用这个仓）
 
-# 波次状态中文（官方文档 erp.trade.waves.query：1 未完成 / 3 已完成 / 4 已取消）。
-# 开放平台只暴露这三个值，没有「待拣货/拣货中」之类的细分；查不到就原样显示，不猜。
+# 波次状态中文。官方 erp.trade.waves.query 只给 1/3/4；但实测「等待验货」也回 status=1，
+# 区别在 pickEndTime：status=1 且无 pickEndTime = 待拣货/未完成；status=1 且有 pickEndTime = 等待验货（已拣）。
 WAVE_STATUS_CN = {1: "未完成", 3: "已完成", 4: "已取消"}
+PICKED_CN = "等待验货"      # 有 pickEndTime 的未完成波次：已拣、等待验货
 
 
-def status_cn(s):
-    """波次状态 → 中文；未知值返回原始字符串（绝不瞎猜）。"""
-    if s is None or s == "":
-        return ""
+def wave_state(status, pick_end_time=None):
+    """按 (status, pickEndTime) 算网页状态口径。
+
+    · status=3 → 已完成；status=4 → 已取消；
+    · status=1 且无 pickEndTime → 待拣货（未完成）；
+    · status=1 且有 pickEndTime → 等待验货（已拣）。
+    返回 {status, status_cn, picked, pick_end_time}。
+    """
+    raw = status
+    if raw is None or raw == "":
+        return {"status": raw, "status_cn": "", "picked": False, "pick_end_time": pick_end_time}
     try:
-        return WAVE_STATUS_CN.get(int(s), str(s))
+        iv = int(raw)
     except Exception:
-        return str(s)
+        return {"status": raw, "status_cn": str(raw), "picked": bool(pick_end_time),
+                "pick_end_time": pick_end_time}
+    pet = pick_end_time
+    has_pet = bool(str(pet).strip()) if pet is not None else False
+    if iv == 3:
+        cn, picked = "已完成", True
+    elif iv == 4:
+        cn, picked = "已取消", False
+    elif iv == 1:
+        cn, picked = (PICKED_CN if has_pet else "未完成"), has_pet
+    else:
+        cn, picked = str(raw), has_pet
+    return {"status": raw, "status_cn": cn, "picked": picked, "pick_end_time": pet}
+
+
+def status_cn(s, pick_end_time=None):
+    """波次状态 → 中文；未知值返回原始字符串（绝不瞎猜）。传入 pickEndTime 才能区分「等待验货」。"""
+    return wave_state(s, pick_end_time).get("status_cn") or ""
 CARRIERS = ("中通", "申通")            # 波次按快递拆开：一个波次只含一种快递（名称子串匹配）
 QUERY_PATH = "/trade/wave/checked/trade/query"
 SAVE_PATH = "/trade/wave/checked/trade/save"
@@ -419,6 +444,248 @@ def waves_list(caller, minutes=1440, page_size=100):
             "sids": [x.get("sid") for x in (w.get("list") or [])],
         })
     return {"ok": True, "waves": out, "total": res.get("total")}
+
+
+# ---------- 一键拣完（v1.42）：分拣明细(只读) → 拣选完成(写) → 播种完成(写) → 回读状态 ----------
+# 接口（本账号已验证有权限）：erp.trade.wave.sorting.query（读）/ erp.trade.wave.pick.hand（写）
+#   / erp.trade.wave.seed（写）/ erp.trade.waves.query（读，复用上面的 waves_list）。
+# 字段名一律以官方文档为准，不猜。写操作只在 do_write=True 时发生，默认只读。
+def _int(v, d=0):
+    """宽松取整（接口字段可能是 str/None），取不到返回默认值。"""
+    try:
+        return int(v)
+    except Exception:
+        try:
+            return int(float(v))
+        except Exception:
+            return d
+
+
+def _wm_id(wave_id):
+    """波次ID 尽量转长整型（接口 waveId 是 long）；转不了就原样传。"""
+    try:
+        return int(wave_id)
+    except Exception:
+        return wave_id
+
+
+def sorting(caller, wave_id):
+    """erp.trade.wave.sorting.query（只读）：按波次查分拣明细并规范化。
+
+    官方字段：list[].positionNo / list[].details[].{outerId,title,propertiesName,
+    itemNum,pickedNum,matchedNum,multiCodes}，顶层 total。
+    caller(method, biz) 由主程序传入（api_call_authed）；本函数绝不写任何东西。
+    """
+    try:
+        res = caller("erp.trade.wave.sorting.query", {"waveId": _wm_id(wave_id)})
+    except Exception as e:
+        return {"ok": False, "error": "分拣明细查询失败：%s" % str(e)[:150]}
+    if not isinstance(res, dict):
+        return {"ok": False, "error": "分拣明细返回异常"}
+    if res.get("success") is False:
+        return {"ok": False,
+                "error": str(res.get("msg") or res.get("error") or "分拣明细查询失败"),
+                "code": res.get("code")}
+    arr = res.get("list")
+    if not isinstance(arr, list):
+        d = res.get("data")
+        if isinstance(d, dict) and isinstance(d.get("list"), list):
+            arr = d.get("list")
+    if not isinstance(arr, list):
+        # 实测：该波次没有分拣明细时，success=true 且 total=0，响**省略 list 字段**。
+        # 只有 success=false 才是错误；success 非 False 时把缺 list 当空结果（不报错）。
+        if res.get("success") is not False:
+            arr = []
+        else:
+            return {"ok": False, "error": "分拣明细查询失败",
+                    "keys": sorted([str(k) for k in res.keys()])[:12]}
+    positions, line_count = [], 0
+    for p in arr:
+        if not isinstance(p, dict):
+            continue
+        dets = []
+        for it in (p.get("details") or []):
+            if not isinstance(it, dict):
+                continue
+            dets.append({
+                "outerId": str(it.get("outerId") or ""),
+                "title": it.get("title") or "",
+                "propertiesName": it.get("propertiesName") or "",
+                "itemNum": _int(it.get("itemNum")),
+                "pickedNum": _int(it.get("pickedNum")),
+                "matchedNum": _int(it.get("matchedNum")),
+                "multiCodes": it.get("multiCodes") or [],
+            })
+        line_count += len(dets)
+        positions.append({"positionNo": p.get("positionNo"), "details": dets})
+    tot = res.get("total")
+    return {"ok": True, "wave_id": wave_id,
+            "total": (len(positions) if tot is None else _int(tot, len(positions))),
+            "positions": positions, "position_count": len(positions),
+            "line_count": line_count,
+            "field_names": ["positionNo", "details.outerId", "details.title",
+                            "details.propertiesName", "details.itemNum",
+                            "details.pickedNum", "details.matchedNum", "details.multiCodes"]}
+
+
+def _seed_list(positions):
+    """由 sorting 明细拼 seed 的 list（**仅供 seed() 封装或特殊场景；一键拣完默认不调 seed**）。
+
+    应播种数量 = itemNum（应拣/应播）− matchedNum（已播种），负数按 0；
+    同一位置同一 outerId 合并。返回 (list, 明细行数, 总件数, 未拣完行, 无待播种的位置, 合并次数)。
+    """
+    out, lines, total, not_picked, empty_pos, dup = [], 0, 0, [], [], 0
+    for p in (positions or []):
+        if not isinstance(p, dict):
+            continue
+        pos = p.get("positionNo")
+        merged, order = {}, []
+        for d in (p.get("details") or []):
+            if not isinstance(d, dict):
+                continue
+            oid = str(d.get("outerId") or "")
+            if not oid:
+                continue
+            need = _int(d.get("itemNum")) - _int(d.get("matchedNum"))
+            if need < 0:
+                need = 0
+            if _int(d.get("pickedNum")) < _int(d.get("itemNum")):
+                not_picked.append({"positionNo": pos, "outerId": oid,
+                                   "pickedNum": _int(d.get("pickedNum")),
+                                   "itemNum": _int(d.get("itemNum"))})
+            if need <= 0:
+                continue
+            if oid in merged:
+                merged[oid] += need
+                dup += 1
+            else:
+                merged[oid] = need
+                order.append(oid)
+        dets = [{"outerId": o, "matchedNum": merged[o]} for o in order]
+        if dets:
+            out.append({"positionNo": pos, "details": dets})
+            lines += len(dets)
+            total += sum(x["matchedNum"] for x in dets)
+        else:
+            empty_pos.append(pos)
+    return out, lines, total, not_picked, empty_pos, dup
+
+
+def pick_hand(caller, wave_id):
+    """erp.trade.wave.pick.hand（写）：波次标记「拣选完成」（订单随即进入等待验货）。
+
+    ids=波次ID（可多个逗号拼接 ≤100）。这是「一键拣完」**唯一**会调用的写接口。
+    返回 successIds / failedIds / failedMessages，原样不吞。
+    """
+    try:
+        res = caller("erp.trade.wave.pick.hand", {"ids": str(wave_id)})
+    except Exception as e:
+        return {"ok": False, "error": "拣选完成（pick.hand）调用失败：%s" % str(e)[:150]}
+    if not isinstance(res, dict):
+        return {"ok": False, "error": "拣选完成返回异常"}
+    succ = res.get("successIds") or []
+    fail = res.get("failedIds") or []
+    msgs = res.get("failedMessages") or res.get("failedMsg") or []
+    ok = (res.get("success") is not False) and not fail and bool(succ)
+    return {"ok": bool(ok), "successIds": succ, "failedIds": fail, "failedMessages": msgs,
+            "code": res.get("code"), "msg": res.get("msg")}
+
+
+def seed(caller, wave_id, list_obj):
+    """erp.trade.wave.seed（写）：waveId(long) + list(JSON 字符串，内部双引号自动转义)。
+
+    **一键拣完默认流程不调此接口**（播种回传是更靠后一步，会把状态推过头），仅作封装保留。
+    list_obj 形如 [{"positionNo":1,"details":[{"outerId":"MN-milk","matchedNum":5}]}]。
+    返回 success / errorList，原样不吞。
+    """
+    try:
+        payload = json.dumps(list_obj or [], ensure_ascii=False)
+    except Exception as e:
+        return {"ok": False, "error": "list 序列化失败：%s" % str(e)[:150]}
+    try:
+        res = caller("erp.trade.wave.seed", {"waveId": _wm_id(wave_id), "list": payload})
+    except Exception as e:
+        return {"ok": False, "error": "播种完成（seed）调用失败：%s" % str(e)[:150]}
+    if not isinstance(res, dict):
+        return {"ok": False, "error": "播种完成返回异常"}
+    errs = res.get("errorList") or res.get("errorlist") or []
+    return {"ok": bool(res.get("success")) and not errs, "success": bool(res.get("success")),
+            "errorList": errs, "code": res.get("code"), "msg": res.get("msg")}
+
+
+def _read_wave(caller, wave_id, minutes=1440):
+    """按波次ID回读当前状态（只读，复用 waves_list）。"""
+    try:
+        r = waves_list(caller, minutes=minutes, page_size=100)
+    except Exception as e:
+        return {"ok": False, "error": "状态回读失败：%s" % str(e)[:150]}
+    if not r.get("ok"):
+        return r
+    for w in (r.get("waves") or []):
+        if str(w.get("wave_id")) == str(wave_id):
+            return {"ok": True, "wave": w}
+    return {"ok": False, "error": "回读未找到该波次（近 %d 分钟）" % minutes,
+            "waves": len(r.get("waves") or [])}
+
+
+def finish_pick(caller, wave_id, do_write=False):
+    """一键拣完：把波次在 ERP 里推成「拣选完成」（网页显示「等待验货」）。
+
+    **只调 erp.trade.wave.pick.hand（ids=波次ID）；绝不调 erp.trade.wave.seed。**
+    口径（实测波次 200913）：网页「等待验货」= 开放平台 status=1 且 pickEndTime 有值。
+
+    do_write=False（默认）：只读回读波次，返回 波次号/订单数/件数/是否已拣/拣货完成时间
+      以及「将执行：手动拣选(ids=波次号)」，明确不写。
+    do_write=True：调 pick.hand → 回读 erp.trade.waves.query，把 pickEndTime 与状态一起返回
+      （成功应看到「等待验货」）。
+    任何失败/部分失败（failedIds / failedMessages / success=false）如实返回，绝不吞。
+    """
+    if wave_id in (None, "", 0):
+        return {"ok": False, "error": "缺少波次ID（wave_id）"}
+
+    # 只读回读当前波次（用于波次号/订单数/件数/是否已拣），不写
+    st0 = _read_wave(caller, wave_id)
+    w0 = (st0.get("wave") or {}) if st0.get("ok") else {}
+    stt = wave_state(w0.get("status"), w0.get("pickEndTime"))
+    plan = "手动拣选(ids=%s)" % wave_id
+
+    if not do_write:
+        out = {"ok": True, "preview": True, "write": False, "wave_id": wave_id,
+               "wave_code": w0.get("wave_code"),
+               "tradesCount": w0.get("tradesCount"), "itemCount": w0.get("itemCount"),
+               "status": w0.get("status"), "status_cn": stt.get("status_cn"),
+               "picked": stt.get("picked"), "pickEndTime": stt.get("pick_end_time"),
+               "will_execute": plan,
+               "note": "预览：以上为只读回读结果；确认后只会调 erp.trade.wave.pick.hand（%s），"
+                       "把该波次标记为已拣（订单进入等待验货）。不调 seed，不可撤销。" % plan}
+        if not st0.get("ok"):
+            out["warning"] = "状态回读失败：%s" % st0.get("error")
+        return out
+
+    hand = pick_hand(caller, wave_id)
+    out = {"ok": bool(hand.get("ok")), "preview": False, "write": True, "wave_id": wave_id,
+           "will_execute": plan, "pick_hand": hand}
+    if not hand.get("ok"):
+        out["step"] = "pick.hand"
+        out["error"] = ("拣选（pick.hand）未成功："
+                        + str(hand.get("failedMessages") or hand.get("msg")
+                              or hand.get("error") or "未知失败"))
+
+    st = _read_wave(caller, wave_id)
+    out["verify"] = st
+    if st.get("ok"):
+        w = st.get("wave") or {}
+        s2 = wave_state(w.get("status"), w.get("pickEndTime"))
+        out["wave_code"] = w.get("wave_code")
+        out["tradesCount"] = w.get("tradesCount")
+        out["itemCount"] = w.get("itemCount")
+        out["status"] = w.get("status")
+        out["status_cn"] = s2.get("status_cn")
+        out["picked"] = s2.get("picked")
+        out["pickEndTime"] = s2.get("pick_end_time")
+    else:
+        out["warning"] = "状态回读失败：%s" % st.get("error")
+    return out
 
 
 # ---------- 本机自有记录（只记「我自己生成过哪些波次号」，仅供记录页兜底） ----------

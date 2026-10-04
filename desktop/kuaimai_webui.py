@@ -2132,6 +2132,16 @@ WAVE_HTML = r"""<!doctype html>
   </div>
   <div class="muted" style="margin-top:8px">填的件数超过最大可生成 → 自动按最大可生成成波；多个编码合并成<b>同一个波次</b>。</div>
 </div>
+<div class="card">
+  <h2>一键拣完（对已生成的波次）</h2>
+  <div class="bar" style="margin-top:8px">
+    <input id="fwid" type="text" inputmode="numeric" autocomplete="off" placeholder="输入波次ID（波次号下方或记录页可查）">
+    <button id="fwPrev" class="ghost" data-perm="wave.create">一键拣完</button>
+  </div>
+  <div class="muted" style="margin-top:8px">配齐货后点按钮：先<b>只读预览分拣明细</b>，再确认才提交。
+    提交会真的把该波次标记为 <b>拣选完成</b>（网页随即显示<b>等待验货</b>，订单数不变、件数按已拣），<b>不可撤销</b>。</div>
+</div>
+<div id="fwOut"></div>
 <div id="out"></div>
 <script src="/km/zxing.js?v=8"></script>
 <script>
@@ -2364,6 +2374,10 @@ $('mk').onclick = function(){
       h += '</div>';
       h += '<h2 style="margin-top:12px">配货明细（每个 SKU 一行）</h2>' + skuLines(p)
          + '<div class="muted" style="margin-top:6px">状态/内容均为实时回读快麦 ERP。</div>';
+      if(v.wave_id && v.status !== 3 && v.status !== '3'){
+        h += '<div class="actions" style="margin-top:10px"><button id="fwFromCreate" class="ghost" data-wid="'
+           + esc(v.wave_id) + '">货配齐了 → 一键拣完</button></div>';
+      }
     } else {
       h += '<div><span class="tag warn">已提交成波，但回读未确认</span></div>'
          + (v.wave_code ? '<div class="big oktext">波次号：' + esc(v.wave_code) + '</div>' : '')
@@ -2371,6 +2385,7 @@ $('mk').onclick = function(){
     }
     h += '</div>';
     $('out').innerHTML = h + planCard(p);
+    wireFinishFromCreate();
   }).catch(function(e){ $('out').innerHTML = '<div class="card"><div class="badtext">成波请求失败：' + esc(e.message) + '</div></div>'; });
 };
 
@@ -2394,6 +2409,76 @@ function skuLines(p){
   h += '</div>';
   return h;
 }
+
+/* ---------------- 一键拣完：两段（先只读预览分拣明细 → 再确认提交） ---------------- */
+function finishRenderPreview(d){
+  if(!d || d.ok === false){
+    return '<div class="card"><h2>一键拣完 · 预览</h2><div class="badtext">'
+      + esc((d && d.error) || '预览失败') + '</div></div>';
+  }
+  let h = '<div class="card"><h2>一键拣完 · 预览（只读，尚未提交）</h2>';
+  h += '<div style="margin-top:6px"><span class="tag">波次 ' + esc(d.wave_id) + '</span>'
+     + '<span class="tag">分拣位置 ' + esc(d.total_positions) + '</span>'
+     + '<span class="tag">明细行 ' + esc(d.seed_lines) + '</span>'
+     + '<span class="tag">件数 ' + esc(d.seed_total) + '</span></div>';
+  h += '<table style="margin-top:8px"><thead><tr><th>位置号</th><th>编码</th><th>件数</th></tr></thead><tbody>';
+  (d.list || []).forEach(function(p){
+    (p.details || []).forEach(function(x, i){
+      h += '<tr><td>' + (i === 0 ? esc(p.positionNo) : '') + '</td><td>' + esc(x.outerId)
+         + '</td><td>' + esc(x.matchedNum) + '</td></tr>';
+    });
+  });
+  h += '</tbody></table>';
+  if(d.warning) h += '<div class="badtext" style="margin-top:6px">' + esc(d.warning) + '</div>';
+  h += '<div class="muted" style="margin-top:8px">点「确认拣完」会真的把该波次标记为 <b>拣选完成</b>'
+     + '（网页随即显示<b>等待验货</b>，订单数不变、件数按已拣显示），<b>不可撤销</b>。</div>'
+     + '<div class="actions"><button id="fwGo" class="ghost">确认拣完（不可撤销）</button></div></div>';
+  return h;
+}
+function finishCommit(wid){
+  if(!confirm('确认把波次 ' + wid + ' 标记为「拣选完成（等待验货）」？\n会写入快麦 ERP，不可撤销。')) return;
+  $('fwOut').innerHTML = '<div class="card"><div class="muted">正在提交（手动拣选）…</div></div>';
+  post('/api/wave/finish', {wave_id: wid, confirm: true}).then(function(d){
+    let h = '<div class="card"><h2>一键拣完 · 结果</h2>';
+    if(d && d.ok){
+      h += '<div class="big oktext">波次 ' + esc(d.wave_code || d.wave_id) + ' 拣选完成（等待验货）</div>'
+         + '<div style="margin-top:6px"><span class="tag ok">新状态 ' + esc(d.status_cn || d.status || '?')
+         + '</span><span class="tag">件数 ' + esc(d.seed_total) + '</span></div>';
+      if(d.warning) h += '<div class="muted" style="margin-top:6px">' + esc(d.warning) + '</div>';
+    } else {
+      h += '<div class="badtext">未成功：' + esc((d && d.error) || '未知失败') + '</div>';
+      if(d && d.pick_hand) h += '<div class="muted" style="margin-top:6px">pick.hand：' + esc(JSON.stringify(d.pick_hand)) + '</div>';
+      if(d && d.seed) h += '<div class="muted" style="margin-top:6px">seed：' + esc(JSON.stringify(d.seed)) + '</div>';
+    }
+    h += '<div class="muted" style="margin-top:8px">状态为实时回读快麦 ERP。</div></div>';
+    $('fwOut').innerHTML = h;
+  }).catch(function(e){ $('fwOut').innerHTML = '<div class="card"><div class="badtext">提交失败：' + esc(e.message) + '</div></div>'; });
+}
+function finishPreview(wid){
+  $('fwOut').innerHTML = '<div class="card"><div class="muted">正在只读预览分拣明细…</div></div>';
+  post('/api/wave/finish', {wave_id: wid, confirm: false}).then(function(d){
+    $('fwOut').innerHTML = finishRenderPreview(d);
+    const b = $('fwGo');
+    if(b) b.onclick = function(){ finishCommit(wid); };
+  }).catch(function(e){ $('fwOut').innerHTML = '<div class="card"><div class="badtext">预览失败：' + esc(e.message) + '</div></div>'; });
+}
+function wireFinishFromCreate(){
+  const b = $('fwFromCreate');
+  if(!b) return;
+  b.onclick = function(){
+    const wid = b.getAttribute('data-wid');
+    if(!wid){ alert('本次未拿到波次ID，请在「波次记录」页用该波次的一键拣完，或手动输入波次ID'); return; }
+    if($('fwid')) $('fwid').value = wid;
+    finishPreview(wid);
+    const t = $('fwOut');
+    if(t && t.scrollIntoView) t.scrollIntoView({behavior:'smooth', block:'center'});
+  };
+}
+$('fwPrev').onclick = function(){
+  const wid = ($('fwid').value || '').trim();
+  if(!wid){ alert('请先输入波次ID'); return; }
+  finishPreview(wid);
+};
 
 render();
 $('code').focus();
@@ -2444,6 +2529,9 @@ WAVE_RECORDS_HTML = r"""<!doctype html>
   .skus .skun { word-break:break-all; }
   .skus .skuq { flex:0 0 auto; font-weight:700; color:var(--blue); white-space:nowrap; }
   .badtext { color:#C7362E; }
+  .fin { padding:4px 10px; border-radius:9px; border:1px solid rgba(0,122,255,.35); background:rgba(0,122,255,.10);
+         color:#0060D0; font-weight:600; font-size:12.5px; white-space:nowrap; cursor:pointer; }
+  .fin:active { transform:scale(.97); }
   @media (prefers-color-scheme: dark) {
     body { background:linear-gradient(170deg,#1c1c1e,#151517 60%,#1a1a1c) fixed; color:#f2f2f7; }
     .card { background:rgba(28,28,30,.74); border-color:rgba(255,255,255,.08); }
@@ -2462,8 +2550,8 @@ WAVE_RECORDS_HTML = r"""<!doctype html>
 </div>
 <div class="card">
   <h2>我生成的波次</h2>
-  <table><thead><tr><th>波次号</th><th>状态</th><th>订单数</th><th>件数</th><th>时间</th><th>快递</th><th>明细</th></tr></thead>
-  <tbody id="recBody"><tr><td colspan="7" class="muted">载入中…</td></tr></tbody></table>
+  <table><thead><tr><th>波次号</th><th>状态</th><th>订单数</th><th>件数</th><th>时间</th><th>快递</th><th>明细</th><th>操作</th></tr></thead>
+  <tbody id="recBody"><tr><td colspan="8" class="muted">载入中…</td></tr></tbody></table>
 </div>
 <div class="card">
   <h2>最近 ERP 波次（只读对照）</h2>
@@ -2518,11 +2606,14 @@ function load(){
              + '<td>' + esc(r.itemCount == null ? '-' : r.itemCount) + '</td>'
              + '<td>' + esc(r.ts || '-') + '</td>'
              + '<td>' + esc(r.carrier || '-') + '</td>'
-             + '<td>' + skuCell(r.codes) + '</td></tr>';
+             + '<td>' + skuCell(r.codes) + '</td>'
+             + '<td>' + (r.wave_id
+                 ? '<button class="fin" data-fw="' + esc(r.wave_id) + '" data-fwc="' + esc(r.wave_code || '') + '">一键拣完</button>'
+                 : '<span class="muted">-</span>') + '</td></tr>';
         });
         $('recBody').innerHTML = h;
       } else {
-        $('recBody').innerHTML = '<tr><td colspan="7" class="muted">还没有生成过波次（本机无记录）</td></tr>';
+        $('recBody').innerHTML = '<tr><td colspan="8" class="muted">还没有生成过波次（本机无记录）</td></tr>';
       }
       if(recent.length){
         let h = '';
@@ -2543,6 +2634,50 @@ function load(){
 }
 
 $('refresh').onclick = function(e){ if(e) e.preventDefault(); load(); return false; };
+
+/* ---------------- 一键拣完：先只读预览分拣明细 → 再确认提交（不可撤销） ---------------- */
+function fwPreview(wid, wcode){
+  $('recBody').insertAdjacentHTML('beforeend',
+    '<tr id="fwRow"><td colspan="8"><div id="fwBox"><span class="muted">正在只读预览分拣明细…</span></div></td></tr>');
+  $('fwBox').scrollIntoView({behavior:'smooth', block:'center'});
+  fetch(bust(withSid('/api/wave/finish')), {method:'POST', cache:'no-store',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify({wave_id:wid, confirm:false})})
+    .then(function(r){ if(r.status === 401){ location.href = '/login'; throw new Error('请重新登录'); } return r.json(); })
+    .then(function(d){
+      if(!d || d.ok === false){ $('fwBox').innerHTML = '<span class="badtext">' + esc((d&&d.error)||'预览失败') + '</span>'; return; }
+      let h = '<div><b>波次 ' + esc(wcode || wid) + '</b> 分拣 ' + esc(d.total_positions) + ' 个位置 / '
+         + esc(d.seed_lines) + ' 行 / ' + esc(d.seed_total) + ' 件</div>';
+      h += '<div class="muted">' + (d.list || []).map(function(p){
+        return '位置' + esc(p.positionNo) + '：' + (p.details||[]).map(function(x){ return esc(x.outerId) + '×' + esc(x.matchedNum); }).join('　');
+      }).join('<br>') + '</div>';
+      if(d.warning) h += '<div class="badtext">' + esc(d.warning) + '</div>';
+      h += '<div class="bar" style="margin-top:6px"><button class="fin" id="fwGo">确认拣完（不可撤销）</button>'
+         + '<button class="fin" id="fwCancel">取消</button></div>';
+      $('fwBox').innerHTML = h;
+      $('fwCancel').onclick = function(){ const r = $('fwRow'); if(r) r.remove(); };
+      $('fwGo').onclick = function(){
+        if(!confirm('确认把波次 ' + (wcode || wid) + ' 标记为「拣选完成（等待验货）」？\n会写入快麦 ERP，不可撤销。')) return;
+        $('fwBox').innerHTML = '<span class="muted">正在提交（手动拣选）…</span>';
+        fetch(bust(withSid('/api/wave/finish')), {method:'POST', cache:'no-store',
+            headers:{'Content-Type':'application/json'}, body:JSON.stringify({wave_id:wid, confirm:true})})
+          .then(function(r){ return r.json(); })
+          .then(function(d2){
+            if(d2 && d2.ok){
+              $('fwBox').innerHTML = '<div style="color:#1B7F35"><b>拣选完成（等待验货）</b> '
+                + esc(d2.wave_code || wid) + '　新状态：' + esc(d2.status_cn || d2.status || '?') + '</div>';
+              setTimeout(load, 1500);
+            } else {
+              $('fwBox').innerHTML = '<span class="badtext">未成功：' + esc((d2&&d2.error)||'未知失败') + '</span>';
+            }
+          });
+      };
+    })
+    .catch(function(e){ $('fwBox').innerHTML = '<span class="badtext">预览失败：' + esc(e.message) + '</span>'; });
+}
+$('recBody').addEventListener('click', function(e){
+  const b = e.target && e.target.closest ? e.target.closest('button[data-fw]') : null;
+  if(b) fwPreview(b.getAttribute('data-fw'), b.getAttribute('data-fwc'));
+});
 $('home').href = withSid('/');
 window.addEventListener('focus', load);
 load();
