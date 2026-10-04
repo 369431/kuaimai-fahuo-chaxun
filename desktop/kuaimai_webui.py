@@ -2091,7 +2091,7 @@ WAVE_HTML = r"""<!doctype html>
   <div class="bar" style="margin-top:8px">
     <input id="code" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="扫/手动输入商家编码">
     <button id="add">添加</button>
-    <button id="camBtn" class="ghost">扫码添加</button>
+    <button id="btnCam" class="ghost">扫码添加</button>
   </div>
   <div class="muted" id="hint" style="margin-top:8px">手动输入编码回车即添加；也可以点「扫码添加」用摄像头扫。添加后自动查该编码在该快递下的<b>最大可生成件数</b>。</div>
 </div>
@@ -2099,7 +2099,7 @@ WAVE_HTML = r"""<!doctype html>
   <div style="background:#000;border-radius:14px;padding:10px;width:min(92vw,430px)">
     <video id="video" playsinline muted style="width:100%;border-radius:10px;background:#000"></video>
     <div class="muted" id="camMsg" style="color:#eee;margin-top:8px">对准条码…</div>
-    <div class="bar" style="margin-top:8px"><button id="camStop" class="ghost" style="flex:1">关闭</button></div>
+    <div class="bar" style="margin-top:8px"><button id="btnCamStop" class="ghost" style="flex:1">关闭</button></div>
   </div>
 </div>
 <div class="card">
@@ -2295,7 +2295,10 @@ function stopCam(){
   if(stream){ try { stream.getTracks().forEach(function(t){ t.stop(); }); } catch(e){} stream=null; }
   camShow(false);
 }
-$('camBtn').onclick=startCam; $('camStop').onclick=stopCam;
+$('btnCam').onclick=startCam; $('btnCamStop').onclick=stopCam;
+/* scan.js（中转本地提供的扫码增强层，和首页同一套）扫到码后会调 window.query(code)。
+   它接管条件：#btnCam + #video + #camBox 都在；缺了才走我自己上面那套。 */
+window.query = function(code){ if(code){ addCode(String(code).trim()); } };
 $('code').addEventListener('keydown', function(e){
   if(e.key === 'Enter'){ e.preventDefault(); addCode($('code').value); $('code').value=''; }
 });
@@ -2354,5 +2357,6 @@ function planCard(p){
 render();
 $('code').focus();
 </script>
+<script src="/km/scan.js?v=8"></script>
 </body></html>
 """
