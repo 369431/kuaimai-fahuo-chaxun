@@ -20,11 +20,26 @@ caller（主程序用 api_call_authed），本模块不自带凭据。
   verify_wave(sids, caller)  用开放平台回读核对（只读）
 """
 import json
+import os
 import urllib.parse
 
 import kuaimai_print as KP
 
 WAREHOUSE_ID = 556677                 # 火火火服饰仓库（本次只用这个仓）
+
+# 波次状态中文（官方文档 erp.trade.waves.query：1 未完成 / 3 已完成 / 4 已取消）。
+# 开放平台只暴露这三个值，没有「待拣货/拣货中」之类的细分；查不到就原样显示，不猜。
+WAVE_STATUS_CN = {1: "未完成", 3: "已完成", 4: "已取消"}
+
+
+def status_cn(s):
+    """波次状态 → 中文；未知值返回原始字符串（绝不瞎猜）。"""
+    if s is None or s == "":
+        return ""
+    try:
+        return WAVE_STATUS_CN.get(int(s), str(s))
+    except Exception:
+        return str(s)
 CARRIERS = ("中通", "申通")            # 波次按快递拆开：一个波次只含一种快递（名称子串匹配）
 QUERY_PATH = "/trade/wave/checked/trade/query"
 SAVE_PATH = "/trade/wave/checked/trade/save"
@@ -366,6 +381,76 @@ def verify_wave(sids, caller, minutes=20):
                 "waves": len(res.get("list") or []), "code": res.get("code"), "msg": res.get("msg")}
     inter, w, ws = best
     return {"ok": True, "wave_id": w.get("id"), "wave_code": w.get("code"),
-            "status": w.get("status"), "tradesCount": w.get("tradesCount"),
+            "status": w.get("status"), "status_cn": status_cn(w.get("status")),
+            "tradesCount": w.get("tradesCount"),
             "itemCount": w.get("itemCount"), "matched": inter,
             "missing": sorted(want - ws), "extra": len(ws - want)}
+
+
+def _biz_window(minutes):
+    from datetime import datetime, timedelta, timezone
+    tz = timezone(timedelta(hours=8))
+    now = datetime.now(tz)
+    return {"pageNo": 1, "pageSize": 100,
+            "start": (now - timedelta(minutes=minutes)).strftime("%Y-%m-%d %H:%M:%S"),
+            "end": (now + timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S")}
+
+
+def waves_list(caller, minutes=1440, page_size=100):
+    """实时回读最近波次（开放平台 erp.trade.waves.query，只读）。
+
+    caller(method, biz) 由主程序传入（api_call_authed）。只回波次级字段，不返回订单/客户信息。
+    """
+    biz = _biz_window(minutes)
+    biz["pageSize"] = page_size
+    try:
+        res = caller("erp.trade.waves.query", biz)
+    except Exception as e:
+        return {"ok": False, "error": "回读失败：%s" % str(e)[:150]}
+    if not isinstance(res, dict):
+        return {"ok": False, "error": "回读返回异常"}
+    out = []
+    for w in (res.get("list") or []):
+        out.append({
+            "wave_code": w.get("code"), "wave_id": w.get("id"),
+            "status": w.get("status"), "status_cn": status_cn(w.get("status")),
+            "tradesCount": w.get("tradesCount"), "itemCount": w.get("itemCount"),
+            "pickEndTime": w.get("pickEndTime"),
+            "sids": [x.get("sid") for x in (w.get("list") or [])],
+        })
+    return {"ok": True, "waves": out, "total": res.get("total")}
+
+
+# ---------- 本机自有记录（只记「我自己生成过哪些波次号」，仅供记录页兜底） ----------
+def records_path():
+    base = getattr(KP, "BASE_DIR", "") or os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, "wave_records.json")
+
+
+def load_records():
+    """读本机波次记录（没有/损坏时返回空表）。"""
+    try:
+        with open(records_path(), "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, list) else []
+    except Exception:
+        return []
+
+
+def append_record(rec):
+    """追加一条本机记录（按波次号去重，保留最近 200 条）。状态/内容一律实时回读，这里只是兜底索引。"""
+    if not isinstance(rec, dict) or not rec.get("wave_code"):
+        return
+    try:
+        rows = load_records()
+        code = str(rec.get("wave_code"))
+        rows = [r for r in rows if str((r or {}).get("wave_code") or "") != code]
+        rows.append(rec)
+        rows = rows[-200:]
+        p = records_path()
+        tmp = p + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(rows, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, p)
+    except Exception:
+        pass

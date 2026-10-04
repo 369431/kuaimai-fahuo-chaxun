@@ -128,6 +128,7 @@ WEB_INDEX_HTML = r"""<!DOCTYPE html>
     </div>
     <div class="toolbar" style="margin-top:6px">
       <button id="btnWave" class="ghost" data-perm="wave.view">生成波次</button>
+      <button id="btnWaveRec" class="ghost" data-perm="wave.view">波次记录</button>
     </div>
     <div id="camBox" class="hidden" style="margin-top:8px">
       <video id="video" playsinline muted></video>
@@ -349,6 +350,12 @@ const _btnWave = $('btnWave');
 if(_btnWave) _btnWave.onclick = () => {
   const sid = (function(){ try { return localStorage.getItem('km_sid') || ''; } catch(e){ return ''; } })();
   location.href = '/wave' + (sid ? ('?sid=' + encodeURIComponent(sid)) : '');
+};
+/* ---------------- 波次记录：独立页面 /wave-records ---------------- */
+const _btnWaveRec = $('btnWaveRec');
+if(_btnWaveRec) _btnWaveRec.onclick = () => {
+  const sid = (function(){ try { return localStorage.getItem('km_sid') || ''; } catch(e){ return ''; } })();
+  location.href = '/wave-records' + (sid ? ('?sid=' + encodeURIComponent(sid)) : '');
 };
 /* ---------------- 打印记录：独立页面 /prints ---------------- */
 const _lnkPrints = $('lnkPrints');
@@ -2073,6 +2080,16 @@ WAVE_HTML = r"""<!doctype html>
   .big { font-size:22px; font-weight:800; letter-spacing:-.02em; }
   .oktext { color:#1B7F35; }
   .badtext { color:#C7362E; }
+  .topbar { display:flex; gap:8px; margin-bottom:10px; }
+  .topbar a { flex:1; text-align:center; text-decoration:none; padding:10px 12px; border-radius:11px;
+              font-size:14px; font-weight:600; background:var(--fill); color:var(--blue); }
+  /* 配货明细：每个 SKU 一行（自动换行，不挤在一起） */
+  .skus { margin-top:8px; }
+  .skus .sku { display:flex; justify-content:space-between; align-items:baseline; gap:12px;
+               padding:8px 0; border-top:1px solid rgba(60,60,67,.10); }
+  .skus .sku:first-child { border-top:0; }
+  .skus .skun { font-size:15px; font-weight:600; word-break:break-all; }
+  .skus .skuq { flex:0 0 auto; font-size:15px; font-weight:700; color:var(--blue); white-space:nowrap; }
   @media (prefers-color-scheme: dark) {
     body { background:linear-gradient(170deg,#1c1c1e,#151517 60%,#1a1a1c) fixed; color:#f2f2f7; }
     .card { background:rgba(28,28,30,.74); border-color:rgba(255,255,255,.08); }
@@ -2082,6 +2099,10 @@ WAVE_HTML = r"""<!doctype html>
   }
 </style></head>
 <body>
+<div class="topbar">
+  <a href="/" id="lnkHome">返回扫码</a>
+  <a href="/wave-records" id="lnkRec">波次记录</a>
+</div>
 <div class="card">
   <h2>快递（一个波次只能同一种）</h2>
   <div class="bar" id="cbar">
@@ -2122,6 +2143,7 @@ const SID = (function(){
         return localStorage.getItem('km_sid') || ''; } catch(e){ return ''; }
 })();
 function withSid(u){ return SID ? (u + (u.indexOf('?') >= 0 ? '&' : '?') + 'sid=' + encodeURIComponent(SID)) : u; }
+function bust(u){ return u + (u.indexOf('?') >= 0 ? '&' : '?') + 't=' + Date.now(); }   // 防缓存：每次都让 URL 不同
 let ITEMS = [];
 let CARRIER = '中通';   // 一个波次只能同一种快递（与服务端 kuaimai_wave.CARRIERS 一致）
 
@@ -2162,7 +2184,7 @@ function addCode(code){
     $('hint').textContent = code + ' 已在清单里'; return;
   }
   $('hint').textContent = '正在查 ' + code + ' 的最大可生成件数…';
-  fetch(withSid('/api/wave/lookup?code=' + encodeURIComponent(code)), {cache:'no-store'})
+  fetch(bust(withSid('/api/wave/lookup?code=' + encodeURIComponent(code))), {cache:'no-store'})
     .then(function(r){ if(r.status === 401){ location.href = '/login'; throw new Error('请重新登录'); } return r.json(); })
     .then(function(d){
       if(d.error){ $('hint').innerHTML = '<span class="badtext">' + esc(d.error) + '</span>'; return; }
@@ -2203,7 +2225,7 @@ function bodyItems(){
 }
 
 function post(path, obj){
-  return fetch(withSid(path), {method:'POST', cache:'no-store',
+  return fetch(bust(withSid(path)), {method:'POST', cache:'no-store',
       headers:{'Content-Type':'application/json'}, body:JSON.stringify(obj)})
     .then(function(r){ if(r.status === 401){ location.href = '/login'; throw new Error('请重新登录'); } return r.json(); });
 }
@@ -2296,6 +2318,8 @@ function stopCam(){
   camShow(false);
 }
 $('btnCam').onclick=startCam; $('btnCamStop').onclick=stopCam;
+$('lnkHome').href = withSid('/');
+$('lnkRec').href = withSid('/wave-records');
 /* scan.js（中转本地提供的扫码增强层，和首页同一套）扫到码后会调 window.query(code)。
    它接管条件：#btnCam + #video + #camBox 都在；缺了才走我自己上面那套。 */
 window.query = function(code){ if(code){ addCode(String(code).trim()); } };
@@ -2331,14 +2355,18 @@ $('mk').onclick = function(){
     h += '<div class="card"><h2>成波成功</h2>';
     if(v.ok){
       h += '<div class="big oktext">波次号：' + esc(v.wave_code) + '</div>'
-         + '<div style="margin-top:6px"><span class="tag ok">核对一致 ' + esc(v.matched) + ' 张</span>'
+         + '<div style="margin-top:6px"><span class="tag">状态 ' + esc(v.status_cn || v.status || '?') + '</span>'
+         + '<span class="tag ok">核对一致 ' + esc(v.matched) + ' 张</span>'
          + '<span class="tag">订单数 ' + esc(v.tradesCount) + '</span>'
          + '<span class="tag">件数 ' + esc(v.itemCount) + '</span>';
       if(v.extra) h += '<span class="tag warn">额外 ' + esc(v.extra) + ' 张</span>';
       if((v.missing || []).length) h += '<span class="tag warn">缺 ' + esc(v.missing.length) + ' 张</span>';
       h += '</div>';
+      h += '<h2 style="margin-top:12px">配货明细（每个 SKU 一行）</h2>' + skuLines(p)
+         + '<div class="muted" style="margin-top:6px">状态/内容均为实时回读快麦 ERP。</div>';
     } else {
       h += '<div><span class="tag warn">已提交成波，但回读未确认</span></div>'
+         + (v.wave_code ? '<div class="big oktext">波次号：' + esc(v.wave_code) + '</div>' : '')
          + '<div class="muted" style="margin-top:6px">' + esc(v.error || '回读失败') + '</div>';
     }
     h += '</div>';
@@ -2354,9 +2382,171 @@ function planCard(p){
   return h;
 }
 
+/* 配货明细：每个 SKU 一行，形如 「7107-燕麦色S  38 件」（自动换行，不挤成一行） */
+function skuLines(p){
+  const cs = p.codes || [];
+  if(!cs.length) return '<div class="muted">（无编码明细）</div>';
+  let h = '<div class="skus">';
+  cs.forEach(function(c){
+    h += '<div class="sku"><span class="skun">' + esc(c.code) + '</span>'
+       + '<span class="skuq">' + esc(c.actual) + ' 件</span></div>';
+  });
+  h += '</div>';
+  return h;
+}
+
 render();
 $('code').focus();
 </script>
 <script src="/km/scan.js?v=8"></script>
+</body></html>
+"""
+
+
+# ============================ 网页「波次记录」页（/wave-records） ============================
+# 数据来自 GET /api/wave/records：本地只存「我自己生成过哪些波次号」，
+# 每条的 状态 / 件数 / 订单数 一律实时回读快麦 ERP（erp.trade.waves.query），不读本机缓存。
+WAVE_RECORDS_HTML = r"""<!doctype html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>波次记录 · 快麦</title>
+<style>
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  :root { --blue:#007AFF; --green:#34C759; --red:#FF3B30; --orange:#FF9500; --ink:#1d1d1f; --sub:#6e6e73;
+          --line:rgba(60,60,67,.12); --fill:rgba(120,120,128,.12); --glass:rgba(255,255,255,.80); }
+  body { margin:0; padding:12px; min-height:100vh; color:var(--ink); letter-spacing:-.01em;
+         -webkit-font-smoothing:antialiased;
+         font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+         background:linear-gradient(170deg,#eef3fa 0%,#e6edf8 45%,#e1e8f4 100%) fixed; }
+  header { display:flex; align-items:center; gap:8px; padding:2px 3px 10px; flex-wrap:wrap; }
+  header b { font-size:17px; }
+  header .sp { flex:1; }
+  header a.home { color:var(--blue); text-decoration:none; font-size:13.5px; font-weight:600;
+                  background:var(--fill); border-radius:9px; padding:5px 11px; white-space:nowrap; }
+  .card { background:var(--glass); backdrop-filter:saturate(180%) blur(20px);
+          -webkit-backdrop-filter:saturate(180%) blur(20px); border:1px solid rgba(255,255,255,.62);
+          border-radius:14px; padding:12px; margin-bottom:10px; box-shadow:0 8px 24px rgba(24,39,75,.10); }
+  .card h2 { font-size:15px; margin:0 0 8px; font-weight:700; border-left:3px solid var(--blue); padding-left:8px; }
+  .muted { font-size:12.5px; color:var(--sub); line-height:1.7; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th,td { padding:7px 6px; border-bottom:1px solid rgba(60,60,67,.10); text-align:left; vertical-align:top; }
+  th { color:var(--sub); font-weight:500; white-space:nowrap; }
+  td.code { font-weight:800; font-size:15px; white-space:nowrap; }
+  .pill { display:inline-block; padding:2px 9px; border-radius:999px; font-size:12px; font-weight:700; white-space:nowrap; }
+  .pill.wait { background:rgba(255,149,0,.16); color:#a35c00; }
+  .pill.ok { background:rgba(52,199,89,.15); color:#1B7F35; }
+  .pill.cancel { background:rgba(255,59,48,.13); color:#c62828; }
+  .pill.raw { background:var(--fill); color:var(--sub); }
+  .skus .sku { display:flex; justify-content:space-between; gap:10px; padding:3px 0;
+               border-top:1px dashed rgba(60,60,67,.10); }
+  .skus .sku:first-child { border-top:0; }
+  .skus .skun { word-break:break-all; }
+  .skus .skuq { flex:0 0 auto; font-weight:700; color:var(--blue); white-space:nowrap; }
+  .badtext { color:#C7362E; }
+  @media (prefers-color-scheme: dark) {
+    body { background:linear-gradient(170deg,#1c1c1e,#151517 60%,#1a1a1c) fixed; color:#f2f2f7; }
+    .card { background:rgba(28,28,30,.74); border-color:rgba(255,255,255,.08); }
+    .muted { color:#a1a1a6; }
+    th,td { border-bottom-color:rgba(255,255,255,.08); }
+  }
+</style></head>
+<body>
+<header><span id="hdrTitle"></span><b>波次记录</b><span class="sp"></span>
+  <span class="muted" id="upd">载入中…</span>
+  <a class="home" href="#" id="refresh">刷新</a>
+  <a class="home" href="#" id="home">返回扫码</a></header>
+<div class="card">
+  <div class="muted">状态 / 件数 / 订单数 <b>实时来自快麦 ERP</b>（每次打开/刷新都重新回读）；
+    本机只记录「我生成过哪些波次号」做索引。</div>
+</div>
+<div class="card">
+  <h2>我生成的波次</h2>
+  <table><thead><tr><th>波次号</th><th>状态</th><th>订单数</th><th>件数</th><th>时间</th><th>快递</th><th>明细</th></tr></thead>
+  <tbody id="recBody"><tr><td colspan="7" class="muted">载入中…</td></tr></tbody></table>
+</div>
+<div class="card">
+  <h2>最近 ERP 波次（只读对照）</h2>
+  <table><thead><tr><th>波次号</th><th>状态</th><th>订单数</th><th>件数</th></tr></thead>
+  <tbody id="recentBody"><tr><td colspan="4" class="muted">载入中…</td></tr></tbody></table>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const SID = (function(){
+  try { const q = new URLSearchParams(location.search).get('sid');
+        if(q) localStorage.setItem('km_sid', q);
+        return localStorage.getItem('km_sid') || ''; } catch(e){ return ''; }
+})();
+function withSid(u){ return SID ? (u + (u.indexOf('?') >= 0 ? '&' : '?') + 'sid=' + encodeURIComponent(SID)) : u; }
+function bust(u){ return u + (u.indexOf('?') >= 0 ? '&' : '?') + 't=' + Date.now(); }
+
+function pill(status, status_cn){
+  const s = String(status_cn || status || '');
+  let cls = 'raw';
+  const raw = String(status);
+  if(s === '已完成' || raw === '3') cls = 'ok';
+  else if(s === '已取消' || raw === '4') cls = 'cancel';
+  else if(s === '未完成' || raw === '1') cls = 'wait';
+  const label = status_cn ? (status_cn + (raw ? '（' + raw + '）' : '')) : (raw || '?');
+  return '<span class="pill ' + cls + '">' + esc(label) + '</span>';
+}
+
+function skuCell(codes){
+  if(!codes || !codes.length) return '<span class="muted">-</span>';
+  let h = '<div class="skus">';
+  codes.forEach(function(c){
+    h += '<div class="sku"><span class="skun">' + esc(c.code) + '</span>'
+       + '<span class="skuq">' + esc(c.actual) + ' 件</span></div>';
+  });
+  return h + '</div>';
+}
+
+function load(){
+  $('upd').textContent = '查询中…';
+  fetch(bust(withSid('/api/wave/records')), {cache:'no-store'})
+    .then(function(r){ if(r.status === 401){ location.href = '/login'; throw new Error('请重新登录'); } return r.json(); })
+    .then(function(d){
+      if(!d || d.error && !d.records){ $('upd').innerHTML = '<span class="badtext">' + esc((d&&d.error)||'读取失败') + '</span>'; return; }
+      const recs = d.records || [], recent = d.recent || [];
+      if(recs.length){
+        let h = '';
+        recs.forEach(function(r){
+          h += '<tr><td class="code">' + esc(r.wave_code || '-') + '</td>'
+             + '<td>' + pill(r.status, r.status_cn) + (r.live ? '' : ' <span class="muted">(离线)</span>') + '</td>'
+             + '<td>' + esc(r.tradesCount == null ? '-' : r.tradesCount) + '</td>'
+             + '<td>' + esc(r.itemCount == null ? '-' : r.itemCount) + '</td>'
+             + '<td>' + esc(r.ts || '-') + '</td>'
+             + '<td>' + esc(r.carrier || '-') + '</td>'
+             + '<td>' + skuCell(r.codes) + '</td></tr>';
+        });
+        $('recBody').innerHTML = h;
+      } else {
+        $('recBody').innerHTML = '<tr><td colspan="7" class="muted">还没有生成过波次（本机无记录）</td></tr>';
+      }
+      if(recent.length){
+        let h = '';
+        recent.forEach(function(w){
+          h += '<tr><td class="code">' + esc(w.wave_code || '-') + '</td><td>' + pill(w.status, w.status_cn) + '</td>'
+             + '<td>' + esc(w.tradesCount == null ? '-' : w.tradesCount) + '</td>'
+             + '<td>' + esc(w.itemCount == null ? '-' : w.itemCount) + '</td></tr>';
+        });
+        $('recentBody').innerHTML = h;
+      } else {
+        $('recentBody').innerHTML = '<tr><td colspan="4" class="muted">近 24h 无波次</td></tr>';
+      }
+      $('upd').innerHTML = (d.live ? '实时已更新 ' : '实时回读失败：')
+        + '<b>' + new Date().toLocaleTimeString() + '</b>'
+        + (d.error ? ' <span class="badtext">' + esc(d.error) + '</span>' : '');
+    })
+    .catch(function(e){ $('upd').innerHTML = '<span class="badtext">查询失败：' + esc(e.message) + '</span>'; });
+}
+
+$('refresh').onclick = function(e){ if(e) e.preventDefault(); load(); return false; };
+$('home').href = withSid('/');
+window.addEventListener('focus', load);
+load();
+setInterval(load, 30000);   // 页面停留时每 30s 实时刷新一次
+</script>
 </body></html>
 """

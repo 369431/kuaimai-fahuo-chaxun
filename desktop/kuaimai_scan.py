@@ -32,7 +32,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 try:
     from kuaimai_webui import (WEB_INDEX_HTML, PICK_HTML, ORDER_HTML, STOCK_HTML,
-                               STOCKTAKE_HTML, PERMS_HTML, PRINTS_HTML, WAVE_HTML)
+                               STOCKTAKE_HTML, PERMS_HTML, PRINTS_HTML, WAVE_HTML,
+                               WAVE_RECORDS_HTML)
     from kuaimai_login_ui import LOGIN_HTML
 except Exception:
     WEB_INDEX_HTML = "<h1>缺少 kuaimai_webui.py</h1>"
@@ -43,6 +44,7 @@ except Exception:
     PERMS_HTML = WEB_INDEX_HTML
     PRINTS_HTML = WEB_INDEX_HTML
     WAVE_HTML = WEB_INDEX_HTML
+    WAVE_RECORDS_HTML = WEB_INDEX_HTML
     LOGIN_HTML = WEB_INDEX_HTML
 try:
     import kuaimai_auth as auth
@@ -2973,6 +2975,53 @@ class _WebHandler(BaseHTTPRequestHandler):
                 if not self._can(me, "wave.view"):
                     return self._forbidden_page("这个账号没有生成波次权限")
                 return self._send(self._page(WAVE_HTML, me), "text/html; charset=utf-8")
+            if parsed.path in ("/wave-records", "/wave-records.html", "/waves"):
+                # 波次记录：本机记录的波次号 + 实时回读 ERP 的状态/件数/订单数（不读本机状态缓存）
+                if not self._can(me, "wave.view"):
+                    return self._forbidden_page("这个账号没有生成波次权限")
+                return self._send(self._page(WAVE_RECORDS_HTML, me), "text/html; charset=utf-8")
+            if parsed.path == "/api/wave/records":
+                # 波次记录：以本机自有记录为索引，每条的「状态/件数/订单数」一律实时回读 ERP。
+                if not self._can(me, "wave.view"):
+                    return self._deny("wave.view")
+                try:
+                    import kuaimai_wave as wv
+                    local = wv.load_records()
+                    live, err = {}, ""
+                    try:
+                        r = wv.waves_list(api_call_authed, minutes=1440, page_size=100)
+                        if r.get("ok"):
+                            for w in (r.get("waves") or []):
+                                code = str(w.get("wave_code") or "")
+                                if code:
+                                    live[code] = w
+                        else:
+                            err = r.get("error") or ""
+                    except Exception as e:
+                        err = str(e)[:150]
+                    recs = []
+                    for rec in local:
+                        code = str(rec.get("wave_code") or "")
+                        lw = live.get(code) or {}
+                        recs.append({
+                            "wave_code": code,
+                            "status": lw.get("status", rec.get("status")),
+                            "status_cn": (lw.get("status_cn")
+                                          or wv.status_cn(lw.get("status", rec.get("status")))),
+                            "live": bool(lw),
+                            "tradesCount": lw.get("tradesCount", rec.get("tradesCount")),
+                            "itemCount": lw.get("itemCount", rec.get("itemCount")),
+                            "carrier": rec.get("carrier") or "",
+                            "codes": rec.get("codes") or [],
+                            "ts": rec.get("ts"),
+                        })
+                    recs.sort(key=lambda x: str(x.get("ts") or ""), reverse=True)
+                    known = set(str(x.get("wave_code") or "") for x in local)
+                    recent = [live[c] for c in sorted(live.keys(), reverse=True) if c not in known]
+                    return self._json({"ok": True, "records": recs, "recent": recent,
+                                       "live": bool(live), "error": err})
+                except Exception as e:
+                    return self._json({"error": "读取波次记录失败：%s" % str(e)[:200]}, 500)
             if parsed.path == "/api/wave/lookup":
                 # 扫一个编码：查它在火火火仓库的最大可生成件数（只读，走 CDP 登录态）
                 if not self._can(me, "wave.view"):
@@ -3376,6 +3425,21 @@ class _WebHandler(BaseHTTPRequestHandler):
                             out["verify"] = wv.verify_wave(out.get("sids") or [], api_call_authed)
                         except Exception as e:
                             out["verify"] = {"ok": False, "error": str(e)[:150]}
+                        # 本机只记「我自己生成过哪些波次号」；状态/内容 记录页每次实时回读 ERP。
+                        try:
+                            v = out.get("verify") or {}
+                            wv.append_record({
+                                "wave_code": v.get("wave_code") or "",
+                                "status": v.get("status"),
+                                "status_cn": v.get("status_cn") or wv.status_cn(v.get("status")),
+                                "tradesCount": v.get("tradesCount"),
+                                "itemCount": v.get("itemCount"),
+                                "carrier": out.get("carrier") or "",
+                                "codes": out.get("codes") or [],
+                                "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+                            })
+                        except Exception:
+                            pass
                     try:
                         print_jobs_log("生成波次：快递=%s sids=%d save=%s 波次=%s" % (
                             out.get("carrier") or "-",
