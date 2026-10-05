@@ -1330,43 +1330,54 @@ function withSid(u){ return SID ? (u + (u.indexOf('?') >= 0 ? '&' : '?') + 'sid=
 let ROWS = [];
 let HIDE_SENT = true;
 const CAN = function(k){ return window.KM_CAN ? window.KM_CAN(k) : true; };
-/* ---- 最近生成的波次：常驻显示（只在生成新波次时替换）+ 一键拣完 ---- */
+/* ---- 最近生成的波次（可一次两个：中通 + 申通）：常驻显示，各自一键拣完 ---- */
 const WKEY = 'km_stock_lastwave';
 let HIDDEN = {};                       /* 一键拣完后先隐藏的编码（重新查询/刷新后恢复） */
+function normWbar(v){
+  if(!v) return [];
+  if(Array.isArray(v)) return v.filter(function(x){ return x && x.wave_code; });
+  if(v.wave_code) return [v];
+  return [];
+}
 function loadWbar(){
-  let w = null;
-  try{ w = JSON.parse(localStorage.getItem(WKEY) || 'null'); }catch(e){ w = null; }
-  renderWbar(w);
+  let v = null;
+  try{ v = JSON.parse(localStorage.getItem(WKEY) || 'null'); }catch(e){ v = null; }
+  renderWbar(normWbar(v));
 }
-function saveWbar(w){
-  try{ localStorage.setItem(WKEY, JSON.stringify(w || null)); }catch(e){}
-  renderWbar(w);
+function saveWbar(list){
+  const arr = normWbar(list);
+  try{ localStorage.setItem(WKEY, JSON.stringify(arr.length ? arr : null)); }catch(e){}
+  renderWbar(arr);
 }
-function renderWbar(w){
+function renderWbar(list){
   const el = $('wbar'); if(!el) return;
-  if(!w || !w.wave_code){ el.style.display = 'none'; el.innerHTML = ''; return; }
+  const arr = normWbar(list);
+  if(!arr.length){ el.style.display = 'none'; el.innerHTML = ''; return; }
   el.style.display = '';
-  el.innerHTML = '<div class="card" style="border-left:4px solid #0b5394">'
-    + '<div style="font-size:16px;font-weight:800">最近生成：波次 '
-    + '<span style="color:#0b5394">' + esc(w.wave_code) + '</span>　'
-    + esc(w.carrier || '') + ' ' + esc(w.qty == null ? '' : w.qty) + ' 件'
-    + (w.code ? ('　（' + esc(w.code) + '）') : '')
-    + (w.done ? '　<span class="tag ok">已拣完</span>' : '')
-    + '</div>'
-    + '<div style="margin-top:8px">'
-    + ((w.wave_id && !w.done) ? ('<button class="sbtn" id="wbarFinish">一键拣完（' + esc(w.wave_code) + '）</button>') : '')
-    + '<button class="sbtn" id="wbarClear" style="margin-left:8px">清除</button></div>'
-    + '<div class="muted" id="wbarMsg" style="margin-top:6px">生成新波次时会自动替换这里。'
-    + '「一键拣完」会先只读预览分拣明细，再确认提交（不可撤销）。</div></div>';
-  const fb = $('wbarFinish');
-  if(fb){ fb.onclick = function(){ wbarFinish(w); }; }
+  let h = '<div class="card" style="border-left:4px solid #0b5394">'
+        + '<div style="font-size:15px;font-weight:800">最近生成（' + arr.length + ' 个波次）</div>';
+  arr.forEach(function(w, i){
+    h += '<div style="margin-top:8px;padding-top:8px' + (i ? ';border-top:1px solid rgba(60,60,67,.12)' : '') + '">'
+       + '<div style="font-size:16px;font-weight:800">波次 <span style="color:#0b5394">' + esc(w.wave_code) + '</span>　'
+       + esc(w.carrier || '') + ' ' + esc(w.qty == null ? '' : w.qty) + ' 件'
+       + (w.code ? ('　（' + esc(w.code) + '）') : '')
+       + (w.done ? '　<span class="tag ok">已拣完</span>' : '') + '</div>'
+       + '<div style="margin-top:6px">'
+       + ((w.wave_id && !w.done) ? ('<button class="sbtn wbar-fin" data-i="' + i + '">一键拣完</button>') : '')
+       + '</div></div>';
+  });
+  h += '<div style="margin-top:8px"><button class="sbtn" id="wbarClear">清除</button></div>'
+     + '<div class="muted" style="margin-top:6px">生成新波次时会替换这里；「一键拣完」先只读预览、确认后才提交（不可撤销）。</div></div>';
+  el.innerHTML = h;
+  el.querySelectorAll('.sbtn.wbar-fin').forEach(function(b){
+    b.onclick = function(){ wbarFinish(arr[+b.dataset.i], b); };
+  });
   const cb = $('wbarClear');
-  if(cb){ cb.onclick = function(){ saveWbar(null); }; }
+  if(cb){ cb.onclick = function(){ saveWbar([]); }; }
 }
-function wbarFinish(w){
+function wbarFinish(w, b){
   if(!w || !w.wave_id){ flash('这个波次没有 id，请到「波次记录」页一键拣完'); return; }
-  const b = $('wbarFinish');
-  const restore = function(){ if(b){ b.disabled = false; b.textContent = '一键拣完（' + w.wave_code + '）'; } };
+  const restore = function(){ if(b){ b.disabled = false; b.textContent = '一键拣完'; } };
   if(b){ b.disabled = true; b.textContent = '只读预览中…'; }
   fetch(withSid('/api/wave/finish'), {method:'POST', cache:'no-store',
     headers:{'Content-Type':'application/json'},
@@ -1386,17 +1397,21 @@ function wbarFinish(w){
         .then(function(r){ return r.json(); })
         .then(function(j){
           if(j && (j.ok || j.finished || j.status_cn)){
-            flash('✅ 波次 ' + w.wave_code + ' 已一键拣完');
-            if(w.code){ HIDDEN[String(w.code).toUpperCase()] = 1; }   /* 拣完先隐藏该编码 */
-            const nw = {}; for(const k in w){ nw[k] = w[k]; } nw.done = 1; saveWbar(nw);
+            flash('波次 ' + w.wave_code + ' 已一键拣完（' + (w.carrier || '') + '）');
+            let arr = [];
+            try{ arr = normWbar(JSON.parse(localStorage.getItem(WKEY) || 'null')); }catch(e){ arr = []; }
+            arr.forEach(function(x){ if(String(x.wave_code) === String(w.wave_code)) x.done = 1; });
+            const still = arr.some(function(x){ return x.code && String(x.code) === String(w.code) && !x.done; });
+            if(w.code && !still){ HIDDEN[String(w.code).toUpperCase()] = 1; }
+            saveWbar(arr);
             render();
           } else {
-            flash('✗ 一键拣完失败：' + ((j && (j.error || j.msg)) || '未知'));
+            flash('一键拣完失败：' + ((j && (j.error || j.msg)) || '未知'));
             restore();
           }
         });
     })
-    .catch(function(e){ flash('✗ ' + e.message); restore(); });
+    .catch(function(e){ flash('一键拣完出错：' + e.message); restore(); });
 }
 function flash(msg){
   const el = $('flash');
@@ -1483,10 +1498,17 @@ function render(){
             h += '<button class="sbtn wave-go" data-k="' + esc(k) + '" data-q="' + (n > 0 ? q : 0) + '"'
                + (n > 0 ? '' : ' disabled') + '>' + esc(k) + ' ' + (n > 0 ? (q + ' 件') : '0') + '</button>';
           });
+          const _pos = keys.filter(function(k){ return (parseInt(per[k], 10) || 0) > 0; });
+          if(_pos.length > 1){
+            h += '<button class="sbtn wave-go2">两个都生成（' + _pos.join(' + ') + '）</button>';
+          }
           h += '<button class="sbtn wave-cancel">取消</button>';
           cell.innerHTML = h;
           cell.querySelectorAll('.sbtn.wave-go').forEach(function(g){
             g.onclick = function(){ waveGo(g, code, f); };
+          });
+          cell.querySelectorAll('.sbtn.wave-go2').forEach(function(g){
+            g.onclick = function(){ waveGoBoth(cell, code, f, per, keys); };
           });
           const cb = cell.querySelector('.sbtn.wave-cancel');
           if(cb){ cb.onclick = function(){ render(); }; }
@@ -1508,9 +1530,9 @@ function render(){
       .then(function(r){ return r.json(); })
       .then(function(w){
         if(w && (w.wave_code || w.created)){
-          saveWbar({wave_code: w.wave_code || '', wave_id: w.wave_id || '',
+          saveWbar([{wave_code: w.wave_code || '', wave_id: w.wave_id || '',
                     carrier: carrier, qty: ((w.codes && w.codes[0] && w.codes[0].actual) || qty),
-                    code: code, ts: Date.now()});
+                    code: code, ts: Date.now()}]);
           flash('✅ ' + code + ' 波次 ' + (w.wave_code || '?') + '（' + carrier + ' ' + ((w.codes && w.codes[0] && w.codes[0].actual) || qty) + ' 件）' + (w.capped_note ? '　' + w.capped_note : ''));
         } else {
           flash('✗ ' + code + '：' + ((w && (w.error || w.verify_error)) || '未生成（详情见「生成波次」页）'));
@@ -1518,6 +1540,42 @@ function render(){
         render();
       })
       .catch(function(e){ flash('✗ ' + code + '：' + e.message); render(); });
+  }
+  /* 一次把两个快递都成波：中通一个波次 + 申通一个波次（顺序执行，避免并发冲突） */
+  function waveGoBoth(cell, code, f, per, keys){
+    const todo = keys.filter(function(k){ return (parseInt(per[k], 10) || 0) > 0; })
+                     .map(function(k){ return {carrier: k, qty: Math.min(f, parseInt(per[k], 10) || 0)}; });
+    if(!todo.length){ flash(code + '：没有可成波订单'); return; }
+    cell.innerHTML = '<span class="muted">生成中…（' + todo.map(function(t){ return esc(t.carrier); }).join(' + ') + '）</span>';
+    const out = [];
+    let chain = Promise.resolve();
+    todo.forEach(function(t){
+      chain = chain.then(function(){
+        return fetch(withSid('/api/wave/create'), {method:'POST', cache:'no-store',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({items:[{code:code, qty:t.qty}], carrier:t.carrier, confirm:true})})
+          .then(function(r){ return r.json(); })
+          .then(function(w){ out.push({carrier: t.carrier, qty: t.qty, w: w || {}}); })
+          .catch(function(e){ out.push({carrier: t.carrier, qty: t.qty, w: {error: e.message}}); });
+      });
+    });
+    chain.then(function(){
+      const ws = [], parts = [];
+      out.forEach(function(o){
+        const w = o.w || {};
+        if(w.wave_code || w.created){
+          const act = ((w.codes && w.codes[0] && w.codes[0].actual) || o.qty);
+          ws.push({wave_code: w.wave_code || '', wave_id: w.wave_id || '', carrier: o.carrier,
+                   qty: act, code: code});
+          parts.push((w.wave_code ? ('波次 ' + w.wave_code) : '已生成') + '（' + o.carrier + ' ' + act + ' 件）');
+        } else {
+          parts.push(o.carrier + ' 失败：' + ((w.error || w.verify_error) || '未生成'));
+        }
+      });
+      if(ws.length){ saveWbar(ws); }
+      flash(code + '：' + parts.join('　'));
+      render();
+    });
   }
   /* 「改库存」：按货位改数量（调盘点接口，二次确认后真实修改快麦库存） */
   box.querySelectorAll('.sbtn.adj').forEach(function(b){
@@ -2221,6 +2279,7 @@ WAVE_HTML = r"""<!doctype html>
   <div class="bar" id="cbar">
     <button class="ghost seg on" data-car="中通">中通</button>
     <button class="ghost seg" data-car="申通">申通</button>
+    <button class="ghost" id="modeBtn" style="font-size:13px;padding:9px 12px">双快递模式：开</button>
   </div>
   <div class="bar" style="margin-top:8px">
     <input id="code" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="扫/手动输入商家编码">
@@ -2242,6 +2301,7 @@ WAVE_HTML = r"""<!doctype html>
   <div class="actions">
     <button id="prev" class="ghost">预览（不建波）</button>
     <button id="mk" data-perm="wave.create">生成波次</button>
+    
   </div>
 </div>
 <div class="card">
@@ -2264,17 +2324,100 @@ const SID = (function(){
 })();
 function withSid(u){ return SID ? (u + (u.indexOf('?') >= 0 ? '&' : '?') + 'sid=' + encodeURIComponent(SID)) : u; }
 function bust(u){ return u + (u.indexOf('?') >= 0 ? '&' : '?') + 't=' + Date.now(); }   // 防缓存：每次都让 URL 不同
-let ITEMS = [];
-let CARRIER = '中通';   // 一个波次只能同一种快递（与服务端 kuaimai_wave.CARRIERS 一致）
+let BAGS = {'中通': [], '申通': []};   /* 两个快递各一份待成波清单（互不清空） */
+let ITEMS = BAGS['中通'];              /* ITEMS 永远指向"当前正在看"的那份清单 */
+let CARRIER = '中通';                  // 一个波次只能同一种快递（与服务端 kuaimai_wave.CARRIERS 一致）
+const BAGKEY = 'km_wave_bags';
 
+let DUAL = true;    /* true=双快递模式（两份清单）；false=单快递模式（旧：只进当前快递，切换清空） */
+const MODEKEY = 'km_wave_dual';
+function loadMode(){
+  try{ const v = localStorage.getItem(MODEKEY); if(v === '0'){ DUAL = false; } else if(v === '1'){ DUAL = true; } }catch(e){}
+  syncModeBtn();
+}
+function saveMode(){ try{ localStorage.setItem(MODEKEY, DUAL ? '1' : '0'); }catch(e){} syncModeBtn(); }
+function syncModeBtn(){
+  const b = $('modeBtn'); if(!b) return;
+  b.textContent = DUAL ? '双快递模式：开' : '单快递模式（旧）';
+  b.title = DUAL ? '扫码：中通进中通清单、申通进申通清单；切换只是换着看，刷新可保留（点一下切回旧模式）'
+                 : '旧模式：扫码只进当前快递清单，切换快递会清空当前清单（点一下切回双快递模式）';
+  if(DUAL){ b.classList.add('on'); } else { b.classList.remove('on'); }
+}
+function toggleMode(){
+  DUAL = !DUAL; saveMode();
+  if(!DUAL){
+    /* 切回旧模式：只保留当前快递那份，其余丢弃，并清掉本地保存 */
+    const keep = ITEMS.slice();
+    BAGS = {'中通': [], '申通': []}; BAGS[CARRIER] = keep; ITEMS = bagOf(CARRIER);
+    try{ localStorage.removeItem(BAGKEY); }catch(e){}
+  } else {
+    saveBags();
+  }
+  syncCarrierButtons(); render();
+  $('hint').innerHTML = DUAL
+    ? '已切到「双快递模式」：扫码时<b>中通进中通清单、申通进申通清单</b>；切换只是换着看，两边互不清空，刷新可保留。'
+    : '已切回「单快递模式（旧）」：扫码只进<b>当前快递</b>清单；切换快递会清空当前清单。';
+}
+
+function bagOf(c){ if(!BAGS[c]) BAGS[c] = []; return BAGS[c]; }
+function bagCount(c){ return (BAGS[c] || []).length; }
+function saveBags(){
+  try{ localStorage.setItem(BAGKEY, JSON.stringify({bags: BAGS, carrier: CARRIER})); }catch(e){}
+}
+function syncCarrierButtons(){
+  document.querySelectorAll('#cbar .seg').forEach(function(b){
+    const c = b.getAttribute('data-car');
+    const n = bagCount(c);
+    b.textContent = c + (n ? ('（' + n + '）') : '');
+    b.classList.toggle('on', c === CARRIER);
+  });
+}
+/* 从某快递清单里剔除已进波次的编码（只动这一份，另一份原样保留） */
+function dropFromBag(carrier, p, items){
+  try{
+    const done = {};
+    (p && p.codes || []).forEach(function(x){
+      if((parseInt(x.actual, 10) || 0) > 0 && x.code){ done[String(x.code).toUpperCase()] = 1; }
+    });
+    if(!Object.keys(done).length){ (items || []).forEach(function(x){ done[String(x.code).toUpperCase()] = 1; }); }
+    BAGS[carrier] = bagOf(carrier).filter(function(x){ return !done[String(x.code).toUpperCase()]; });
+    if(carrier === CARRIER){ ITEMS = bagOf(CARRIER); }
+  }catch(e){}
+  saveBags(); syncCarrierButtons(); render();
+}
+/* 刷新/重开页面：有上次的清单就恢复，并给「保留 / 不保留」选择（避免丢数据） */
+function restoreBags(){
+  if(!DUAL) return;                        /* 旧模式不恢复 */
+  let v = null;
+  try{ v = JSON.parse(localStorage.getItem(BAGKEY) || 'null'); }catch(e){ v = null; }
+  if(!v || !v.bags) return;
+  const n1 = (v.bags['中通'] || []).length, n2 = (v.bags['申通'] || []).length;
+  if(!n1 && !n2) return;
+  BAGS = {'中通': v.bags['中通'] || [], '申通': v.bags['申通'] || []};
+  if(v.carrier === '中通' || v.carrier === '申通'){ CARRIER = v.carrier; }
+  ITEMS = bagOf(CARRIER);
+  syncCarrierButtons(); render();
+  $('hint').innerHTML = '已恢复上次的待成波清单（中通 ' + n1 + ' 个 · 申通 ' + n2 + ' 个）—— 要保留吗？ '
+    + '<button class="ghost" id="keepBags" style="padding:6px 12px;font-size:14px">保留</button> '
+    + '<button class="ghost" id="dropBags" style="padding:6px 12px;font-size:14px">不保留（清空）</button>';
+  const kb = $('keepBags');
+  if(kb){ kb.onclick = function(){ $('hint').innerHTML = '已保留上次清单（中通 ' + bagCount('中通') + ' 个 · 申通 ' + bagCount('申通') + ' 个）。'; }; }
+  const dbb = $('dropBags');
+  if(dbb){ dbb.onclick = function(){
+    BAGS = {'中通': [], '申通': []}; ITEMS = bagOf(CARRIER); saveBags(); syncCarrierButtons(); render();
+    $('hint').innerHTML = '已清空待成波清单。';
+  }; }
+}
 function setCarrier(c){
   if(c === CARRIER) return;
-  if(ITEMS.length && !confirm('切换快递会清空当前清单（一个波次只能同一种快递）。继续？')) return;
-  CARRIER = c; ITEMS = []; render();
-  document.querySelectorAll('#cbar .seg').forEach(function(b){
-    b.classList.toggle('on', b.getAttribute('data-car') === c);
-  });
-  $('hint').innerHTML = '当前快递：<b>' + esc(c) + '</b>。扫/输入编码回车即添加。';
+  if(!DUAL){
+    if(ITEMS.length && !confirm('切换快递会清空当前清单（一个波次只能同一种快递）。继续？')) return;
+    BAGS[CARRIER] = [];                    /* 旧模式：切快递即清空当前那份 */
+  }
+  CARRIER = c; ITEMS = bagOf(c); saveBags(); render(); syncCarrierButtons();
+  $('hint').innerHTML = DUAL
+    ? ('当前快递：<b>' + esc(c) + '</b>（这份清单 ' + ITEMS.length + ' 个编码）。两个快递的清单各自保留，切换只是换着看。')
+    : ('当前快递：<b>' + esc(c) + '</b>（单快递模式：扫码只进这份清单）。');
 }
 
 /* 在架数量 + 货位（本机索引；在架 0 也保留货位）+ 建议多件预留。
@@ -2366,9 +2509,6 @@ function render(){
 function addCode(code){
   code = (code || '').trim();
   if(!code){ $('hint').textContent = '请先输入商家编码'; return; }
-  if(ITEMS.some(function(x){ return x.code.toUpperCase() === code.toUpperCase(); })){
-    $('hint').textContent = code + ' 已在清单里'; return;
-  }
   $('hint').textContent = '正在查 ' + code + ' 的最大可生成件数…';
   fetch(bust(withSid('/api/wave/lookup?code=' + encodeURIComponent(code))), {cache:'no-store'})
     .then(function(r){ if(r.status === 401){ location.href = '/login'; throw new Error('请重新登录'); } return r.json(); })
@@ -2376,31 +2516,67 @@ function addCode(code){
       if(d.error){ $('hint').innerHTML = '<span class="badtext">' + esc(d.error) + '</span>'; return; }
       refreshShelfStatus();
       const per = d.carriers || {};
-      const cnum = parseInt(per[CARRIER], 10) || 0;
       const all = Object.keys(per).map(function(k){ return k + ' ' + per[k] + ' 件'; }).join('　/　');
       const mq = parseInt(d.multi_qty, 10) || 0;
       const info = {shelf_index_empty: !!d.shelf_index_empty, shelf_qty: d.shelf_qty,
                     bins_text: d.bins_text || '', multi_qty: mq};
       const extra = '<div class="muted" style="margin-top:6px;line-height:1.7">' + shelfBits(d) + '</div>';
-      if(cnum > 0){
-        ITEMS.push({code: d.code || code, qty: cnum, max: cnum, info: info});
-        render();
-        $('hint').innerHTML = '<span class="qcode">' + esc(d.code || code) + '</span>：快递 <b>' + esc(CARRIER)
-          + '</b> 最大可生成 <b>' + cnum + ' 件</b>'
-          + (all ? '（全部：<span class="cex">' + esc(all) + '</span>）' : '') + extra;
+      /* 旧模式（单快递）：只处理当前快递，没有就提示可切到另一个快递 */
+      if(!DUAL){
+        const cnum = parseInt(per[CARRIER], 10) || 0;
+        const cname0 = String(d.code || code).toUpperCase();
+        if(cnum > 0){
+          if(ITEMS.some(function(x){ return String(x.code).toUpperCase() === cname0; })){
+            $('hint').innerHTML = esc(d.code || code) + ' 已在清单里' + extra; return;
+          }
+          ITEMS.push({code: d.code || code, qty: cnum, max: cnum, info: info});
+          saveBags(); render(); syncCarrierButtons();
+          $('hint').innerHTML = '<span class="qcode">' + esc(d.code || code) + '</span>：快递 <b>' + esc(CARRIER)
+            + '</b> 最大可生成 <b>' + cnum + ' 件</b>'
+            + (all ? '（全部：<span class="cex">' + esc(all) + '</span>）' : '') + extra;
+          return;
+        }
+        const oth = Object.keys(per).filter(function(k){
+          return k !== CARRIER && (parseInt(per[k], 10) || 0) > 0;
+        });
+        if(oth.length){
+          const o = oth[0], n0 = parseInt(per[o], 10) || 0;
+          $('hint').innerHTML = '<span class="badtext">' + esc(d.code || code) + '：快递 <b>' + esc(CARRIER)
+            + '</b> 没有可成波订单</span>，但 <b>' + esc(o) + '</b> 有 <b>' + n0 + '</b> 件 — '
+            + '<button class="ghost" id="swBtn" style="padding:7px 12px;font-size:14px">切到 '
+            + esc(o) + ' 并添加</button>' + extra;
+          const b = $('swBtn');
+          if(b){ b.onclick = function(){ setCarrier(o); setTimeout(function(){ addCode(d.code || code); }, 80); }; }
+          return;
+        }
+        $('hint').innerHTML = '<span class="badtext">' + esc(d.code || code) + '：没有可成波订单</span>'
+          + '<div class="muted">该编码在火火火仓库没有「待发货 + 未成波 + 一单一件」的订单'
+          + '（可能已生成波次 / 已打印 / 是多件单）。</div>' + extra;
         return;
       }
-      const others = Object.keys(per).filter(function(k){
-        return k !== CARRIER && (parseInt(per[k], 10) || 0) > 0;
+      /* 双快递模式：按快递分别入清单：有中通就进中通那份，有申通就进申通那份（两边都进也没问题） */
+      const added = [], skipped = [];
+      const cname = String(d.code || code).toUpperCase();
+      Object.keys(per).forEach(function(k){
+        const n = parseInt(per[k], 10) || 0;
+        if(!(n > 0)) return;
+        const bag = bagOf(k);
+        if(bag.some(function(x){ return String(x.code).toUpperCase() === cname; })){ skipped.push(k); return; }
+        bag.push({code: d.code || code, qty: n, max: n, info: info});
+        added.push(k + ' ' + n + ' 件');
       });
-      if(others.length){
-        const o = others[0], n = parseInt(per[o], 10) || 0;
-        $('hint').innerHTML = '<span class="badtext">' + esc(d.code || code) + '：快递 <b>'
-          + esc(CARRIER) + '</b> 没有可成波订单</span>，但 <b>' + esc(o) + '</b> 有 <b>' + n + '</b> 件'
-          + ' — <button class="ghost" id="swBtn" style="padding:7px 12px;font-size:14px">切到 '
-          + esc(o) + ' 并添加</button>' + extra;
-        const b = $('swBtn');
-        if(b){ b.onclick = function(){ setCarrier(o); setTimeout(function(){ addCode(d.code || code); }, 80); }; }
+      if(added.length){
+        saveBags(); syncCarrierButtons(); render();
+        $('hint').innerHTML = '<span class="qcode">' + esc(d.code || code) + '</span>：已加入 <b>'
+          + esc(added.join('　·　')) + '</b>'
+          + (skipped.length ? ('（' + esc(skipped.join('/')) + ' 清单已有，未重复）') : '')
+          + (all ? '　全部：<span class="cex">' + esc(all) + '</span>' : '') + extra;
+        return;
+      }
+      if(skipped.length){
+        $('hint').innerHTML = '<span class="qcode">' + esc(d.code || code) + '</span>：'
+          + esc(skipped.join('/')) + ' 清单里已有（未重复添加）'
+          + (all ? '　全部：<span class="cex">' + esc(all) + '</span>' : '') + extra;
         return;
       }
       $('hint').innerHTML = '<span class="badtext">' + esc(d.code || code)
@@ -2448,6 +2624,10 @@ function renderPlan(p){
 document.querySelectorAll('#cbar .seg').forEach(function(b){
   b.onclick = function(){ setCarrier(b.getAttribute('data-car')); };
 });
+(function(){
+  const mb = $('modeBtn');
+  if(mb){ mb.onclick = function(){ toggleMode(); }; }
+})();
 /* ---------- 摄像头扫码添加（优先 BarcodeDetector，不支持则用中转注入的 ZXing）---------- */
 let stream=null, scanTimer=null, zxReader=null;
 function camShow(on){ $('camBox').classList.toggle('hidden', !on); }
@@ -2581,6 +2761,7 @@ $('mk').onclick = function(){
     }
     const v = p.verify || {};
     if(p.created === true || v.ok){
+      dropFromBag(CARRIER, p, items);   /* 只从「当前快递」清单移除已进波次的编码 */
       h += '<div class="card"><h2>成波成功</h2>';
       h += '<div class="big oktext">波次号：' + esc(p.wave_code || v.wave_code || p.wave_id || '-') + '</div>'
          + '<div style="margin-top:6px"><span class="tag">状态 ' + esc(v.status_cn || v.status || '未拣') + '</span>'
@@ -2693,7 +2874,10 @@ $('fwPrev').onclick = function(){
   finishPreview(wid);
 };
 
+loadMode();                              /* 恢复上次选的模式（双快递 / 单快递旧模式） */
+restoreBags();                           /* 双快递模式下：刷新/重开时恢复上次两份清单，并问「保留/不保留」 */
 render();
+syncCarrierButtons();
 $('code').focus();
 refreshShelfStatus();                     /* 进页面：读货位时间戳并按需后台刷一次 */
 setInterval(refreshShelfStatus, 30000);   /* 停留时每 30s 校一次新鲜度 */
