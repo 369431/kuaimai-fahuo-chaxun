@@ -226,7 +226,10 @@ def _query_raw(c, code):
         "specifyShipperIds": "",
         "pageSize": DEFAULT_PAGE_SIZE,
     })
-    return _split_raw(_post(c, QUERY_PATH, form, "application/x-www-form-urlencoded"), code)
+    _r = _split_raw(_post(c, QUERY_PATH, form, "application/x-www-form-urlencoded"), code)
+    if isinstance(_r, dict):
+        return _r
+    return {"one": list(_r or []), "multi_qty": 0}
 
 
 def _shelf_map():
@@ -382,8 +385,13 @@ def plan(items, carrier=""):
     try:
         cand, raw_by_code = {}, {}
         for t in targets:
-            rows = [o for o in _query_raw(c, orig.get(t, t))
-                    if _c_match(o.get("carrier"), carrier)]
+            # _query_raw 现返回 {"one": [一单一件候选], "multi_qty": 多件预留件数}
+            # （v1.49 起的契约）—— 这里必须取 "one"，不能再把整个返回值当列表遍历，
+            # 否则遍历到字典的键（字符串）→ 'str' object has no attribute 'get'。
+            _q = _query_raw(c, orig.get(t, t)) or {}
+            _one = _q.get("one") if isinstance(_q, dict) else _q
+            rows = [o for o in (_one or [])
+                    if isinstance(o, dict) and _c_match(o.get("carrier"), carrier)]
             raw_by_code[t] = rows
             for o in rows:
                 # 同一订单会被多个编码的查询各返回一次（每次都是该单的完整明细），
@@ -522,8 +530,8 @@ def create(items, carrier=""):
         return {"error": "没有可成波的订单（可能已全部成波 / 已打印 / 该编码无可生成订单）"}
     c = KP.open_cdp_page()
     try:
-        # v1.46b 货位库存预检：拣货位在架不足时 ERP 会静默不成波（回 success 却不建）
-        # → 提前给明确原因，别发那个注定失败的请求。
+        # v1.53e 货位库存：拣货位在架不足时**不直接挡**，改成「能拣多少先成多少」——
+        # 按在架数收窄该编码件数并重新挑单；只有全部编码在架都是 0 时才报错。
         try:
             _need = {}
             for _c2 in (p.get("codes") or []):
@@ -532,16 +540,34 @@ def create(items, carrier=""):
                     _need[_k2] = int(_c2.get("actual") or _c2.get("max") or 0)
             if _need:
                 _st = pick_stock(c, list(_need.keys()))
-                _short = [(k3, _st.get(k3), n3) for k3, n3 in _need.items()
-                          if _st.get(k3) is not None and _st.get(k3) < n3]
-                if _short:
-                    _o = dict(p)
-                    _o["save_ok"] = False
-                    _o["created"] = False
-                    _o["stock_short"] = _short
-                    _o["error"] = "货位库存不足（需先上架/补货）：" + "；".join(
-                        "%s 在架 %s 件、需 %s 件" % (a, b, c3) for a, b, c3 in _short)
-                    return _o
+                _capped = [(k3, _st.get(k3), n3) for k3, n3 in _need.items()
+                           if _st.get(k3) is not None and _st.get(k3) < n3]
+                if _capped:
+                    _capq = {k3: max(0, int(_s3 or 0)) for k3, _s3, _n3 in _capped}
+                    if all(v <= 0 for v in _capq.values()):
+                        _o = dict(p)
+                        _o["save_ok"] = False
+                        _o["created"] = False
+                        _o["stock_short"] = _capped
+                        _o["error"] = "货位库存不足（拣货位 0 件，需先上架/补货）：" + "；".join(
+                            "%s 在架 %s 件、需 %s 件" % (a2, b2, c2) for a2, b2, c2 in _capped)
+                        return _o
+                    _items2 = []
+                    for _c4 in (p.get("codes") or []):
+                        _k4 = str(_c4.get("code") or "")
+                        _q4 = _capq.get(_k4, int(_c4.get("actual") or _c4.get("max") or 0))
+                        if _k4 and _q4 > 0:
+                            _items2.append({"code": _k4, "qty": _q4})
+                    if _items2:
+                        p2 = plan(_items2, str(p.get("carrier") or ""))
+                        if (not p2.get("error")) and p2.get("sids"):
+                            p2["capped"] = [{"code": k5, "was": w5, "now": _capq.get(k5, 0)}
+                                            for k5, _s5, w5 in _capped]
+                            p2["capped_note"] = "；".join(
+                                "%s 按拣货位在架 %s 件成波（原 %s 件）" % (k5, _capq.get(k5, 0), w5)
+                                for k5, _s5, w5 in _capped)
+                            p = p2
+                            sids = p.get("sids") or []
         except Exception:
             pass
         t0 = time.time() * 1000                  # save 前记时点：只认这之后新建的波次

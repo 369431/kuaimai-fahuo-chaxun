@@ -3046,7 +3046,7 @@ class _WebHandler(BaseHTTPRequestHandler):
                 if not self._can(me, "wave.view"):
                     return self._deny("wave.view")
                 try:
-                    return self._json(self.shelf_web_status())
+                    return self._json(self.app.shelf_web_status())
                 except Exception as e:
                     # v1.52：这条路绝不 500（否则页面只能显示"读取失败"）→ 返回 JSON 让页面降级+自动重试
                     try:
@@ -3059,7 +3059,7 @@ class _WebHandler(BaseHTTPRequestHandler):
                 # 按编码批量取本机在架/货位（纯读本地，不拉全量）
                 if not self._can(me, "wave.view"):
                     return self._deny("wave.view")
-                return self._json(self.shelf_lookup_many((qs.get("codes") or [""])[0]))
+                return self._json(self.app.shelf_lookup_many((qs.get("codes") or [""])[0]))
             if parsed.path == "/api/perms":
                 if not self._can(me, "admin.perms"):
                     return self._deny("admin.perms")

@@ -422,7 +422,6 @@ loadStatus(); setInterval(loadStatus,60000);
 </html>
 """
 
-
 # 独立的拣货页（手机端「拣货」按钮进入 /pick）
 PICK_HTML = r"""<!doctype html>
 <html lang="zh-CN"><head>
@@ -893,7 +892,6 @@ zoneBtn();
 </script></body></html>
 """
 
-
 # ====================== 网页端：订单查询（图文 + 退款状态） ======================
 ORDER_HTML = r"""<!doctype html>
 <html lang="zh-CN"><head>
@@ -1051,7 +1049,6 @@ $('no').addEventListener('keydown', function(e){ if(e.key === 'Enter'){ e.preven
 </script>
 </body></html>
 """
-
 
 # ====================== 网页端：现货可发（在架 / 待发货 / 可发数量） ======================
 STOCKTAKE_HTML = r"""<!doctype html>
@@ -1219,7 +1216,6 @@ if(!SID){ location.href = '/login'; } else { $('kw').focus(); }
 </body></html>
 """
 
-
 STOCK_HTML = r"""<!doctype html>
 <html lang="zh-CN"><head>
 <meta charset="utf-8">
@@ -1315,17 +1311,11 @@ STOCK_HTML = r"""<!doctype html>
   </div>
   <div class="muted" id="sum">正在载入…</div>
   <div class="flash" id="flash"></div>
+  <div id="wbar"></div>
   <div class="rec" id="rec"></div>
 </div>
 <div class="card" id="list" style="max-height:66vh; overflow:auto"></div>
-<div class="card"><div class="legend">
-  <b>可发数量 = 能发出去的件数</b>：订单要的和库存取小的，再扣掉留给一单多件单的部分。<br>
-  例：一单一件 100 件 + 一单多件 20 件 = 订单共要 120 件，库存只有 80 件 → 最多发 80 件，
-  其中 20 件留给多件单 → <b>可发 60 件</b>（就是「只有 60 件货」的意思）。<br>
-  负数 = 连多件单的库存都不够（需补货）。已排除 1166、买家秀、圆虹包 等占位/补偿商品。<br>
-  <b>加急</b> = 平台上标了加急的单（优先发这些）；想先处理加急，用「只看有加急」或按「加急件数」排序。<br>
-  <b>默认排序</b>：带加急且有货可发的（红标「加急·有货」）排最前，同类里再按可发从多到少 —— 这样从上往下顺着发就是先发加急。
-</div></div>
+
 <script>
 const $ = id => document.getElementById(id);
 const esc = s => String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -1340,6 +1330,74 @@ function withSid(u){ return SID ? (u + (u.indexOf('?') >= 0 ? '&' : '?') + 'sid=
 let ROWS = [];
 let HIDE_SENT = true;
 const CAN = function(k){ return window.KM_CAN ? window.KM_CAN(k) : true; };
+/* ---- 最近生成的波次：常驻显示（只在生成新波次时替换）+ 一键拣完 ---- */
+const WKEY = 'km_stock_lastwave';
+let HIDDEN = {};                       /* 一键拣完后先隐藏的编码（重新查询/刷新后恢复） */
+function loadWbar(){
+  let w = null;
+  try{ w = JSON.parse(localStorage.getItem(WKEY) || 'null'); }catch(e){ w = null; }
+  renderWbar(w);
+}
+function saveWbar(w){
+  try{ localStorage.setItem(WKEY, JSON.stringify(w || null)); }catch(e){}
+  renderWbar(w);
+}
+function renderWbar(w){
+  const el = $('wbar'); if(!el) return;
+  if(!w || !w.wave_code){ el.style.display = 'none'; el.innerHTML = ''; return; }
+  el.style.display = '';
+  el.innerHTML = '<div class="card" style="border-left:4px solid #0b5394">'
+    + '<div style="font-size:16px;font-weight:800">最近生成：波次 '
+    + '<span style="color:#0b5394">' + esc(w.wave_code) + '</span>　'
+    + esc(w.carrier || '') + ' ' + esc(w.qty == null ? '' : w.qty) + ' 件'
+    + (w.code ? ('　（' + esc(w.code) + '）') : '')
+    + (w.done ? '　<span class="tag ok">已拣完</span>' : '')
+    + '</div>'
+    + '<div style="margin-top:8px">'
+    + ((w.wave_id && !w.done) ? ('<button class="sbtn" id="wbarFinish">一键拣完（' + esc(w.wave_code) + '）</button>') : '')
+    + '<button class="sbtn" id="wbarClear" style="margin-left:8px">清除</button></div>'
+    + '<div class="muted" id="wbarMsg" style="margin-top:6px">生成新波次时会自动替换这里。'
+    + '「一键拣完」会先只读预览分拣明细，再确认提交（不可撤销）。</div></div>';
+  const fb = $('wbarFinish');
+  if(fb){ fb.onclick = function(){ wbarFinish(w); }; }
+  const cb = $('wbarClear');
+  if(cb){ cb.onclick = function(){ saveWbar(null); }; }
+}
+function wbarFinish(w){
+  if(!w || !w.wave_id){ flash('这个波次没有 id，请到「波次记录」页一键拣完'); return; }
+  const b = $('wbarFinish');
+  const restore = function(){ if(b){ b.disabled = false; b.textContent = '一键拣完（' + w.wave_code + '）'; } };
+  if(b){ b.disabled = true; b.textContent = '只读预览中…'; }
+  fetch(withSid('/api/wave/finish'), {method:'POST', cache:'no-store',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({wave_id: w.wave_id, confirm: false})})
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if(d && d.error){ throw new Error(d.error); }
+      const n = (d && (d.item_count != null ? d.item_count
+                       : (d.count != null ? d.count : (d.items && d.items.length) || '?'))) || '?';
+      if(!confirm('一键拣完 · 只读预览（尚未提交）\n波次 ' + w.wave_code + '（' + (w.carrier || '') + ' '
+                  + (w.qty || '') + ' 件）\n分拣明细：' + n
+                  + '\n\n确认提交？会把该波次标记为「拣选完成」（不可撤销）。')){ restore(); return; }
+      if(b){ b.textContent = '提交中（手动拣选）…'; }
+      return fetch(withSid('/api/wave/finish'), {method:'POST', cache:'no-store',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({wave_id: w.wave_id, confirm: true})})
+        .then(function(r){ return r.json(); })
+        .then(function(j){
+          if(j && (j.ok || j.finished || j.status_cn)){
+            flash('✅ 波次 ' + w.wave_code + ' 已一键拣完');
+            if(w.code){ HIDDEN[String(w.code).toUpperCase()] = 1; }   /* 拣完先隐藏该编码 */
+            const nw = {}; for(const k in w){ nw[k] = w[k]; } nw.done = 1; saveWbar(nw);
+            render();
+          } else {
+            flash('✗ 一键拣完失败：' + ((j && (j.error || j.msg)) || '未知'));
+            restore();
+          }
+        });
+    })
+    .catch(function(e){ flash('✗ ' + e.message); restore(); });
+}
 function flash(msg){
   const el = $('flash');
   if(!el) return;
@@ -1377,7 +1435,7 @@ function load(){
 }
 function render(){
   const box = $('list');
-  const vis = ROWS.filter(function(r){ return !(HIDE_SENT && r.sent); });
+  const vis = ROWS.filter(function(r){ return !(HIDE_SENT && r.sent) && !HIDDEN[String(r.c).toUpperCase()]; });
   if(!vis.length){ box.innerHTML = '<div class="muted">没有匹配的编码</div>'; return; }
   const head = vis.slice(0, 800);
   box.innerHTML = head.map(function(r){
@@ -1392,53 +1450,75 @@ function render(){
       + ((r.up || r.uo) ? (' · <span style="color:#c62828;font-weight:800">加急 ' + (r.uo || 0) + '/' + (r.up || 0) + '</span>') : '')
       + (r.l ? (' · 锁定 ' + r.l) : '') + '</div></div>'
       + '<div class="btns">'
-      + (CAN('stock.canprint') ? ('<button class="sbtn' + (r.sent ? ' undo' : '') + '" data-c="' + esc(r.c) + '">'
-          + (r.sent ? '撤回' : '可发') + '</button>') : '')
+      
+      + (CAN('wave.create') ? ('<button class="sbtn wave" data-w="' + esc(r.c) + '">生成波次</button>') : '')
       + (CAN('stock.edit') ? ('<button class="sbtn adj" data-c="' + esc(r.c) + '">改库存</button>') : '')
       + (CAN('stock.zero') ? ('<button class="sbtn zero" data-c="' + esc(r.c) + '">盘0</button>') : '')
       + '</div></div>';
   }).join('') + (vis.length > head.length
       ? ('<div class="muted">只显示前 ' + head.length + ' 条，其余 ' + (vis.length - head.length) + ' 条请用「导出 Excel」或加关键词。</div>') : '');
-  box.querySelectorAll('.sbtn:not(.adj):not(.zero)').forEach(function(b){
+   /* 「生成波次」：先**实时查快麦订单**（/api/wave/lookup，实时查 ERP，不是本地缓存），
+     再把 中通/申通 各自的可生成件数摆成按钮让用户点选；选完才真的成波。
+     成波走与「生成波次」页完全同一套接口/校验：一单一件口径、货位库存预检、成波排队锁、波次号回读。 */
+  box.querySelectorAll('.sbtn.wave').forEach(function(b){
     b.onclick = function(){
-      const code = b.dataset.c, undo = b.classList.contains('undo');
+      const code = b.dataset.w;
       const row = ROWS.filter(function(r){ return r.c === code; })[0] || {};
-      if(!undo){   // 点「可发」→ 输入可打单数量，写一条扫码日志到电脑端
-        const v = prompt('可发 ' + code + '\n可打单数量填多少？', row.f == null ? '' : String(row.f));
-        if(v !== null){
-          const q = parseInt(v, 10);
-          if(isNaN(q) || q < 0){ alert('数量要填 0 或正整数'); return; }
-          fetch(withSid('/api/stock/canprint'), {method:'POST', headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({code: code, qty: q, bins: row.b || '',
-                                  pending: row.p || 0, shelf: row.s || 0})})
-            .then(function(r2){ return r2.json(); })
-            .then(function(j){
-              if(j && j.ok){
-                if(j.dup){ flash('已记可打单：' + code + ' ' + q + '，但' + j.dup_msg
-                                 + '：本次未新建打单任务（避免重复出纸）'); }
-                else { flash('已记可打单：' + code + ' ' + q + '（电脑端扫码记录已更新）'); }
-              }
-              else { flash('记录失败：' + ((j && (j.msg || j.error)) || '未知')); alert('没能写入扫码记录：' + ((j && (j.msg || j.error)) || '未知')); }
-            })
-            .catch(function(){ flash('网络错误，扫码记录未写入'); });
-        }
-      }
-      // 先本地生效（立刻隐藏/恢复），再同步到服务端
-      ROWS.forEach(function(r){ if(r.c === code) r.sent = undo ? 0 : 1; });
-      render();
-      fetch(withSid('/api/stock/sent'), {method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({codes:[code], undo: undo})})
-        .then(function(r2){ return r2.json(); })
-        .then(function(j){
-          if(j && j.ok === false){
-            ROWS.forEach(function(r){ if(r.c === code) r.sent = undo ? 1 : 0; });
-            render();
-          }
-          flash((undo ? '已撤回：' : '已标记已发：') + code + '（本地先隐藏，拉到新数据后自动清空）');
+      const f = parseInt(row.f, 10) || 0;
+      if(f <= 0){ flash(code + '：可发 ' + f + ' 件，没有可成波的「一单一件」'); return; }
+      const cell = b.parentNode;
+      b.disabled = true; b.textContent = '查询中…';
+      fetch(withSid('/api/wave/lookup?code=' + encodeURIComponent(code)), {cache:'no-store'})
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+          if(d && d.error){ throw new Error(d.error); }
+          const per = (d && d.carriers) || {};
+          let keys = ['中通', '申通'].filter(function(k){ return per[k] != null; });
+          if(!keys.length){ keys = Object.keys(per); }
+          if(!keys.length){ flash(code + '：没有可成波订单（可能已生成波次 / 已打印 / 是多件单）'); render(); return; }
+          let h = '';
+          keys.forEach(function(k){
+            const n = parseInt(per[k], 10) || 0;
+            const q = Math.min(f, n);
+            h += '<button class="sbtn wave-go" data-k="' + esc(k) + '" data-q="' + (n > 0 ? q : 0) + '"'
+               + (n > 0 ? '' : ' disabled') + '>' + esc(k) + ' ' + (n > 0 ? (q + ' 件') : '0') + '</button>';
+          });
+          h += '<button class="sbtn wave-cancel">取消</button>';
+          cell.innerHTML = h;
+          cell.querySelectorAll('.sbtn.wave-go').forEach(function(g){
+            g.onclick = function(){ waveGo(g, code, f); };
+          });
+          const cb = cell.querySelector('.sbtn.wave-cancel');
+          if(cb){ cb.onclick = function(){ render(); }; }
         })
-        .catch(function(){ load(); flash('同步失败，已刷新列表'); });
+        .catch(function(e){ flash('✗ ' + code + '：' + e.message); render(); });
     };
   });
+
+  /* 选好快递后：真正成波（实时查到的订单；件数 = min(可发, 该快递可生成)） */
+  function waveGo(g, code, f){
+    const carrier = g.dataset.k;
+    const qty = parseInt(g.dataset.q, 10) || 0;
+    if(qty <= 0){ flash(code + '：' + carrier + ' 没有可成波订单'); return; }
+    const cell = g.parentNode;
+    cell.innerHTML = '<span class="muted">生成中…（' + esc(carrier) + ' ' + qty + ' 件）</span>';
+    fetch(withSid('/api/wave/create'), {method:'POST', cache:'no-store',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({items:[{code:code, qty:qty}], carrier:carrier, confirm:true})})
+      .then(function(r){ return r.json(); })
+      .then(function(w){
+        if(w && (w.wave_code || w.created)){
+          saveWbar({wave_code: w.wave_code || '', wave_id: w.wave_id || '',
+                    carrier: carrier, qty: ((w.codes && w.codes[0] && w.codes[0].actual) || qty),
+                    code: code, ts: Date.now()});
+          flash('✅ ' + code + ' 波次 ' + (w.wave_code || '?') + '（' + carrier + ' ' + ((w.codes && w.codes[0] && w.codes[0].actual) || qty) + ' 件）' + (w.capped_note ? '　' + w.capped_note : ''));
+        } else {
+          flash('✗ ' + code + '：' + ((w && (w.error || w.verify_error)) || '未生成（详情见「生成波次」页）'));
+        }
+        render();
+      })
+      .catch(function(e){ flash('✗ ' + code + '：' + e.message); render(); });
+  }
   /* 「改库存」：按货位改数量（调盘点接口，二次确认后真实修改快麦库存） */
   box.querySelectorAll('.sbtn.adj').forEach(function(b){
     b.onclick = function(){
@@ -1527,11 +1607,11 @@ $('hidesent').onchange = function(){
   render();
 };
 $('exp').onclick = function(){ location.href = withSid('/api/stock/export?' + params()); };
+loadWbar();                    /* 进页面先显示上次生成的波次号（常驻，直到生成新的） */
 load();
 </script>
 </body></html>
 """
-
 
 # ====================== 权限管理（管理员专用：账号 × 按钮 勾选矩阵） ======================
 PERMS_HTML = r"""<!doctype html>
@@ -1762,7 +1842,6 @@ load();
 </script>
 </body></html>
 """
-
 
 # ============================ 网页「打印记录」页（/prints） ============================
 # 数据来自 GET /api/print/stats 的 live（正在打印 / 排队 / **打印完成** / 失败）；
@@ -2056,7 +2135,6 @@ document.addEventListener('visibilitychange', function(){ if(!document.hidden) l
 </body></html>
 """
 
-
 # ====================== 网页端：生成波次（扫编码 → 填写件数 → 一个波次） ======================
 WAVE_HTML = r"""<!doctype html>
 <html lang="zh-CN"><head>
@@ -2272,8 +2350,7 @@ function render(){
   ITEMS.forEach(function(it, i){
     h += '<div class="rowitem">'
        + '<div class="c"><div class="ccode">' + esc(it.code) + '</div>'
-       + '<div class="cmax">最大可生成 ' + esc(it.max) + ' 件（' + esc(CARRIER) + '）</div>'
-       + '<div class="cmax">' + shelfBits(it.info) + '</div></div>'
+       + '<div class="cmax">最大可生成 ' + esc(it.max) + ' 件（' + esc(CARRIER) + '）</div></div>'
        + '<input type="number" min="0" value="' + esc(it.qty) + '" data-i="' + i + '">'
        + '<button class="del" data-d="' + i + '">删除</button></div>';
   });
@@ -2470,7 +2547,6 @@ kmWedge($('code'), function(v){ addCode(v); }, true);
   });
 })();
 
-
 $('prev').onclick = function(){
   const items = bodyItems();
   if(!items.length){ alert('请先添加编码并填写件数'); return; }
@@ -2625,7 +2701,6 @@ setInterval(refreshShelfStatus, 30000);   /* 停留时每 30s 校一次新鲜度
 <script src="/km/scan.js?v=8"></script>
 </body></html>
 """
-
 
 # ============================ 网页「波次记录」页（/wave-records） ============================
 # 数据来自 GET /api/wave/records：本地只存「我自己生成过哪些波次号」，
