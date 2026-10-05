@@ -158,13 +158,18 @@ def _post(c, path, body, ctype, timeout=90000):
     return c.js(js) or {}
 
 
-def _orders_from(res):
-    """从 query 响应里取候选订单列表（[{sid, qty:{大写编码: 件数}}]）。"""
+def _split_raw(res, code):
+    """解析 query 响应 → {"one": [一单一件候选], "multi_qty": 多件预留件数}。
+
+    `one`：只含「一单一件」的候选单（波次只挑这些，用户硬约束）。
+    `multi_qty`：该编码在**非一单一件**（一单多件/组合单）候选里的件数合计 ——
+      波次不挑它们，但现货要先留出来，所以单独统计给 UI 显示「建议多件预留」。
+    """
     text = (res or {}).get("text") or ""
     try:
         j = json.loads(text)
     except Exception:
-        return []
+        return {"one": [], "multi_qty": 0}
     data = j.get("data")
     arr = None
     if isinstance(data, list):
@@ -175,8 +180,9 @@ def _orders_from(res):
                 arr = data[k]
                 break
     if not isinstance(arr, list):
-        return []
-    out = []
+        return {"one": [], "multi_qty": 0}
+    k0 = _ci(code)
+    one, multi_qty = [], 0
     for o in arr:
         if not isinstance(o, dict):
             continue
@@ -193,14 +199,16 @@ def _orders_from(res):
             if cd and n > 0:
                 k = _ci(cd)
                 qty[k] = qty.get(k, 0) + n
-        if not _is_one_piece(o):
-            continue                      # 只收「一单一件」（用户硬约束）
-        out.append({"sid": sid, "qty": qty, "carrier": _carrier_of(o)})
-    return out
+        if _is_one_piece(o):
+            one.append({"sid": sid, "qty": qty, "carrier": _carrier_of(o)})
+        else:
+            # 一单多件：不参与成波，但该编码的件数要预留
+            multi_qty += qty.get(k0, 0)
+    return {"one": one, "multi_qty": multi_qty}
 
 
 def _query_raw(c, code):
-    """按商家编码查该编码在火火火仓库的候选（可成波）订单。"""
+    """按商家编码查该编码在火火火仓库的候选订单（可成波的一单一件 + 多件预留统计）。"""
     form = urllib.parse.urlencode({
         "warehouseId": WAREHOUSE_ID,
         "conditionId": "",
@@ -218,22 +226,77 @@ def _query_raw(c, code):
         "specifyShipperIds": "",
         "pageSize": DEFAULT_PAGE_SIZE,
     })
-    return _orders_from(_post(c, QUERY_PATH, form, "application/x-www-form-urlencoded"))
+    return _split_raw(_post(c, QUERY_PATH, form, "application/x-www-form-urlencoded"), code)
+
+
+def _shelf_map():
+    """本机货位索引：优先内存里的界面实例（kuaimai_scan 全局），否则从订单库现读。
+
+    只读；拿不到就返回空字典（UI 会显示「货位索引为空」）。
+    """
+    try:
+        import kuaimai_scan as KS
+    except Exception:
+        return {}
+    try:
+        app = (getattr(KS, "_WEB_STATE", None) or {}).get("app")
+        m = getattr(app, "shelf_map", None) if app is not None else None
+        if m:
+            return m
+    except Exception:
+        pass
+    try:
+        return KS._load_shelf_map_now() or {}
+    except Exception:
+        return {}
+
+
+def _shelf_info(code):
+    """某编码本机货位 → {shelf_qty, bins, bins_text, shelf_index_empty}。
+
+    在架 0 也保留货位（用户口径：只要有货位记录就显示出来）。
+    """
+    m = _shelf_map()
+    if not m:
+        return {"shelf_qty": 0, "bins": [], "bins_text": "", "shelf_index_empty": True}
+    e = None
+    try:
+        import kuaimai_scan as KS
+        e, _k = KS.dict_get_ci(m, code)
+    except Exception:
+        e = m.get(code)
+    e = e or {}
+    bins = []
+    for b in (e.get("bins") or []):
+        try:
+            bins.append((str(b[0]), int(b[1] or 0)))
+        except Exception:
+            continue
+    try:
+        qty = int(e.get("shelf", 0) or 0)
+    except Exception:
+        qty = 0
+    text = " / ".join("%s(%d)" % (b[0], b[1]) for b in bins)
+    return {"shelf_qty": qty, "bins": bins, "bins_text": text, "shelf_index_empty": False}
 
 
 def lookup(code):
-    """某编码最大可生成件数（按快递分组）+ 候选订单明细。
+    """某编码最大可生成件数（按快递分组）+ 候选订单明细 + 本机在架/货位 + 多件预留。
 
-    只统计「一单一件」的候选单；`carriers` 是 {中通: n, 申通: m}（其他快递归入 other）。
+    只统计「一单一件」的候选单（`carriers` 是 {中通: n, 申通: m}，其他快递归入 other）；
+    `multi_qty` 是被过滤掉的一单多件/组合单中该编码的件数合计（现货要先预留，不被波次吃掉）；
+    `shelf_qty`/`bins`/`bins_text`/`shelf_index_empty` 是本机货位索引（在架 0 也保留货位）。
     """
     code = str(code or "").strip()
     if not code:
         return {"error": "缺少编码"}
     c = KP.open_cdp_page()
     try:
-        orders = _query_raw(c, code)
+        raw = _query_raw(c, code)
     finally:
         c.close()
+    orders = raw.get("one") or []
+    multi_qty = int(raw.get("multi_qty") or 0)
     k = _ci(code)
     per, other = {c2: 0 for c2 in CARRIERS}, {}
     det = []
@@ -250,8 +313,11 @@ def lookup(code):
         else:
             other[name or "(空)"] = other.get(name or "(空)", 0) + n
     total = sum(o["qty"].get(k, 0) for o in orders)
+    info = _shelf_info(code)
     return {"ok": True, "code": code, "max": total, "carriers": per, "other": other,
-            "orders": len(orders), "det": det, "warehouseId": WAREHOUSE_ID}
+            "orders": len(orders), "det": det, "warehouseId": WAREHOUSE_ID,
+            "multi_qty": multi_qty, "shelf_qty": info["shelf_qty"], "bins": info["bins"],
+            "bins_text": info["bins_text"], "shelf_index_empty": info["shelf_index_empty"]}
 
 
 def _priority(codes):

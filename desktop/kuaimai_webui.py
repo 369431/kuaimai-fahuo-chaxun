@@ -2143,10 +2143,9 @@ WAVE_HTML = r"""<!doctype html>
   </div>
   <div class="bar" style="margin-top:8px">
     <input id="code" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="扫/手动输入商家编码">
-    <button id="add">添加</button>
     <button id="btnCam" class="ghost">扫码添加</button>
   </div>
-  <div class="muted" id="hint" style="margin-top:8px">手动输入编码回车即添加；也可以点「扫码添加」用摄像头扫。添加后自动查该编码在该快递下的<b>最大可生成件数</b>。</div>
+  <div class="muted" id="hint" style="margin-top:8px"></div>
 </div>
 <div id="camBox" class="hidden" style="position:fixed;left:0;top:0;right:0;bottom:0;background:rgba(0,0,0,.72);z-index:999;display:flex;align-items:center;justify-content:center">
   <div style="background:#000;border-radius:14px;padding:10px;width:min(92vw,430px)">
@@ -2199,6 +2198,25 @@ function setCarrier(c){
   $('hint').innerHTML = '当前快递：<b>' + esc(c) + '</b>。扫/输入编码回车即添加。';
 }
 
+/* 在架数量 + 货位（本机索引；在架 0 也保留货位）+ 建议多件预留。
+   o 可以是 API 响应（含 shelf_index_empty/shelf_qty/bins_text/multi_qty），
+   也可以是清单项里存的 info 对象（字段同名）。 */
+function shelfBits(o){
+  o = o || {};
+  const parts = [];
+  if(o.shelf_index_empty){
+    parts.push('货位索引为空（请先在主程序点「刷新货位库存」）');
+  } else {
+    const q = (o.shelf_qty == null) ? '-' : o.shelf_qty;
+    const bt = o.bins_text ? esc(o.bins_text) : '无货位记录';
+    parts.push('在架 <b>' + esc(q) + '</b> 件');
+    parts.push('货位 ' + bt);
+  }
+  const mq = parseInt(o.multi_qty, 10) || 0;
+  parts.push('建议多件预留 <b>' + mq + '</b> 件');
+  return parts.join('　·　');
+}
+
 function render(){
   $('cnt').textContent = ITEMS.length ? ('共 ' + ITEMS.length + ' 个编码') : '';
   if(!ITEMS.length){ $('list').innerHTML = '<div class="muted">还没有添加编码</div>'; return; }
@@ -2206,7 +2224,8 @@ function render(){
   ITEMS.forEach(function(it, i){
     h += '<div class="rowitem">'
        + '<div class="c"><div class="ccode">' + esc(it.code) + '</div>'
-       + '<div class="cmax">最大可生成 ' + esc(it.max) + ' 件（' + esc(CARRIER) + '）</div></div>'
+       + '<div class="cmax">最大可生成 ' + esc(it.max) + ' 件（' + esc(CARRIER) + '）</div>'
+       + '<div class="cmax">' + shelfBits(it.info) + '</div></div>'
        + '<input type="number" min="0" value="' + esc(it.qty) + '" data-i="' + i + '">'
        + '<button class="del" data-d="' + i + '">删除</button></div>';
   });
@@ -2233,11 +2252,15 @@ function addCode(code){
       const per = d.carriers || {};
       const cnum = parseInt(per[CARRIER], 10) || 0;
       const all = Object.keys(per).map(function(k){ return k + ' ' + per[k] + ' 件'; }).join('　/　');
+      const mq = parseInt(d.multi_qty, 10) || 0;
+      const info = {shelf_index_empty: !!d.shelf_index_empty, shelf_qty: d.shelf_qty,
+                    bins_text: d.bins_text || '', multi_qty: mq};
+      const extra = '<div class="muted" style="margin-top:6px;line-height:1.7">' + shelfBits(d) + '</div>';
       if(cnum > 0){
-        ITEMS.push({code: d.code || code, qty: cnum, max: cnum});
+        ITEMS.push({code: d.code || code, qty: cnum, max: cnum, info: info});
         render();
         $('hint').innerHTML = esc(d.code || code) + '：快递 <b>' + esc(CARRIER)
-          + '</b> 最大可生成 <b>' + cnum + ' 件</b>' + (all ? '（全部：' + esc(all) + '）' : '');
+          + '</b> 最大可生成 <b>' + cnum + ' 件</b>' + (all ? '（全部：' + esc(all) + '）' : '') + extra;
         return;
       }
       const others = Object.keys(per).filter(function(k){
@@ -2248,7 +2271,7 @@ function addCode(code){
         $('hint').innerHTML = '<span class="badtext">' + esc(d.code || code) + '：快递 <b>'
           + esc(CARRIER) + '</b> 没有可成波订单</span>，但 <b>' + esc(o) + '</b> 有 <b>' + n + '</b> 件'
           + ' — <button class="ghost" id="swBtn" style="padding:7px 12px;font-size:14px">切到 '
-          + esc(o) + ' 并添加</button>';
+          + esc(o) + ' 并添加</button>' + extra;
         const b = $('swBtn');
         if(b){ b.onclick = function(){ setCarrier(o); setTimeout(function(){ addCode(d.code || code); }, 80); }; }
         return;
@@ -2256,7 +2279,7 @@ function addCode(code){
       $('hint').innerHTML = '<span class="badtext">' + esc(d.code || code)
         + '：没有可成波订单</span>'
         + '<div class="muted">该编码在火火火仓库没有「待发货 + 未成波 + 一单一件」的订单'
-        + '（可能已生成波次 / 已打印 / 是多件单）。</div>';
+        + '（可能已生成波次 / 已打印 / 是多件单）。</div>' + extra;
     })
     .catch(function(e){ $('hint').textContent = '查询失败：' + e.message; });
 }
@@ -2298,8 +2321,6 @@ function renderPlan(p){
 document.querySelectorAll('#cbar .seg').forEach(function(b){
   b.onclick = function(){ setCarrier(b.getAttribute('data-car')); };
 });
-$('add').onclick = function(){ addCode($('code').value); $('code').value=''; $('code').focus(); };
-
 /* ---------- 摄像头扫码添加（优先 BarcodeDetector，不支持则用中转注入的 ZXing）---------- */
 let stream=null, scanTimer=null, zxReader=null;
 function camShow(on){ $('camBox').classList.toggle('hidden', !on); }
@@ -2580,11 +2601,18 @@ WAVE_RECORDS_HTML = r"""<!doctype html>
           border-radius:14px; padding:12px; margin-bottom:10px; box-shadow:0 8px 24px rgba(24,39,75,.10); }
   .card h2 { font-size:15px; margin:0 0 8px; font-weight:700; border-left:3px solid var(--blue); padding-left:8px; }
   .muted { font-size:12.5px; color:var(--sub); line-height:1.7; }
+  /* 窄屏 PDA：表格可横滑，关键列不换行、数字等宽，长波次号/时间不错乱 */
+  .tw { overflow-x:auto; -webkit-overflow-scrolling:touch; margin:0 -2px; }
   table { width:100%; border-collapse:collapse; font-size:13px; }
-  th,td { padding:7px 6px; border-bottom:1px solid rgba(60,60,67,.10); text-align:left; vertical-align:top; }
-  th { color:var(--sub); font-weight:500; white-space:nowrap; }
-  td.code { font-weight:800; font-size:15px; white-space:nowrap; }
-  .pill { display:inline-block; padding:2px 9px; border-radius:999px; font-size:12px; font-weight:700; white-space:nowrap; }
+  th,td { padding:9px 8px; border-bottom:1px solid rgba(60,60,67,.10); text-align:left; vertical-align:middle; }
+  th { color:var(--sub); font-weight:700; font-size:11.5px; letter-spacing:.03em; white-space:nowrap;
+       background:var(--glass); position:sticky; top:0; z-index:1; }
+  td.code { font-weight:800; font-size:14.5px; white-space:nowrap; font-variant-numeric:tabular-nums; }
+  td.time { white-space:nowrap; color:var(--sub); font-size:12.5px; font-variant-numeric:tabular-nums; }
+  td.num { white-space:nowrap; font-variant-numeric:tabular-nums; font-weight:600; }
+  td.act { white-space:nowrap; }
+  tbody tr:nth-child(even) td { background:rgba(120,120,128,.05); }
+  .pill { display:inline-block; padding:3px 10px; border-radius:999px; font-size:12px; font-weight:800; white-space:nowrap; }
   .pill.wait { background:rgba(255,149,0,.16); color:#a35c00; }
   .pill.ok { background:rgba(52,199,89,.15); color:#1B7F35; }
   .pill.cancel { background:rgba(255,59,48,.13); color:#c62828; }
@@ -2595,14 +2623,21 @@ WAVE_RECORDS_HTML = r"""<!doctype html>
   .skus .skun { word-break:break-all; }
   .skus .skuq { flex:0 0 auto; font-weight:700; color:var(--blue); white-space:nowrap; }
   .badtext { color:#C7362E; }
-  .fin { padding:4px 10px; border-radius:9px; border:1px solid rgba(0,122,255,.35); background:rgba(0,122,255,.10);
-         color:#0060D0; font-weight:600; font-size:12.5px; white-space:nowrap; cursor:pointer; }
+  .fin { padding:5px 11px; border-radius:9px; border:1px solid rgba(0,122,255,.35); background:rgba(0,122,255,.10);
+         color:#0060D0; font-weight:700; font-size:12.5px; white-space:nowrap; cursor:pointer; }
   .fin:active { transform:scale(.97); }
+  @media (max-width:430px) {
+    body { padding:8px; }
+    th,td { padding:8px 6px; }
+    td.code { font-size:13.5px; }
+  }
   @media (prefers-color-scheme: dark) {
     body { background:linear-gradient(170deg,#1c1c1e,#151517 60%,#1a1a1c) fixed; color:#f2f2f7; }
     .card { background:rgba(28,28,30,.74); border-color:rgba(255,255,255,.08); }
     .muted { color:#a1a1a6; }
     th,td { border-bottom-color:rgba(255,255,255,.08); }
+    th { background:rgba(28,28,30,.9); }
+    tbody tr:nth-child(even) td { background:rgba(255,255,255,.04); }
   }
 </style></head>
 <body>
@@ -2616,13 +2651,17 @@ WAVE_RECORDS_HTML = r"""<!doctype html>
 </div>
 <div class="card">
   <h2>我生成的波次</h2>
+  <div class="tw">
   <table><thead><tr><th>波次号</th><th>状态</th><th>订单数</th><th>件数</th><th>时间</th><th>快递</th><th>明细</th><th>操作</th></tr></thead>
   <tbody id="recBody"><tr><td colspan="8" class="muted">载入中…</td></tr></tbody></table>
+  </div>
 </div>
 <div class="card">
   <h2>最近 ERP 波次（只读对照）</h2>
+  <div class="tw">
   <table><thead><tr><th>波次号</th><th>状态</th><th>订单数</th><th>件数</th></tr></thead>
   <tbody id="recentBody"><tr><td colspan="4" class="muted">载入中…</td></tr></tbody></table>
+  </div>
 </div>
 <script>
 const $ = id => document.getElementById(id);
@@ -2668,12 +2707,12 @@ function load(){
         recs.forEach(function(r){
           h += '<tr><td class="code">' + esc(r.wave_code || '-') + '</td>'
              + '<td>' + pill(r.status, r.status_cn) + (r.live ? '' : ' <span class="muted">(离线)</span>') + '</td>'
-             + '<td>' + esc(r.tradesCount == null ? '-' : r.tradesCount) + '</td>'
-             + '<td>' + esc(r.itemCount == null ? '-' : r.itemCount) + '</td>'
-             + '<td>' + esc(r.ts || '-') + '</td>'
+             + '<td class="num">' + esc(r.tradesCount == null ? '-' : r.tradesCount) + '</td>'
+             + '<td class="num">' + esc(r.itemCount == null ? '-' : r.itemCount) + '</td>'
+             + '<td class="time">' + esc(r.ts || '-') + '</td>'
              + '<td>' + esc(r.carrier || '-') + '</td>'
              + '<td>' + skuCell(r.codes) + '</td>'
-             + '<td>' + (r.wave_id
+             + '<td class="act">' + (r.wave_id
                  ? '<button class="fin" data-fw="' + esc(r.wave_id) + '" data-fwc="' + esc(r.wave_code || '') + '">一键拣完</button>'
                  : '<span class="muted">-</span>') + '</td></tr>';
         });
@@ -2685,8 +2724,8 @@ function load(){
         let h = '';
         recent.forEach(function(w){
           h += '<tr><td class="code">' + esc(w.wave_code || '-') + '</td><td>' + pill(w.status, w.status_cn) + '</td>'
-             + '<td>' + esc(w.tradesCount == null ? '-' : w.tradesCount) + '</td>'
-             + '<td>' + esc(w.itemCount == null ? '-' : w.itemCount) + '</td></tr>';
+             + '<td class="num">' + esc(w.tradesCount == null ? '-' : w.tradesCount) + '</td>'
+             + '<td class="num">' + esc(w.itemCount == null ? '-' : w.itemCount) + '</td></tr>';
         });
         $('recentBody').innerHTML = h;
       } else {
