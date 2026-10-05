@@ -1,10 +1,10 @@
 {
-  "version": "v1.51",
-  "notes": "修「查询失败：Connection timed out」/「货位库存状态读取失败」\n\n· **根因**：ERP 域名由 `erpb.superboss.cc` 迁到租户域名 `viperp.superboss.cc` 后，自动化浏览器里**按老域名找打单页**匹配不上了 —— 旧代码匹配不上就「取第一个页面」，结果挑到无关的插件页（Tampermonkey）→ 所有 ERP 调用**卡满 30 秒超时**（波次查询、货位库存状态全挂）。\n· **修复**：\n  - 优先挑**任意 ERP 租户页**（`*.superboss.cc`），并**排除**插件/浏览器内部页（`chrome-extension://`、`edge://`、`tampermonkey` 等）；带 `/index.html#` 的应用页优先。\n  - **不再「拿第一个页面凑数」**：确实没有 ERP 页 → 明确报错并提示「请先打开打单浏览器并登录 ERP」，不让调用白等 30 秒。\n· 实测：修复后挑中的是 `viperp.superboss.cc/index.html#/trade/genwave/`，一次 ERP 调用 **0.3 秒**（修复前 30 秒超时）。\n· 影响面：所有走自动化浏览器的功能（波次查询/成波/货位库存/打单页操作）都会受益。",
+  "version": "v1.52",
+  "notes": "波次页：货位状态兜底 + 删两句提示 + 扫码结果样式\n\n· **「货位库存状态读取失败」不再常驻**：服务端这条路**绝不 500**（失败也回 JSON 并记日志），页面改成温和的「货位库存：暂时读不到状态（自动重试中…）」并**每 5 秒自动重试**，读到了就自动恢复显示时间戳。\n· **删掉两句提示**（不影响功能）：\n  - 「填的件数超过最大可生成 → 自动按最大可生成成波；多个编码合并成同一个波次。」\n  - 「配齐货后点按钮：先只读预览分拣明细，再确认才提交。……」\n· **扫码结果样式**：编码（如 `7107-黑色s`）**加粗放大**；各快递件数（`中通 4 件 / 申通 25 件`）**红色加粗**；**建议多件预留的数字加粗**。\n· 上一版 v1.51 已修：自动化浏览器选错页面导致的 ERP 调用 30 秒超时。",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.51/kuaimai-scan-setup-v1.51.exe",
-  "sha256": "186009551a26cc2e9f5414d97d1be874297685038461becc256d2d4c501682f1",
-  "size": 28822926,
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.52/kuaimai-scan-setup-v1.52.exe",
+  "sha256": "7441671786138cf4e4c356278afa5dce6fbf09fdd9813ab41e202c3b94c8aeb3",
+  "size": 28825121,
   "mandatory": false,
-  "published_at": "2026-10-05 21:05"
+  "published_at": "2026-10-05 21:22"
 }
