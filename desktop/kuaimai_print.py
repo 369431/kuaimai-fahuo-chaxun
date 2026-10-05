@@ -104,12 +104,29 @@ def erp_targets():
 def erp_page_ws(url_part="erpb.superboss.cc"):
     """取打单页的 CDP 目标；找不到页面时抛 SystemExit（与旧 page_ws 行为一致）。"""
     ts = erp_targets()
+
+    def _is_erp(t):
+        u = (t.get("url") or "")
+        if t.get("type") != "page":
+            return False
+        if u.startswith(("chrome-extension://", "edge://", "devtools://", "about:",
+                         "chrome://", "tampermonkey")):
+            return False
+        return "superboss.cc" in u
+
+    # ① 调用方指定片段（兼容旧调用）
     for t in ts:
         if t.get("type") == "page" and url_part in (t.get("url") or ""):
             return t
-    for t in ts:
-        if t.get("type") == "page":
+    # ② 任何 ERP 租户页（viperp.superboss.cc / erpb.superboss.cc …），优先带 /index.html# 的应用页
+    #    修 v1.50 的坑：旧逻辑匹配不上就“取第一个 page”，可能拿到无关插件页（Tampermonkey）
+    #    → 所有 ERP 调用卡满 30s 超时（用户报「查询失败：Connection timed out」/「货位库存状态读取失败」）。
+    _cand = [t for t in ts if _is_erp(t)]
+    for t in _cand:
+        if "/index.html#" in (t.get("url") or ""):
             return t
+    if _cand:
+        return _cand[0]
     raise SystemExit("没找到页面（自动化 Edge 没开？CDP 9222 不通？）")
 
 
