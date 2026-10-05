@@ -1,0 +1,29 @@
+# -*- coding: utf-8 -*-
+"""发布 v1.52：货位状态失败兜底 + 删两句提示 + 扫码结果样式。"""
+import os
+import sys
+
+REPO = r"C:\Users\Kerwin\Desktop\kuaimai发货查询"
+INSTALLER = r"C:\Users\Kerwin\Desktop\发布\快麦扫码查询_安装版_v1.52.exe"
+NOTES = ("波次页：货位状态兜底 + 删两句提示 + 扫码结果样式\n"
+         "\n"
+         "· **「货位库存状态读取失败」不再常驻**：服务端这条路**绝不 500**（失败也回 JSON 并记日志），"
+         "页面改成温和的「货位库存：暂时读不到状态（自动重试中…）」并**每 5 秒自动重试**，"
+         "读到了就自动恢复显示时间戳。\n"
+         "· **删掉两句提示**（不影响功能）：\n"
+         "  - 「填的件数超过最大可生成 → 自动按最大可生成成波；多个编码合并成同一个波次。」\n"
+         "  - 「配齐货后点按钮：先只读预览分拣明细，再确认才提交。……」\n"
+         "· **扫码结果样式**：编码（如 `7107-黑色s`）**加粗放大**；各快递件数"
+         "（`中通 4 件 / 申通 25 件`）**红色加粗**；**建议多件预留的数字加粗**。\n"
+         "· 上一版 v1.51 已修：自动化浏览器选错页面导致的 ERP 调用 30 秒超时。")
+
+assert os.path.isfile(INSTALLER), INSTALLER
+sys.path.insert(0, REPO)
+os.chdir(REPO)
+sys.argv = ["release.py", "--version", "v1.52", "--installer", INSTALLER, "--notes", NOTES]
+
+import release  # noqa: E402
+
+rc = release.main()
+print("\nrelease.main() returned", rc)
+sys.exit(rc)

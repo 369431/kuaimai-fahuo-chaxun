@@ -2097,6 +2097,9 @@ WAVE_HTML = r"""<!doctype html>
   .rowitem .c { flex:1; min-width:0; }
   .rowitem .ccode { font-size:15px; font-weight:600; word-break:break-all; }
   .rowitem .cmax { font-size:12px; color:var(--sub); margin-top:2px; }
+.qcode { font-size:17px; font-weight:800; letter-spacing:-.01em; }   /* 编码：加粗放大 */
+.cex { color:#FF3B30; font-weight:800; }                            /* 各快递件数：红+粗 */
+.mqw { font-weight:800; }                                           /* 多件预留：加粗 */
   .rowitem input { width:74px; padding:9px 10px; font-size:16px; text-align:center; color:var(--ink);
                    background:rgba(255,255,255,.92); border:1px solid var(--line); border-radius:10px; }
   .actions { display:flex; gap:8px; margin-top:12px; }
@@ -2146,6 +2149,7 @@ WAVE_HTML = r"""<!doctype html>
     <button id="btnCam" class="ghost">扫码添加</button>
   </div>
   <div class="muted" id="hint" style="margin-top:8px"></div>
+  <div class="muted" id="shelfStat" style="margin-top:6px">货位库存：载入中…</div>
 </div>
 <div id="camBox" class="hidden" style="position:fixed;left:0;top:0;right:0;bottom:0;background:rgba(0,0,0,.72);z-index:999;display:flex;align-items:center;justify-content:center">
   <div style="background:#000;border-radius:14px;padding:10px;width:min(92vw,430px)">
@@ -2161,7 +2165,6 @@ WAVE_HTML = r"""<!doctype html>
     <button id="prev" class="ghost">预览（不建波）</button>
     <button id="mk" data-perm="wave.create">生成波次</button>
   </div>
-  <div class="muted" style="margin-top:8px">填的件数超过最大可生成 → 自动按最大可生成成波；多个编码合并成<b>同一个波次</b>。</div>
 </div>
 <div class="card">
   <h2>一键拣完（对已生成的波次）</h2>
@@ -2169,8 +2172,6 @@ WAVE_HTML = r"""<!doctype html>
     <input id="fwid" type="text" inputmode="numeric" autocomplete="off" placeholder="输入波次ID（波次号下方或记录页可查）">
     <button id="fwPrev" class="ghost" data-perm="wave.create">一键拣完</button>
   </div>
-  <div class="muted" style="margin-top:8px">配齐货后点按钮：先<b>只读预览分拣明细</b>，再确认才提交。
-    提交会真的把该波次标记为 <b>拣选完成</b>（网页随即显示<b>等待验货</b>，订单数不变、件数按已拣），<b>不可撤销</b>。</div>
 </div>
 <div id="fwOut"></div>
 <div id="out"></div>
@@ -2213,8 +2214,55 @@ function shelfBits(o){
     parts.push('货位 ' + bt);
   }
   const mq = parseInt(o.multi_qty, 10) || 0;
-  parts.push('建议多件预留 <b>' + mq + '</b> 件');
+  parts.push('建议多件预留 <b class="mqw">' + mq + '</b> 件');
   return parts.join('　·　');
+}
+
+/* ---- 货位库存"实时"：不同步拉全量；由服务端在超过 5 分钟/索引为空时后台刷一次，
+       页面只读本机缓存并轮询状态。进页面即触发，刷完自动更新数字。 ---- */
+let shelfPollTimer = null;
+let shelfRetryTimer = null;
+function shelfStatRender(d){
+  const el = $('shelfStat'); if(!el) return;
+  if(d && d.ok){
+    el.innerHTML = esc(d.note || '货位库存：未知')
+      + (d.codes ? '（' + d.codes + ' 个编码）' : '')
+      + (d.refreshing ? '…' : '');
+  } else {
+    el.innerHTML = '<span class="muted">货位库存：暂时读不到状态（自动重试中…）</span>';
+    if(!shelfRetryTimer){
+      shelfRetryTimer = setTimeout(function(){ shelfRetryTimer = null; refreshShelfStatus(); }, 5000);
+    }
+  }
+}
+function pollShelfWhenFresh(d){
+  if(shelfPollTimer){ clearTimeout(shelfPollTimer); shelfPollTimer = null; }
+  if(!d || !d.refreshing) return;         /* 刷完就停，不空转 */
+  shelfPollTimer = setTimeout(function(){ refreshShelfStatus(); loadShelfForItems(); }, 3000);
+}
+function refreshShelfStatus(){
+  fetch(bust(withSid('/api/wave/shelf_status')), {cache:'no-store'})
+    .then(function(r){ if(r.status === 401){ return null; } return r.json(); })
+    .then(function(d){ if(d){ shelfStatRender(d); pollShelfWhenFresh(d); } })
+    .catch(function(){});
+}
+function loadShelfForItems(){
+  const codes = ITEMS.map(function(x){ return x.code; });
+  if(!codes.length) return;
+  fetch(bust(withSid('/api/wave/shelf?codes=' + encodeURIComponent(codes.join(',')))), {cache:'no-store'})
+    .then(function(r){ if(r.status === 401){ return null; } return r.json(); })
+    .then(function(d){
+      if(!d || !d.items) return;
+      ITEMS.forEach(function(it){
+        const s = d.items[it.code];
+        if(s && it.info){
+          it.info.shelf_qty = s.shelf_qty;
+          it.info.bins_text = s.bins_text;
+          it.info.shelf_index_empty = s.shelf_index_empty;
+        }
+      });
+      render();
+    }).catch(function(){});
 }
 
 function render(){
@@ -2249,6 +2297,7 @@ function addCode(code){
     .then(function(r){ if(r.status === 401){ location.href = '/login'; throw new Error('请重新登录'); } return r.json(); })
     .then(function(d){
       if(d.error){ $('hint').innerHTML = '<span class="badtext">' + esc(d.error) + '</span>'; return; }
+      refreshShelfStatus();
       const per = d.carriers || {};
       const cnum = parseInt(per[CARRIER], 10) || 0;
       const all = Object.keys(per).map(function(k){ return k + ' ' + per[k] + ' 件'; }).join('　/　');
@@ -2259,8 +2308,9 @@ function addCode(code){
       if(cnum > 0){
         ITEMS.push({code: d.code || code, qty: cnum, max: cnum, info: info});
         render();
-        $('hint').innerHTML = esc(d.code || code) + '：快递 <b>' + esc(CARRIER)
-          + '</b> 最大可生成 <b>' + cnum + ' 件</b>' + (all ? '（全部：' + esc(all) + '）' : '') + extra;
+        $('hint').innerHTML = '<span class="qcode">' + esc(d.code || code) + '</span>：快递 <b>' + esc(CARRIER)
+          + '</b> 最大可生成 <b>' + cnum + ' 件</b>'
+          + (all ? '（全部：<span class="cex">' + esc(all) + '</span>）' : '') + extra;
         return;
       }
       const others = Object.keys(per).filter(function(k){
@@ -2569,6 +2619,8 @@ $('fwPrev').onclick = function(){
 
 render();
 $('code').focus();
+refreshShelfStatus();                     /* 进页面：读货位时间戳并按需后台刷一次 */
+setInterval(refreshShelfStatus, 30000);   /* 停留时每 30s 校一次新鲜度 */
 </script>
 <script src="/km/scan.js?v=8"></script>
 </body></html>

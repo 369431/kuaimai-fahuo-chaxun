@@ -3041,6 +3041,25 @@ class _WebHandler(BaseHTTPRequestHandler):
                                                 "请先打开自动化浏览器并登录 ERP 后再试"}, 503)
                 except Exception as e:
                     return self._json({"error": "查询失败：%s" % str(e)[:200]}, 500)
+            if parsed.path == "/api/wave/shelf_status":
+                # 货位索引新鲜度 + 按需后台刷新（不阻塞；边缘改自本地货位缓存）
+                if not self._can(me, "wave.view"):
+                    return self._deny("wave.view")
+                try:
+                    return self._json(self.shelf_web_status())
+                except Exception as e:
+                    # v1.52：这条路绝不 500（否则页面只能显示"读取失败"）→ 返回 JSON 让页面降级+自动重试
+                    try:
+                        print_jobs_log("货位状态读取失败：%s" % str(e)[:200])
+                    except Exception:
+                        pass
+                    return self._json({"ok": False, "error": str(e)[:200],
+                                       "note": "货位库存：暂时读不到状态（自动重试中…）"})
+            if parsed.path == "/api/wave/shelf":
+                # 按编码批量取本机在架/货位（纯读本地，不拉全量）
+                if not self._can(me, "wave.view"):
+                    return self._deny("wave.view")
+                return self._json(self.shelf_lookup_many((qs.get("codes") or [""])[0]))
             if parsed.path == "/api/perms":
                 if not self._can(me, "admin.perms"):
                     return self._deny("admin.perms")
@@ -4307,6 +4326,8 @@ class ScanApp:
         self.lock_at = "未加载"
         self.lock_at_ts = 0
         self.shelf_at_ts = 0            # 货位在架数最后刷新时间（批次拣货要看新鲜货位）
+        self._shelf_busy = False        # 货位库存是否正在后台刷新（网页「实时」时间戳用）
+        self._shelf_last_try = 0        # 上次触发后台刷新的时间（失败冷却，避免狂刷）
         self._scan_after = None         # 输入停顿自动提交定时器
         self._scanning = False
         self._hook = None               # 后台扫码监听
@@ -6140,6 +6161,9 @@ class ScanApp:
     def reload_shelf(self, background=True):
         if self.remote:
             return
+        if getattr(self, "_shelf_busy", False):
+            return                      # 已有一次在跑，不重复拉（全量 4314 条约 4~5s）
+        self._shelf_busy = True
         if background:
             self.status_text.set("正在拉取货位库存…")
             self._run_bg(self._worker_shelf)
@@ -6157,6 +6181,82 @@ class ScanApp:
         except Exception as e:
             msg = str(e)[:200]
             self.q.put(lambda: self.status_text.set("加载货位库存失败：%s" % msg))
+        finally:
+            self._shelf_busy = False
+
+    # ---------- 网页「生成波次」的货位新鲜度（扫码显示在架/货位要“实时”） ----------
+    def shelf_maybe_refresh(self):
+        """网页进/停留时按需后台刷货位：超过 shelf_refresh_min 分钟或索引为空就触发。
+
+        非阻塞（reload_shelf(background=True) 起线程）；失败后 60s 冷却再试，不狂拉。
+        返回是否本次触发了刷新。
+        """
+        if getattr(self, "remote", False):
+            return False                # 子端没有开放平台 API，交由主端
+        if getattr(self, "_shelf_busy", False):
+            return False
+        now = time.time()
+        if now - float(getattr(self, "_shelf_last_try", 0) or 0) < 60:
+            return False
+        empty = not bool(self.shelf_map)
+        try:
+            age = now - float(getattr(self, "shelf_at_ts", 0) or 0)
+        except Exception:
+            age = 10 ** 9
+        if empty or age > int(self.shelf_refresh_min or SHELF_REFRESH_MIN) * 60:
+            self._shelf_last_try = now
+            self.reload_shelf(background=True)
+            return True
+        return False
+
+    def shelf_web_status(self):
+        """网页货位时间戳 + 是否为空/更新中，并顺手触发一次按需刷新。"""
+        m = self.shelf_map or {}
+        empty = not bool(m)
+        try:
+            age = max(0, int(time.time() - float(getattr(self, "shelf_at_ts", 0) or 0)))
+        except Exception:
+            age = 10 ** 9
+        busy = bool(getattr(self, "_shelf_busy", False))
+        if not getattr(self, "remote", False):
+            if self.shelf_maybe_refresh():
+                busy = True
+        at = str(getattr(self, "shelf_at", "") or "")
+        tpart = at.split(" ")[-1] if (":" in at) else ""
+        if empty:
+            note = "货位索引为空，请先在主程序点『刷新货位库存』" + ("（正在后台刷新…）" if busy else "")
+        elif busy:
+            note = "货位库存：更新中…"
+        else:
+            note = "货位库存：更新于 " + (tpart or at or "未知")
+        fresh = (not empty) and (not busy) and age <= int(self.shelf_refresh_min or SHELF_REFRESH_MIN) * 60
+        return {"ok": True, "shelf_index_empty": empty, "shelf_at": at, "shelf_time": tpart,
+                "age_sec": age, "fresh": fresh, "refreshing": busy, "codes": len(m),
+                "note": note}
+
+    def shelf_lookup_many(self, codes):
+        """给网页用：按编码取本机在架/货位（不进 ERP，纯读当前 shelf_map）。"""
+        empty = not bool(self.shelf_map)
+        out = {}
+        for c in str(codes or "").split(","):
+            c = c.strip()
+            if not c:
+                continue
+            e, _k = dict_get_ci(self.shelf_map or {}, c)
+            e = e or {}
+            bins = []
+            for b in (e.get("bins") or []):
+                try:
+                    bins.append([str(b[0]), int(b[1] or 0)])
+                except Exception:
+                    continue
+            out[c] = {"shelf_qty": int(e.get("shelf", 0) or 0),
+                      "bins_text": " / ".join("%s(%d)" % (b[0], b[1]) for b in bins),
+                      "shelf_index_empty": empty}
+        at = str(getattr(self, "shelf_at", "") or "")
+        return {"ok": True, "items": out, "shelf_index_empty": empty,
+                "shelf_at": at, "shelf_time": (at.split(" ")[-1] if (":" in at) else ""),
+                "refreshing": bool(getattr(self, "_shelf_busy", False))}
 
     def _apply_shelf(self, shelf_map, stat, loaded_at):
         self.shelf_map = shelf_map
