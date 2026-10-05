@@ -1,10 +1,10 @@
 {
-  "version": "v1.50",
-  "notes": "货位在架/货位：**后台自动刷新**（方案 A）\n\n· 波次页显示的在架/货位，会在**后台自动保持新鲜**：进页面、每次扫码后、以及停留时每 30 秒校一次新鲜度；**超过 5 分钟**（或索引为空）→ 服务端**起后台线程刷一次**，**不阻塞扫码**（扫码请求永远不等全量拉取）。\n· 页面标注数据时间：**「货位库存：更新于 HH:MM:SS」**；刷新中显示「更新中…」，刷完数字与时间自动更新。\n· 失败有 60 秒冷却，不狂拉；子端（没有开放平台 API）不触发，交由主端。\n· 刷新间隔可在设置里改（`shelf_refresh_min`，默认 5 分钟）。\n· 说明：ERP 那个货位接口**不能按编码过滤**（实测 9 个参数名都不吃）、单页上限 500 条，全量 ~4314 行要 9 次请求，所以「每次扫码现场拉」会卡 4~5 秒 —— 故采用后台刷新。",
+  "version": "v1.51",
+  "notes": "修「查询失败：Connection timed out」/「货位库存状态读取失败」\n\n· **根因**：ERP 域名由 `erpb.superboss.cc` 迁到租户域名 `viperp.superboss.cc` 后，自动化浏览器里**按老域名找打单页**匹配不上了 —— 旧代码匹配不上就「取第一个页面」，结果挑到无关的插件页（Tampermonkey）→ 所有 ERP 调用**卡满 30 秒超时**（波次查询、货位库存状态全挂）。\n· **修复**：\n  - 优先挑**任意 ERP 租户页**（`*.superboss.cc`），并**排除**插件/浏览器内部页（`chrome-extension://`、`edge://`、`tampermonkey` 等）；带 `/index.html#` 的应用页优先。\n  - **不再「拿第一个页面凑数」**：确实没有 ERP 页 → 明确报错并提示「请先打开打单浏览器并登录 ERP」，不让调用白等 30 秒。\n· 实测：修复后挑中的是 `viperp.superboss.cc/index.html#/trade/genwave/`，一次 ERP 调用 **0.3 秒**（修复前 30 秒超时）。\n· 影响面：所有走自动化浏览器的功能（波次查询/成波/货位库存/打单页操作）都会受益。",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.50/kuaimai-scan-setup-v1.50.exe",
-  "sha256": "3936f923702abb2b4880ff579458e5e51eaf67cc07bf134a32ef957a267aa1f8",
-  "size": 28826419,
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.51/kuaimai-scan-setup-v1.51.exe",
+  "sha256": "186009551a26cc2e9f5414d97d1be874297685038461becc256d2d4c501682f1",
+  "size": 28822926,
   "mandatory": false,
-  "published_at": "2026-10-05 20:59"
+  "published_at": "2026-10-05 21:05"
 }
