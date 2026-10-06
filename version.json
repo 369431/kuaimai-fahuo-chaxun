@@ -1,10 +1,10 @@
 {
-  "version": "v1.58",
-  "notes": "波次记录「实时回读失败」修复。\n\n**根因**：`erp.trade.waves.query` 在 24 小时窗口下返回体约 **10.2 MB**，**超过网关 8 MB 上限**被拒（网关原话：`Data length too large`）。\n\n**修复**\n· 回读遇到「响应过大」**自动把 pageSize 减半重试**（100 → 50 → 25 → …），绕开 8 MB 上限，实测已恢复正常。\n· 以前只判断「返回是不是字典」，会把**错误响应当成「成功但 0 个波次」**，所以页面只显示「实时回读失败」却给不出原因 —— 现在会**识别 success=false**，把接口的 code/msg 直接显示出来，不再装死。\n· 波次记录页、以及「一键拣完」的只读预览都一并恢复正常。",
+  "version": "v1.59",
+  "notes": "**软件一启动就把 HTTPS 中转（9443）在后台拉起来**，关窗口也照样在监听。\n\n· 以前只有点「启动全部」或刚装完那一次才会起中转；直接从桌面图标开软件**不会**起，所以关掉再开就发现 9443 没了 —— 现在开软件就自动起。\n· 中转是**独立隐藏进程**，关主窗口不影响它继续监听。\n· 顺带加了**每 3 分钟巡检**：配了证书但 9443 没在听（中转偶尔会自己退出）就自动重新拉起，不用再手动去点「只重启 HTTPS 中转」。\n· 已经在听就跳过，不会重复杀/重启；没装证书的机器静默跳过，不打扰。",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.58/kuaimai-scan-setup-v1.58.exe",
-  "sha256": "8bba12f2e81636b030aacc0aba841c0b1d99f8414de784debb7f12834c3f1ac4",
-  "size": 28841066,
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.59/kuaimai-scan-setup-v1.59.exe",
+  "sha256": "345c97fe30666a08e79ab5c878b5f6b60b9cde5fe8193f518660c3e58d63f6c2",
+  "size": 28842481,
   "mandatory": false,
-  "published_at": "2026-10-07 01:20"
+  "published_at": "2026-10-07 01:30"
 }
