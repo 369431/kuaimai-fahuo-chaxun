@@ -55,18 +55,18 @@ WEB_INDEX_HTML = r"""<!DOCTYPE html>
   .pstate { font-size:12px; color:#666; margin-top:5px; }
   /* ================= macOS 风格（覆盖上面的基础样式） ================= */
   :root { --mac-blue:#007AFF; --mac-green:#34C759; --mac-red:#FF3B30; --mac-ink:#1d1d1f; --mac-sub:#6e6e73;
-          --mac-line:rgba(60,60,67,.12); --mac-fill:rgba(120,120,128,.12); --mac-glass:rgba(255,255,255,.72); }
+          --mac-line:rgba(60,60,67,.12); --mac-fill:rgba(120,120,128,.12); --mac-glass:#e0e5ec; }
   html { -webkit-text-size-adjust:100%; }
   body { font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
          letter-spacing:-.01em; -webkit-font-smoothing:antialiased; color:var(--mac-ink);
-         background:linear-gradient(170deg,#eef3fa 0%,#e6edf8 45%,#e1e8f4 100%) fixed; min-height:100vh; }
+         background:#e0e5ec; min-height:100vh; }
   header { background:var(--mac-glass); color:var(--mac-ink); backdrop-filter:saturate(180%) blur(20px);
            -webkit-backdrop-filter:saturate(180%) blur(20px); border-bottom:1px solid var(--mac-line);
            font-size:17px; font-weight:600; position:sticky; top:0; z-index:20; }
   header small { color:var(--mac-sub); }
   .card, #result, .pitem { background:var(--mac-glass); backdrop-filter:saturate(180%) blur(20px);
-           -webkit-backdrop-filter:saturate(180%) blur(20px); border:1px solid rgba(255,255,255,.62);
-           border-radius:18px; box-shadow:0 10px 30px rgba(24,39,75,.08), 0 1px 2px rgba(24,39,75,.05); }
+           -webkit-backdrop-filter:saturate(180%) blur(20px); border:0;
+           border-radius:18px; box-shadow:var(--neu-up); }
   input[type=text], input, select, input[type=number] { background:rgba(255,255,255,.86);
            border:1px solid var(--mac-line); border-radius:12px; color:var(--mac-ink); }
   input[type=text]:focus, input:focus { outline:none; border-color:var(--mac-blue);
@@ -92,21 +92,29 @@ WEB_INDEX_HTML = r"""<!DOCTYPE html>
   .pzone { background:var(--mac-blue); border-radius:7px; font-weight:600; }
   .zones, .filters { background:var(--mac-fill); border-radius:12px; padding:3px; gap:3px; border:0; }
   .zones button, .filters button { background:transparent; color:#3c3c43; box-shadow:none; border-radius:9px; font-weight:600; }
-  .zones button:not(.ghost), .filters button:not(.ghost) { background:#fff; color:#000;
+  .zones button:not(.ghost), .filters button:not(.ghost) { background:#007AFF; color:#fff;
            box-shadow:0 1px 3px rgba(0,0,0,.14); }
   .bar { background:var(--mac-glass); backdrop-filter:saturate(180%) blur(20px);
          -webkit-backdrop-filter:saturate(180%) blur(20px); border-top:1px solid var(--mac-line); }
   .row4 button { border-radius:10px; }
   @media (prefers-color-scheme: dark) {
-    body { background:linear-gradient(170deg,#1c1c1e,#151517 60%,#1a1a1c) fixed; color:#f2f2f7; }
-    header { background:rgba(28,28,30,.72); color:#f2f2f7; border-bottom-color:rgba(255,255,255,.08); }
-    .card, #result, .pitem, .bar { background:rgba(28,28,30,.72); border-color:rgba(255,255,255,.08); }
+    body { background:#262b36; color:#f2f2f7; }
+    header { background:#262b36; color:#f2f2f7; border-bottom-color:rgba(255,255,255,.08); }
+    .card, #result, .pitem, .bar { background:#262b36; border-color:rgba(255,255,255,.08); }
     #rcode, .pcode { color:#fff; }
     input, select, input[type=number] { background:rgba(118,118,128,.24); border-color:rgba(255,255,255,.12); color:#f2f2f7; }
     .zones button, .filters button { color:#ebebf5; }
     .zones button:not(.ghost), .filters button:not(.ghost) { background:rgba(255,255,255,.18); color:#fff; }
     #rdetail { color:#d1d1d6; }
   }
+</style>
+<style>
+:root{--neu-up:8px 8px 18px rgba(163,177,198,.55),-8px -8px 18px rgba(255,255,255,.95);--neu-up-sm:4px 4px 10px rgba(163,177,198,.55),-4px -4px 10px rgba(255,255,255,.95);--neu-in:inset 5px 5px 10px rgba(163,177,198,.5),inset -5px -5px 10px rgba(255,255,255,.9);--neu-in-sm:inset 4px 4px 8px rgba(163,177,198,.5),inset -4px -4px 8px rgba(255,255,255,.9);}
+input:not([type=checkbox]):not([type=radio]):not([type=range]),select,textarea{background:#e0e5ec!important;border:0!important;box-shadow:var(--neu-in)!important}
+button{border:0;box-shadow:var(--neu-up-sm)}
+button.ghost{background:#e0e5ec;box-shadow:var(--neu-up-sm)}
+button:active{box-shadow:var(--neu-in-sm)}
+@media (prefers-color-scheme:dark){:root{--neu-up:8px 8px 18px rgba(8,10,16,.6),-8px -8px 18px rgba(255,255,255,.06);--neu-up-sm:4px 4px 10px rgba(8,10,16,.6),-4px -4px 10px rgba(255,255,255,.06);--neu-in:inset 5px 5px 10px rgba(8,10,16,.6),inset -5px -5px 10px rgba(255,255,255,.05);--neu-in-sm:inset 4px 4px 8px rgba(8,10,16,.6),inset -4px -4px 8px rgba(255,255,255,.05)}input:not([type=checkbox]):not([type=radio]):not([type=range]),select,textarea{background:#262b36!important}button.ghost{background:#262b36}}
 </style>
 </head>
 <body>
@@ -475,15 +483,15 @@ PICK_HTML = r"""<!doctype html>
   pre { white-space:pre-wrap; font-family:ui-monospace,Consolas,"Microsoft YaHei",monospace; font-size:14px; margin:0; }
   /* ================= macOS 风格（覆盖上面的基础样式） ================= */
   :root { --mac-blue:#007AFF; --mac-green:#34C759; --mac-red:#FF3B30; --mac-ink:#1d1d1f; --mac-sub:#6e6e73;
-          --mac-line:rgba(60,60,67,.12); --mac-fill:rgba(120,120,128,.12); --mac-glass:rgba(255,255,255,.72); }
+          --mac-line:rgba(60,60,67,.12); --mac-fill:rgba(120,120,128,.12); --mac-glass:#e0e5ec; }
   html { -webkit-text-size-adjust:100%; }
   body { font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
          letter-spacing:-.01em; -webkit-font-smoothing:antialiased; color:var(--mac-ink);
-         background:linear-gradient(170deg,#eef3fa 0%,#e6edf8 45%,#e1e8f4 100%) fixed; min-height:100vh; }
+         background:#e0e5ec; min-height:100vh; }
   h1 { font-size:24px; font-weight:700; color:var(--mac-ink); letter-spacing:-.02em; margin:2px 2px 12px; }
   .card { background:var(--mac-glass); backdrop-filter:saturate(180%) blur(20px);
-          -webkit-backdrop-filter:saturate(180%) blur(20px); border:1px solid rgba(255,255,255,.62);
-          border-radius:18px; padding:14px; box-shadow:0 10px 30px rgba(24,39,75,.08), 0 1px 2px rgba(24,39,75,.05); }
+          -webkit-backdrop-filter:saturate(180%) blur(20px); border:0;
+          border-radius:18px; padding:14px; box-shadow:var(--neu-up); }
   input { background:rgba(255,255,255,.86); border:1px solid var(--mac-line); border-radius:12px;
           color:var(--mac-ink); padding:13px 14px; font-size:19px; }
   input:focus { outline:none; border-color:var(--mac-blue); box-shadow:0 0 0 3.5px rgba(0,122,255,.16); }
@@ -493,11 +501,11 @@ PICK_HTML = r"""<!doctype html>
   button:active { transform:scale(.97); opacity:.9; }
   .muted { color:var(--mac-sub); }
   .pitem { background:var(--mac-glass); backdrop-filter:saturate(180%) blur(20px);
-           -webkit-backdrop-filter:saturate(180%) blur(20px); border:1px solid rgba(255,255,255,.62);
-           border-radius:18px; padding:14px; box-shadow:0 10px 30px rgba(24,39,75,.08), 0 1px 2px rgba(24,39,75,.05); }
+           -webkit-backdrop-filter:saturate(180%) blur(20px); border:0;
+           border-radius:18px; padding:14px; box-shadow:var(--neu-up); }
   .pitem.done { background:rgba(52,199,89,.14); border-color:rgba(52,199,89,.35); }
   .pitem.short { background:rgba(255,59,48,.12); border-color:rgba(255,59,48,.32); }
-  .pitem.one { border-width:1px; padding:20px; box-shadow:0 14px 40px rgba(24,39,75,.12), 0 1px 2px rgba(24,39,75,.05); }
+  .pitem.one { border-width:1px; padding:20px; box-shadow:var(--neu-up); }
   .pitem.one .pcode { font-size:34px; }
   .pline { display:flex; align-items:center; gap:8px; padding:9px 10px; border-radius:11px;
            background:rgba(120,120,128,.10); margin:6px 0; font-size:15px; flex-wrap:wrap; }
@@ -522,20 +530,28 @@ PICK_HTML = r"""<!doctype html>
   .pzone { background:var(--mac-blue); border-radius:7px; font-weight:600; }
   .zones, .filters { background:var(--mac-fill); border-radius:12px; padding:3px; gap:3px; border:0; }
   .zones button, .filters button { background:transparent; color:#3c3c43; box-shadow:none; border-radius:9px; font-weight:600; }
-  .zones button:not(.ghost), .filters button:not(.ghost) { background:#fff; color:#000;
+  .zones button:not(.ghost), .filters button:not(.ghost) { background:#007AFF; color:#fff;
            box-shadow:0 1px 3px rgba(0,0,0,.14); }
   .bar { background:var(--mac-glass); backdrop-filter:saturate(180%) blur(20px);
          -webkit-backdrop-filter:saturate(180%) blur(20px); border-top:1px solid var(--mac-line); }
   .row4 button { border-radius:10px; }
   @media (prefers-color-scheme: dark) {
-    body { background:linear-gradient(170deg,#1c1c1e,#151517 60%,#1a1a1c) fixed; color:#f2f2f7; }
+    body { background:#262b36; color:#f2f2f7; }
     h1 { color:#f2f2f7; }
-    .card, .pitem, .bar { background:rgba(28,28,30,.72); border-color:rgba(255,255,255,.08); }
+    .card, .pitem, .bar { background:#262b36; border-color:rgba(255,255,255,.08); }
     .pcode { color:#fff; }
     input { background:rgba(118,118,128,.24); border-color:rgba(255,255,255,.12); color:#f2f2f7; }
     .zones button, .filters button { color:#ebebf5; }
     .zones button:not(.ghost), .filters button:not(.ghost) { background:rgba(255,255,255,.18); color:#fff; }
   }
+</style>
+<style>
+:root{--neu-up:8px 8px 18px rgba(163,177,198,.55),-8px -8px 18px rgba(255,255,255,.95);--neu-up-sm:4px 4px 10px rgba(163,177,198,.55),-4px -4px 10px rgba(255,255,255,.95);--neu-in:inset 5px 5px 10px rgba(163,177,198,.5),inset -5px -5px 10px rgba(255,255,255,.9);--neu-in-sm:inset 4px 4px 8px rgba(163,177,198,.5),inset -4px -4px 8px rgba(255,255,255,.9);}
+input:not([type=checkbox]):not([type=radio]):not([type=range]),select,textarea{background:#e0e5ec!important;border:0!important;box-shadow:var(--neu-in)!important}
+button{border:0;box-shadow:var(--neu-up-sm)}
+button.ghost{background:#e0e5ec;box-shadow:var(--neu-up-sm)}
+button:active{box-shadow:var(--neu-in-sm)}
+@media (prefers-color-scheme:dark){:root{--neu-up:8px 8px 18px rgba(8,10,16,.6),-8px -8px 18px rgba(255,255,255,.06);--neu-up-sm:4px 4px 10px rgba(8,10,16,.6),-4px -4px 10px rgba(255,255,255,.06);--neu-in:inset 5px 5px 10px rgba(8,10,16,.6),inset -5px -5px 10px rgba(255,255,255,.05);--neu-in-sm:inset 4px 4px 8px rgba(8,10,16,.6),inset -4px -4px 8px rgba(255,255,255,.05)}input:not([type=checkbox]):not([type=radio]):not([type=range]),select,textarea{background:#262b36!important}button.ghost{background:#262b36}}
 </style></head><body>
 <h1>拣货</h1>
 <div class="card">
@@ -901,14 +917,14 @@ ORDER_HTML = r"""<!doctype html>
 <style>
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   :root { --blue:#007AFF; --green:#34C759; --red:#FF3B30; --ink:#1d1d1f; --sub:#6e6e73;
-          --line:rgba(60,60,67,.12); --fill:rgba(120,120,128,.12); --glass:rgba(255,255,255,.80); }
+          --line:rgba(60,60,67,.12); --fill:rgba(120,120,128,.12); --glass:#e0e5ec; }
   body { margin:0; padding:12px; min-height:100vh; color:var(--ink);
          font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
          letter-spacing:-.01em; -webkit-font-smoothing:antialiased;
-         background:linear-gradient(170deg,#eef3fa 0%,#e6edf8 45%,#e1e8f4 100%) fixed; }
+         background:#e0e5ec; }
   .card { background:var(--glass); backdrop-filter:saturate(180%) blur(20px);
-          -webkit-backdrop-filter:saturate(180%) blur(20px); border:1px solid rgba(255,255,255,.62);
-          border-radius:14px; padding:12px; margin-bottom:10px; box-shadow:0 8px 24px rgba(24,39,75,.10); }
+          -webkit-backdrop-filter:saturate(180%) blur(20px); border:0;
+          border-radius:14px; padding:12px; margin-bottom:10px; box-shadow:var(--neu-up); }
   .bar { display:flex; gap:8px; }
   .bar input { flex:1; min-width:0; padding:13px 14px; font-size:19px; color:var(--ink);
                background:rgba(255,255,255,.92); border:1px solid var(--line); border-radius:12px; }
@@ -939,12 +955,20 @@ ORDER_HTML = r"""<!doctype html>
   .sub2 { border-top:1px solid rgba(60,60,67,.10); padding-top:8px; margin-top:8px; }
   .stline { font-size:13.5px; line-height:1.9; }
   @media (prefers-color-scheme: dark) {
-    body { background:linear-gradient(170deg,#1c1c1e,#151517 60%,#1a1a1c) fixed; color:#f2f2f7; }
-    .card { background:rgba(28,28,30,.74); border-color:rgba(255,255,255,.08); }
+    body { background:#262b36; color:#f2f2f7; }
+    .card { background:#262b36; border-color:rgba(255,255,255,.08); }
     .kv b, .s, .muted, .total { color:#a1a1a6; }
     h2 { color:#f2f2f7; }
     .bar input { background:rgba(118,118,128,.24); border-color:rgba(255,255,255,.12); color:#f2f2f7; }
   }
+</style>
+<style>
+:root{--neu-up:8px 8px 18px rgba(163,177,198,.55),-8px -8px 18px rgba(255,255,255,.95);--neu-up-sm:4px 4px 10px rgba(163,177,198,.55),-4px -4px 10px rgba(255,255,255,.95);--neu-in:inset 5px 5px 10px rgba(163,177,198,.5),inset -5px -5px 10px rgba(255,255,255,.9);--neu-in-sm:inset 4px 4px 8px rgba(163,177,198,.5),inset -4px -4px 8px rgba(255,255,255,.9);}
+input:not([type=checkbox]):not([type=radio]):not([type=range]),select,textarea{background:#e0e5ec!important;border:0!important;box-shadow:var(--neu-in)!important}
+button{border:0;box-shadow:var(--neu-up-sm)}
+button.ghost{background:#e0e5ec;box-shadow:var(--neu-up-sm)}
+button:active{box-shadow:var(--neu-in-sm)}
+@media (prefers-color-scheme:dark){:root{--neu-up:8px 8px 18px rgba(8,10,16,.6),-8px -8px 18px rgba(255,255,255,.06);--neu-up-sm:4px 4px 10px rgba(8,10,16,.6),-4px -4px 10px rgba(255,255,255,.06);--neu-in:inset 5px 5px 10px rgba(8,10,16,.6),inset -5px -5px 10px rgba(255,255,255,.05);--neu-in-sm:inset 4px 4px 8px rgba(8,10,16,.6),inset -4px -4px 8px rgba(255,255,255,.05)}input:not([type=checkbox]):not([type=radio]):not([type=range]),select,textarea{background:#262b36!important}button.ghost{background:#262b36}}
 </style></head>
 <body>
 <div class="card">
@@ -1058,13 +1082,13 @@ STOCKTAKE_HTML = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>库存盘点 · 快麦扫码</title>
 <style>
-  :root { --bg:#f2f2f7; --card:#ffffff; --sub:#6b7280; --line:rgba(60,60,67,.10); }
+  :root { --bg:#e0e5ec; --card:#e0e5ec; --sub:#6b7280; --line:rgba(60,60,67,.10); }
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   body { margin:0; padding:10px 10px 40px; background:var(--bg); color:#111;
          font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif; }
   header { display:flex; align-items:baseline; gap:8px; padding:2px 3px 8px; }
   header b { font-size:17px; }
-  .top { position:sticky; top:0; z-index:9; background:rgba(255,255,255,.94);
+  .top { position:sticky; top:0; z-index:9; background:#e0e5ec; box-shadow:var(--neu-up);
          backdrop-filter:saturate(180%) blur(14px); border-radius:14px; padding:10px;
          display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
   input[type=text] { flex:1 1 130px; min-width:110px; padding:11px 12px; font-size:17px;
@@ -1074,7 +1098,7 @@ STOCKTAKE_HTML = r"""<!doctype html>
   button.g { background:#e8eef5; color:#0b5394; }
   .sum { font-size:13px; color:var(--sub); margin:9px 3px; }
   .flash { font-size:13px; color:#1B7F35; font-weight:700; margin:0 3px 6px; min-height:18px; }
-  .card { background:var(--card); border-radius:14px; padding:4px 12px; margin-top:8px; }
+  .card { background:var(--card); border-radius:14px; padding:4px 12px; margin-top:8px; box-shadow:var(--neu-up); }
   .row { display:flex; gap:8px; padding:10px 0; border-top:1px solid var(--line); align-items:center; }
   .row:first-child { border-top:0; }
   .main { flex:1; min-width:0; }
@@ -1089,6 +1113,14 @@ STOCKTAKE_HTML = r"""<!doctype html>
           color:#0b5394; font-weight:700; white-space:nowrap; }
   .sbtn.zero { background:#fde8e8; color:#b00020; }
   .muted { color:var(--sub); font-size:14px; }
+</style>
+<style>
+:root{--neu-up:8px 8px 18px rgba(163,177,198,.55),-8px -8px 18px rgba(255,255,255,.95);--neu-up-sm:4px 4px 10px rgba(163,177,198,.55),-4px -4px 10px rgba(255,255,255,.95);--neu-in:inset 5px 5px 10px rgba(163,177,198,.5),inset -5px -5px 10px rgba(255,255,255,.9);--neu-in-sm:inset 4px 4px 8px rgba(163,177,198,.5),inset -4px -4px 8px rgba(255,255,255,.9);}
+input:not([type=checkbox]):not([type=radio]):not([type=range]),select,textarea{background:#e0e5ec!important;border:0!important;box-shadow:var(--neu-in)!important}
+button{border:0;box-shadow:var(--neu-up-sm)}
+button.ghost{background:#e0e5ec;box-shadow:var(--neu-up-sm)}
+button:active{box-shadow:var(--neu-in-sm)}
+@media (prefers-color-scheme:dark){:root{--neu-up:8px 8px 18px rgba(8,10,16,.6),-8px -8px 18px rgba(255,255,255,.06);--neu-up-sm:4px 4px 10px rgba(8,10,16,.6),-4px -4px 10px rgba(255,255,255,.06);--neu-in:inset 5px 5px 10px rgba(8,10,16,.6),inset -5px -5px 10px rgba(255,255,255,.05);--neu-in-sm:inset 4px 4px 8px rgba(8,10,16,.6),inset -4px -4px 8px rgba(255,255,255,.05)}input:not([type=checkbox]):not([type=radio]):not([type=range]),select,textarea{background:#262b36!important}button.ghost{background:#262b36}}
 </style>
 </head>
 <body>
@@ -1130,6 +1162,7 @@ function sizeRank(code){
 }
 let ROWS = [];
 function load(){
+  HIDDEN = {};   /* 拉取全量数据 → 恢复显示（只保留本次生成后的临时隐藏） */
   const kw = $('kw').value.trim();
   if(!kw){ $('sum').textContent = '先输入款号（如 7107）'; return; }
   $('sum').textContent = '正在查 ' + kw + ' …';
@@ -1224,14 +1257,14 @@ STOCK_HTML = r"""<!doctype html>
 <style>
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   :root { --blue:#007AFF; --green:#34C759; --red:#FF3B30; --ink:#1d1d1f; --sub:#6e6e73;
-          --line:rgba(60,60,67,.12); --fill:rgba(120,120,128,.12); --glass:rgba(255,255,255,.80); }
+          --line:rgba(60,60,67,.12); --fill:rgba(120,120,128,.12); --glass:#e0e5ec; }
   body { margin:0; padding:12px; min-height:100vh; color:var(--ink);
          font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
          letter-spacing:-.01em; -webkit-font-smoothing:antialiased;
-         background:linear-gradient(170deg,#eef3fa 0%,#e6edf8 45%,#e1e8f4 100%) fixed; }
+         background:#e0e5ec; }
   .card { background:var(--glass); backdrop-filter:saturate(180%) blur(20px);
-          -webkit-backdrop-filter:saturate(180%) blur(20px); border:1px solid rgba(255,255,255,.62);
-          border-radius:14px; padding:12px; margin-bottom:10px; box-shadow:0 8px 24px rgba(24,39,75,.10); }
+          -webkit-backdrop-filter:saturate(180%) blur(20px); border:0;
+          border-radius:14px; padding:12px; margin-bottom:10px; box-shadow:var(--neu-up); }
   .bar { display:flex; gap:8px; }
   .bar input { flex:1; min-width:0; padding:13px 14px; font-size:18px; color:var(--ink);
                background:rgba(255,255,255,.92); border:1px solid var(--line); border-radius:12px; }
@@ -1276,12 +1309,20 @@ STOCK_HTML = r"""<!doctype html>
   .code.ug { color:#FF3B30; }
   .flash { font-size:13px; color:#1B7F35; font-weight:700; margin-top:6px; min-height:18px; }
   @media (prefers-color-scheme: dark) {
-    body { background:linear-gradient(170deg,#1c1c1e,#151517 60%,#1a1a1c) fixed; color:#f2f2f7; }
-    .card { background:rgba(28,28,30,.74); border-color:rgba(255,255,255,.08); }
+    body { background:#262b36; color:#f2f2f7; }
+    .card { background:#262b36; border-color:rgba(255,255,255,.08); }
     .muted, .num, .sub, .legend { color:#a1a1a6; }
     .num b { color:#f2f2f7; }
     .bar input, .ctl select { background:rgba(118,118,128,.24); border-color:rgba(255,255,255,.12); color:#f2f2f7; }
   }
+</style>
+<style>
+:root{--neu-up:8px 8px 18px rgba(163,177,198,.55),-8px -8px 18px rgba(255,255,255,.95);--neu-up-sm:4px 4px 10px rgba(163,177,198,.55),-4px -4px 10px rgba(255,255,255,.95);--neu-in:inset 5px 5px 10px rgba(163,177,198,.5),inset -5px -5px 10px rgba(255,255,255,.9);--neu-in-sm:inset 4px 4px 8px rgba(163,177,198,.5),inset -4px -4px 8px rgba(255,255,255,.9);}
+input:not([type=checkbox]):not([type=radio]):not([type=range]),select,textarea{background:#e0e5ec!important;border:0!important;box-shadow:var(--neu-in)!important}
+button{border:0;box-shadow:var(--neu-up-sm)}
+button.ghost{background:#e0e5ec;box-shadow:var(--neu-up-sm)}
+button:active{box-shadow:var(--neu-in-sm)}
+@media (prefers-color-scheme:dark){:root{--neu-up:8px 8px 18px rgba(8,10,16,.6),-8px -8px 18px rgba(255,255,255,.06);--neu-up-sm:4px 4px 10px rgba(8,10,16,.6),-4px -4px 10px rgba(255,255,255,.06);--neu-in:inset 5px 5px 10px rgba(8,10,16,.6),inset -5px -5px 10px rgba(255,255,255,.05);--neu-in-sm:inset 4px 4px 8px rgba(8,10,16,.6),inset -4px -4px 8px rgba(255,255,255,.05)}input:not([type=checkbox]):not([type=radio]):not([type=range]),select,textarea{background:#262b36!important}button.ghost{background:#262b36}}
 </style></head>
 <body>
 <div class="card">
@@ -1332,7 +1373,9 @@ let HIDE_SENT = true;
 const CAN = function(k){ return window.KM_CAN ? window.KM_CAN(k) : true; };
 /* ---- 最近生成的波次（可一次两个：中通 + 申通）：常驻显示，各自一键拣完 ---- */
 const WKEY = 'km_stock_lastwave';
-let HIDDEN = {};                       /* 一键拣完后先隐藏的编码（重新查询/刷新后恢复） */
+let HIDDEN = {};   /* 生成过波次的编码：先藏起来；**下次拉取全量数据即恢复**
+                      （货发走后订单变少，靠"从多到少"的排序自然沉底，不必永久隐藏） */
+function markWaved(code){ if(code){ HIDDEN[String(code).toUpperCase()] = 1; } }
 function normWbar(v){
   if(!v) return [];
   if(Array.isArray(v)) return v.filter(function(x){ return x && x.wave_code; });
@@ -1450,7 +1493,7 @@ function load(){
 }
 function render(){
   const box = $('list');
-  const vis = ROWS.filter(function(r){ return !(HIDE_SENT && r.sent) && !HIDDEN[String(r.c).toUpperCase()]; });
+  const vis = ROWS.filter(function(r){ return !(HIDE_SENT && r.sent) && !r.waved && !HIDDEN[String(r.c).toUpperCase()]; });
   if(!vis.length){ box.innerHTML = '<div class="muted">没有匹配的编码</div>'; return; }
   const head = vis.slice(0, 800);
   box.innerHTML = head.map(function(r){
@@ -1495,7 +1538,10 @@ function render(){
           keys.forEach(function(k){
             const n = parseInt(per[k], 10) || 0;
             const q = Math.min(f, n);
-            h += '<button class="sbtn wave-go" data-k="' + esc(k) + '" data-q="' + (n > 0 ? q : 0) + '"'
+            h += '<input class="qin" data-k="' + esc(k) + '" type="number" min="1" max="' + (n > 0 ? q : 1)
+               + '" value="' + (n > 0 ? q : 1) + '" style="width:56px;margin-left:6px" title="要生成多少件（最多 '
+               + q + ' 件）">'
+               + '<button class="sbtn wave-go" data-k="' + esc(k) + '" data-q="' + (n > 0 ? q : 0) + '"'
                + (n > 0 ? '' : ' disabled') + '>' + esc(k) + ' ' + (n > 0 ? (q + ' 件') : '0') + '</button>';
           });
           const _pos = keys.filter(function(k){ return (parseInt(per[k], 10) || 0) > 0; });
@@ -1520,7 +1566,11 @@ function render(){
   /* 选好快递后：真正成波（实时查到的订单；件数 = min(可发, 该快递可生成)） */
   function waveGo(g, code, f){
     const carrier = g.dataset.k;
-    const qty = parseInt(g.dataset.q, 10) || 0;
+    const _maxQ = parseInt(g.dataset.q, 10) || 0;
+    let qty = _maxQ;
+    const _inp = g.parentNode ? g.parentNode.querySelector('input.qin[data-k="' + (g.dataset.k || '') + '"]') : null;
+    if(_inp){ const _v = parseInt(_inp.value, 10) || 0; if(_v > 0) qty = _v; }
+    if(_maxQ > 0 && qty > _maxQ) qty = _maxQ;
     if(qty <= 0){ flash(code + '：' + carrier + ' 没有可成波订单'); return; }
     const cell = g.parentNode;
     cell.innerHTML = '<span class="muted">生成中…（' + esc(carrier) + ' ' + qty + ' 件）</span>';
@@ -1530,6 +1580,7 @@ function render(){
       .then(function(r){ return r.json(); })
       .then(function(w){
         if(w && (w.wave_code || w.created)){
+          markWaved(code);
           saveWbar([{wave_code: w.wave_code || '', wave_id: w.wave_id || '',
                     carrier: carrier, qty: ((w.codes && w.codes[0] && w.codes[0].actual) || qty),
                     code: code, ts: Date.now()}]);
@@ -1544,7 +1595,13 @@ function render(){
   /* 一次把两个快递都成波：中通一个波次 + 申通一个波次（顺序执行，避免并发冲突） */
   function waveGoBoth(cell, code, f, per, keys){
     const todo = keys.filter(function(k){ return (parseInt(per[k], 10) || 0) > 0; })
-                     .map(function(k){ return {carrier: k, qty: Math.min(f, parseInt(per[k], 10) || 0)}; });
+                     .map(function(k){
+                       const _max = Math.min(f, parseInt(per[k], 10) || 0);
+                       const _inp = cell.querySelector('input.qin[data-k="' + k + '"]');
+                       let _q = _inp ? (parseInt(_inp.value, 10) || 0) : _max;
+                       if(_q <= 0 || _q > _max) _q = _max;
+                       return {carrier: k, qty: _q};
+                     });
     if(!todo.length){ flash(code + '：没有可成波订单'); return; }
     cell.innerHTML = '<span class="muted">生成中…（' + todo.map(function(t){ return esc(t.carrier); }).join(' + ') + '）</span>';
     const out = [];
@@ -1572,7 +1629,7 @@ function render(){
           parts.push(o.carrier + ' 失败：' + ((w.error || w.verify_error) || '未生成'));
         }
       });
-      if(ws.length){ saveWbar(ws); }
+      if(ws.length){ markWaved(code); saveWbar(ws); }
       flash(code + '：' + parts.join('　'));
       render();
     });
@@ -1680,11 +1737,11 @@ PERMS_HTML = r"""<!doctype html>
 <style>
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   :root { --blue:#007AFF; --green:#34C759; --red:#FF3B30; --ink:#1d1d1f; --sub:#6e6e73;
-          --line:rgba(60,60,67,.12); --fill:rgba(120,120,128,.10); --glass:rgba(255,255,255,.80); }
+          --line:rgba(60,60,67,.12); --fill:rgba(120,120,128,.10); --glass:#e0e5ec; }
   body { margin:0; padding:12px 12px 96px; color:var(--ink);
          font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
          letter-spacing:-.01em; -webkit-font-smoothing:antialiased; font-size:16px;
-         background:linear-gradient(170deg,#eef3fa 0%,#e6edf8 45%,#e1e8f4 100%) fixed; }
+         background:#e0e5ec; }
   h1 { font-size:19px; margin:2px 0 6px; }
   .note { font-size:12.5px; color:var(--sub); line-height:1.7; margin-bottom:10px; }
   .note a { color:var(--blue); text-decoration:none; }
@@ -1701,8 +1758,8 @@ PERMS_HTML = r"""<!doctype html>
   .tag.own { background:rgba(255,149,0,.18); color:#a85b00; }
   .tag.adm { background:rgba(255,59,48,.14); color:#c62828; }
   .card { background:var(--glass); backdrop-filter:saturate(180%) blur(20px);
-          -webkit-backdrop-filter:saturate(180%) blur(20px); border:1px solid rgba(255,255,255,.62);
-          border-radius:14px; padding:6px 12px; box-shadow:0 8px 24px rgba(24,39,75,.10); margin-bottom:12px; }
+          -webkit-backdrop-filter:saturate(180%) blur(20px); border:0;
+          border-radius:14px; padding:6px 12px; box-shadow:var(--neu-up); margin-bottom:12px; }
   .card h2 { font-size:13px; color:var(--sub); font-weight:700; letter-spacing:.04em;
              margin:10px 0 4px; }
   .row { display:flex; align-items:center; gap:10px; padding:12px 0; border-bottom:1px solid var(--line); }
@@ -1723,19 +1780,27 @@ PERMS_HTML = r"""<!doctype html>
   .grid { display:block; }
   @media (min-width:820px) { .grid { display:grid; grid-template-columns:1fr 1fr; gap:0 16px; align-items:start; } }
   .bar { position:fixed; left:0; right:0; bottom:0; display:flex; gap:8px; padding:10px 12px 14px;
-         background:rgba(255,255,255,.88); backdrop-filter:saturate(180%) blur(20px);
+         background:#e0e5ec; backdrop-filter:saturate(180%) blur(20px);
          -webkit-backdrop-filter:saturate(180%) blur(20px); border-top:1px solid var(--line); }
   .bar button { flex:1; padding:14px 8px; font-size:16px; font-weight:700; border:0; border-radius:12px;
          background:var(--blue); color:#fff; font-family:inherit; }
   .bar button.g { flex:0 0 auto; padding:14px 12px; background:var(--fill); color:var(--blue); font-size:14.5px; }
   .bar button:disabled { opacity:.5; }
   @media (prefers-color-scheme: dark) {
-    body { background:linear-gradient(170deg,#1c1c1e,#151517 60%,#1a1a1c) fixed; color:#f2f2f7; }
-    .card, .chip { background:rgba(28,28,30,.74); border-color:rgba(255,255,255,.08); }
+    body { background:#262b36; color:#f2f2f7; }
+    .card, .chip { background:#262b36; border-color:rgba(255,255,255,.08); }
     .chip.on { background:var(--blue); }
-    .bar { background:rgba(28,28,30,.88); border-top-color:rgba(255,255,255,.08); }
+    .bar { background:#262b36; border-top-color:rgba(255,255,255,.08); }
     .sw i { background:rgba(120,120,128,.28); }
   }
+</style>
+<style>
+:root{--neu-up:8px 8px 18px rgba(163,177,198,.55),-8px -8px 18px rgba(255,255,255,.95);--neu-up-sm:4px 4px 10px rgba(163,177,198,.55),-4px -4px 10px rgba(255,255,255,.95);--neu-in:inset 5px 5px 10px rgba(163,177,198,.5),inset -5px -5px 10px rgba(255,255,255,.9);--neu-in-sm:inset 4px 4px 8px rgba(163,177,198,.5),inset -4px -4px 8px rgba(255,255,255,.9);}
+input:not([type=checkbox]):not([type=radio]):not([type=range]),select,textarea{background:#e0e5ec!important;border:0!important;box-shadow:var(--neu-in)!important}
+button{border:0;box-shadow:var(--neu-up-sm)}
+button.ghost{background:#e0e5ec;box-shadow:var(--neu-up-sm)}
+button:active{box-shadow:var(--neu-in-sm)}
+@media (prefers-color-scheme:dark){:root{--neu-up:8px 8px 18px rgba(8,10,16,.6),-8px -8px 18px rgba(255,255,255,.06);--neu-up-sm:4px 4px 10px rgba(8,10,16,.6),-4px -4px 10px rgba(255,255,255,.06);--neu-in:inset 5px 5px 10px rgba(8,10,16,.6),inset -5px -5px 10px rgba(255,255,255,.05);--neu-in-sm:inset 4px 4px 8px rgba(8,10,16,.6),inset -4px -4px 8px rgba(255,255,255,.05)}input:not([type=checkbox]):not([type=radio]):not([type=range]),select,textarea{background:#262b36!important}button.ghost{background:#262b36}}
 </style></head>
 <body>
 <h1>权限管理</h1>
@@ -1913,24 +1978,24 @@ PRINTS_HTML = r"""<!doctype html>
 <style>
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   :root { --blue:#007AFF; --green:#34C759; --red:#FF3B30; --orange:#FF9500; --ink:#1d1d1f; --sub:#6e6e73;
-          --line:rgba(60,60,67,.12); --fill:rgba(120,120,128,.12); --glass:rgba(255,255,255,.80); }
+          --line:rgba(60,60,67,.12); --fill:rgba(120,120,128,.12); --glass:#e0e5ec; }
   body { margin:0; padding:12px; min-height:100vh; color:var(--ink); letter-spacing:-.01em;
          -webkit-font-smoothing:antialiased;
          font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
-         background:linear-gradient(170deg,#eef3fa 0%,#e6edf8 45%,#e1e8f4 100%) fixed; }
+         background:#e0e5ec; }
   header { display:flex; align-items:center; gap:8px; padding:2px 3px 10px; }
   header b { font-size:17px; }
   header .sp { flex:1; }
   header a.home { color:var(--blue); text-decoration:none; font-size:13.5px; font-weight:600;
                   background:var(--fill); border-radius:9px; padding:5px 11px; white-space:nowrap; }
   .card { background:var(--glass); backdrop-filter:saturate(180%) blur(20px);
-          -webkit-backdrop-filter:saturate(180%) blur(20px); border:1px solid rgba(255,255,255,.62);
-          border-radius:14px; padding:12px; margin-bottom:10px; box-shadow:0 8px 24px rgba(24,39,75,.10); }
+          -webkit-backdrop-filter:saturate(180%) blur(20px); border:0;
+          border-radius:14px; padding:12px; margin-bottom:10px; box-shadow:var(--neu-up); }
   .sums { display:flex; gap:8px; margin-bottom:10px; }
   .sum { flex:1 1 0; min-width:0; text-align:center; padding:11px 4px; border-radius:14px;
          background:var(--glass); backdrop-filter:saturate(180%) blur(20px);
-         -webkit-backdrop-filter:saturate(180%) blur(20px); border:1px solid rgba(255,255,255,.62);
-         box-shadow:0 8px 24px rgba(24,39,75,.10); }
+         -webkit-backdrop-filter:saturate(180%) blur(20px); border:0;
+         box-shadow:var(--neu-up); }
   .sum b { display:block; font-size:24px; line-height:1.15; letter-spacing:-.02em; }
   .sum span { font-size:12.5px; color:var(--sub); }
   .sum.run b { color:var(--blue); } .sum.wait b { color:var(--orange); } .sum.fail b { color:var(--red); }
@@ -1956,14 +2021,22 @@ PRINTS_HTML = r"""<!doctype html>
   td.op { text-align:right; }
   .legend b { color:var(--ink); }
   @media (prefers-color-scheme: dark) {
-    body { background:linear-gradient(170deg,#1c1c1e,#151517 60%,#1a1a1c) fixed; color:#f2f2f7; }
-    .card, .sum { background:rgba(28,28,30,.74); border-color:rgba(255,255,255,.08); }
+    body { background:#262b36; color:#f2f2f7; }
+    .card, .sum { background:#262b36; border-color:rgba(255,255,255,.08); }
     .muted, td.msg { color:#a1a1a6; }
     .legend b { color:#f2f2f7; }
     .sum.run b { color:#5aa9ff; } .sum.wait b { color:#ffb340; } .sum.fail b { color:#ff6b62; }
     .sum.ok b { color:#4cd964; }
     th, td { border-bottom-color:rgba(255,255,255,.08); }
   }
+</style>
+<style>
+:root{--neu-up:8px 8px 18px rgba(163,177,198,.55),-8px -8px 18px rgba(255,255,255,.95);--neu-up-sm:4px 4px 10px rgba(163,177,198,.55),-4px -4px 10px rgba(255,255,255,.95);--neu-in:inset 5px 5px 10px rgba(163,177,198,.5),inset -5px -5px 10px rgba(255,255,255,.9);--neu-in-sm:inset 4px 4px 8px rgba(163,177,198,.5),inset -4px -4px 8px rgba(255,255,255,.9);}
+input:not([type=checkbox]):not([type=radio]):not([type=range]),select,textarea{background:#e0e5ec!important;border:0!important;box-shadow:var(--neu-in)!important}
+button{border:0;box-shadow:var(--neu-up-sm)}
+button.ghost{background:#e0e5ec;box-shadow:var(--neu-up-sm)}
+button:active{box-shadow:var(--neu-in-sm)}
+@media (prefers-color-scheme:dark){:root{--neu-up:8px 8px 18px rgba(8,10,16,.6),-8px -8px 18px rgba(255,255,255,.06);--neu-up-sm:4px 4px 10px rgba(8,10,16,.6),-4px -4px 10px rgba(255,255,255,.06);--neu-in:inset 5px 5px 10px rgba(8,10,16,.6),inset -5px -5px 10px rgba(255,255,255,.05);--neu-in-sm:inset 4px 4px 8px rgba(8,10,16,.6),inset -4px -4px 8px rgba(255,255,255,.05)}input:not([type=checkbox]):not([type=radio]):not([type=range]),select,textarea{background:#262b36!important}button.ghost{background:#262b36}}
 </style></head>
 <body>
 <header><span id="hdrTitle"></span><b>打印记录</b><span class="sp"></span>
@@ -2202,14 +2275,14 @@ WAVE_HTML = r"""<!doctype html>
 <style>
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   :root { --blue:#007AFF; --green:#34C759; --red:#FF3B30; --ink:#1d1d1f; --sub:#6e6e73;
-          --line:rgba(60,60,67,.12); --fill:rgba(120,120,128,.12); --glass:rgba(255,255,255,.80); }
+          --line:rgba(60,60,67,.12); --fill:rgba(120,120,128,.12); --glass:#e0e5ec; }
   body { margin:0; padding:12px; min-height:100vh; color:var(--ink);
          font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
          letter-spacing:-.01em; -webkit-font-smoothing:antialiased;
-         background:linear-gradient(170deg,#eef3fa 0%,#e6edf8 45%,#e1e8f4 100%) fixed; }
+         background:#e0e5ec; }
   .card { background:var(--glass); backdrop-filter:saturate(180%) blur(20px);
-          -webkit-backdrop-filter:saturate(180%) blur(20px); border:1px solid rgba(255,255,255,.62);
-          border-radius:14px; padding:12px; margin-bottom:10px; box-shadow:0 8px 24px rgba(24,39,75,.10); }
+          -webkit-backdrop-filter:saturate(180%) blur(20px); border:0;
+          border-radius:14px; padding:12px; margin-bottom:10px; box-shadow:var(--neu-up); }
   .bar { display:flex; gap:8px; }
   .bar input { flex:1; min-width:0; padding:13px 14px; font-size:19px; color:var(--ink);
                background:rgba(255,255,255,.92); border:1px solid var(--line); border-radius:12px; }
@@ -2262,12 +2335,20 @@ WAVE_HTML = r"""<!doctype html>
   .skus .skun { font-size:15px; font-weight:600; word-break:break-all; }
   .skus .skuq { flex:0 0 auto; font-size:15px; font-weight:700; color:var(--blue); white-space:nowrap; }
   @media (prefers-color-scheme: dark) {
-    body { background:linear-gradient(170deg,#1c1c1e,#151517 60%,#1a1a1c) fixed; color:#f2f2f7; }
-    .card { background:rgba(28,28,30,.74); border-color:rgba(255,255,255,.08); }
+    body { background:#262b36; color:#f2f2f7; }
+    .card { background:#262b36; border-color:rgba(255,255,255,.08); }
     h2 { color:#f2f2f7; }
     .muted, .rowitem .cmax { color:#a1a1a6; }
     .bar input, .rowitem input { background:rgba(118,118,128,.24); border-color:rgba(255,255,255,.12); color:#f2f2f7; }
   }
+</style>
+<style>
+:root{--neu-up:8px 8px 18px rgba(163,177,198,.55),-8px -8px 18px rgba(255,255,255,.95);--neu-up-sm:4px 4px 10px rgba(163,177,198,.55),-4px -4px 10px rgba(255,255,255,.95);--neu-in:inset 5px 5px 10px rgba(163,177,198,.5),inset -5px -5px 10px rgba(255,255,255,.9);--neu-in-sm:inset 4px 4px 8px rgba(163,177,198,.5),inset -4px -4px 8px rgba(255,255,255,.9);}
+input:not([type=checkbox]):not([type=radio]):not([type=range]),select,textarea{background:#e0e5ec!important;border:0!important;box-shadow:var(--neu-in)!important}
+button{border:0;box-shadow:var(--neu-up-sm)}
+button.ghost{background:#e0e5ec;box-shadow:var(--neu-up-sm)}
+button:active{box-shadow:var(--neu-in-sm)}
+@media (prefers-color-scheme:dark){:root{--neu-up:8px 8px 18px rgba(8,10,16,.6),-8px -8px 18px rgba(255,255,255,.06);--neu-up-sm:4px 4px 10px rgba(8,10,16,.6),-4px -4px 10px rgba(255,255,255,.06);--neu-in:inset 5px 5px 10px rgba(8,10,16,.6),inset -5px -5px 10px rgba(255,255,255,.05);--neu-in-sm:inset 4px 4px 8px rgba(8,10,16,.6),inset -4px -4px 8px rgba(255,255,255,.05)}input:not([type=checkbox]):not([type=radio]):not([type=range]),select,textarea{background:#262b36!important}button.ghost{background:#262b36}}
 </style></head>
 <body>
 <div class="topbar">
@@ -2345,6 +2426,7 @@ function syncModeBtn(){
 }
 function toggleMode(){
   DUAL = !DUAL; saveMode();
+  bagLog('toggle-mode', DUAL ? '→双快递' : '→单快递(旧)');
   if(!DUAL){
     /* 切回旧模式：只保留当前快递那份，其余丢弃，并清掉本地保存 */
     const keep = ITEMS.slice();
@@ -2363,6 +2445,21 @@ function bagOf(c){ if(!BAGS[c]) BAGS[c] = []; return BAGS[c]; }
 function bagCount(c){ return (BAGS[c] || []).length; }
 function saveBags(){
   try{ localStorage.setItem(BAGKEY, JSON.stringify({bags: BAGS, carrier: CARRIER})); }catch(e){}
+  /* 每份各存一份单独备份：万一哪次把某一份清了，恢复时还能按备份救回 */
+  try{
+    localStorage.setItem(BAGKEY + '_中通', JSON.stringify(BAGS['中通'] || []));
+    localStorage.setItem(BAGKEY + '_申通', JSON.stringify(BAGS['申通'] || []));
+  }catch(e){}
+}
+/* 清单变动埋点：写进服务端日志，方便查「某一份为什么没了」 */
+function bagLog(ev, extra){
+  try{
+    fetch(bust(withSid('/api/wave/baglog')), {method:'POST', cache:'no-store',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ev:ev, carrier:CARRIER, dual:!!DUAL,
+                            mid:bagCount('中通'), shen:bagCount('申通'), extra:String(extra||'')})}
+    ).catch(function(){});
+  }catch(e){}
 }
 function syncCarrierButtons(){
   document.querySelectorAll('#cbar .seg').forEach(function(b){
@@ -2380,7 +2477,22 @@ function dropFromBag(carrier, p, items){
       if((parseInt(x.actual, 10) || 0) > 0 && x.code){ done[String(x.code).toUpperCase()] = 1; }
     });
     if(!Object.keys(done).length){ (items || []).forEach(function(x){ done[String(x.code).toUpperCase()] = 1; }); }
+    const others = {};
+    Object.keys(BAGS).forEach(function(k){ if(k !== carrier){ others[k] = BAGS[k]; } });
     BAGS[carrier] = bagOf(carrier).filter(function(x){ return !done[String(x.code).toUpperCase()]; });
+    Object.keys(others).forEach(function(k){ BAGS[k] = others[k]; });   /* 另一份原样保留（显式保证） */
+    bagLog('drop', carrier + ' →' + bagOf(carrier).length + ' 码=' + Object.keys(done).join(','));
+    /* 自愈：若另一份突然空了、但它的备份里还有，立刻按备份恢复（防丢第二道） */
+    try{
+      Object.keys(BAGS).forEach(function(k){
+        if(k !== carrier && (BAGS[k] || []).length === 0){
+          let bak = [];
+          try{ bak = JSON.parse(localStorage.getItem(BAGKEY + '_' + k) || '[]') || []; }catch(e){ bak = []; }
+          if(bak.length){ BAGS[k] = bak; bagLog('heal-from-backup', k + ' 恢复 ' + bak.length + ' 条'); }
+        }
+      });
+      if(CARRIER !== carrier){ ITEMS = bagOf(CARRIER); }
+    }catch(e){}
     if(carrier === CARRIER){ ITEMS = bagOf(CARRIER); }
   }catch(e){}
   saveBags(); syncCarrierButtons(); render();
@@ -2394,9 +2506,18 @@ function restoreBags(){
   const n1 = (v.bags['中通'] || []).length, n2 = (v.bags['申通'] || []).length;
   if(!n1 && !n2) return;
   BAGS = {'中通': v.bags['中通'] || [], '申通': v.bags['申通'] || []};
+  /* 防丢：与「每份单独备份」比对，谁多信谁（宁可多不可少） */
+  try{
+    ['中通', '申通'].forEach(function(k){
+      let bak = [];
+      try{ bak = JSON.parse(localStorage.getItem(BAGKEY + '_' + k) || '[]') || []; }catch(e){ bak = []; }
+      if(bak.length > (BAGS[k] || []).length){ BAGS[k] = bak; }
+    });
+  }catch(e){}
   if(v.carrier === '中通' || v.carrier === '申通'){ CARRIER = v.carrier; }
   ITEMS = bagOf(CARRIER);
   syncCarrierButtons(); render();
+  bagLog('restore', '中通 ' + n1 + ' 申通 ' + n2);
   $('hint').innerHTML = '已恢复上次的待成波清单（中通 ' + n1 + ' 个 · 申通 ' + n2 + ' 个）—— 要保留吗？ '
     + '<button class="ghost" id="keepBags" style="padding:6px 12px;font-size:14px">保留</button> '
     + '<button class="ghost" id="dropBags" style="padding:6px 12px;font-size:14px">不保留（清空）</button>';
@@ -2412,6 +2533,7 @@ function setCarrier(c){
   if(c === CARRIER) return;
   if(!DUAL){
     if(ITEMS.length && !confirm('切换快递会清空当前清单（一个波次只能同一种快递）。继续？')) return;
+    bagLog('clear-on-switch', CARRIER + ' 旧模式切走时清空');
     BAGS[CARRIER] = [];                    /* 旧模式：切快递即清空当前那份 */
   }
   CARRIER = c; ITEMS = bagOf(c); saveBags(); render(); syncCarrierButtons();
@@ -2487,7 +2609,8 @@ function loadShelfForItems(){
 }
 
 function render(){
-  $('cnt').textContent = ITEMS.length ? ('共 ' + ITEMS.length + ' 个编码') : '';
+  $('cnt').textContent = (ITEMS.length ? ('共 ' + ITEMS.length + ' 个编码') : '')
+    + (DUAL ? ('　｜　中通 ' + bagCount('中通') + ' 条 · 申通 ' + bagCount('申通') + ' 条') : '');
   if(!ITEMS.length){ $('list').innerHTML = '<div class="muted">还没有添加编码</div>'; return; }
   let h = '';
   ITEMS.forEach(function(it, i){
@@ -2567,6 +2690,7 @@ function addCode(code){
       });
       if(added.length){
         saveBags(); syncCarrierButtons(); render();
+        bagLog('add', added.join(' '));
         $('hint').innerHTML = '<span class="qcode">' + esc(d.code || code) + '</span>：已加入 <b>'
           + esc(added.join('　·　')) + '</b>'
           + (skipped.length ? ('（' + esc(skipped.join('/')) + ' 清单已有，未重复）') : '')
@@ -2738,6 +2862,7 @@ $('prev').onclick = function(){
 };
 
 $('mk').onclick = function(){
+  saveBags();                        /* 成波前先落盘：两份清单都存好 */
   const items = bodyItems();
   if(!items.length){ alert('请先添加编码并填写件数'); return; }
   if(!confirm('将用「' + CARRIER + '」生成 1 个波次（清单里所有编码合并成一个波次，只含该快递）。真要建波吗？')) return;
@@ -2897,19 +3022,19 @@ WAVE_RECORDS_HTML = r"""<!doctype html>
 <style>
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   :root { --blue:#007AFF; --green:#34C759; --red:#FF3B30; --orange:#FF9500; --ink:#1d1d1f; --sub:#6e6e73;
-          --line:rgba(60,60,67,.12); --fill:rgba(120,120,128,.12); --glass:rgba(255,255,255,.80); }
+          --line:rgba(60,60,67,.12); --fill:rgba(120,120,128,.12); --glass:#e0e5ec; }
   body { margin:0; padding:12px; min-height:100vh; color:var(--ink); letter-spacing:-.01em;
          -webkit-font-smoothing:antialiased;
          font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
-         background:linear-gradient(170deg,#eef3fa 0%,#e6edf8 45%,#e1e8f4 100%) fixed; }
+         background:#e0e5ec; }
   header { display:flex; align-items:center; gap:8px; padding:2px 3px 10px; flex-wrap:wrap; }
   header b { font-size:17px; }
   header .sp { flex:1; }
   header a.home { color:var(--blue); text-decoration:none; font-size:13.5px; font-weight:600;
                   background:var(--fill); border-radius:9px; padding:5px 11px; white-space:nowrap; }
   .card { background:var(--glass); backdrop-filter:saturate(180%) blur(20px);
-          -webkit-backdrop-filter:saturate(180%) blur(20px); border:1px solid rgba(255,255,255,.62);
-          border-radius:14px; padding:12px; margin-bottom:10px; box-shadow:0 8px 24px rgba(24,39,75,.10); }
+          -webkit-backdrop-filter:saturate(180%) blur(20px); border:0;
+          border-radius:14px; padding:12px; margin-bottom:10px; box-shadow:var(--neu-up); }
   .card h2 { font-size:15px; margin:0 0 8px; font-weight:700; border-left:3px solid var(--blue); padding-left:8px; }
   .muted { font-size:12.5px; color:var(--sub); line-height:1.7; }
   /* 窄屏 PDA：表格可横滑，关键列不换行、数字等宽，长波次号/时间不错乱 */
@@ -2943,13 +3068,21 @@ WAVE_RECORDS_HTML = r"""<!doctype html>
     td.code { font-size:13.5px; }
   }
   @media (prefers-color-scheme: dark) {
-    body { background:linear-gradient(170deg,#1c1c1e,#151517 60%,#1a1a1c) fixed; color:#f2f2f7; }
-    .card { background:rgba(28,28,30,.74); border-color:rgba(255,255,255,.08); }
+    body { background:#262b36; color:#f2f2f7; }
+    .card { background:#262b36; border-color:rgba(255,255,255,.08); }
     .muted { color:#a1a1a6; }
     th,td { border-bottom-color:rgba(255,255,255,.08); }
-    th { background:rgba(28,28,30,.9); }
+    th { background:#262b36; }
     tbody tr:nth-child(even) td { background:rgba(255,255,255,.04); }
   }
+</style>
+<style>
+:root{--neu-up:8px 8px 18px rgba(163,177,198,.55),-8px -8px 18px rgba(255,255,255,.95);--neu-up-sm:4px 4px 10px rgba(163,177,198,.55),-4px -4px 10px rgba(255,255,255,.95);--neu-in:inset 5px 5px 10px rgba(163,177,198,.5),inset -5px -5px 10px rgba(255,255,255,.9);--neu-in-sm:inset 4px 4px 8px rgba(163,177,198,.5),inset -4px -4px 8px rgba(255,255,255,.9);}
+input:not([type=checkbox]):not([type=radio]):not([type=range]),select,textarea{background:#e0e5ec!important;border:0!important;box-shadow:var(--neu-in)!important}
+button{border:0;box-shadow:var(--neu-up-sm)}
+button.ghost{background:#e0e5ec;box-shadow:var(--neu-up-sm)}
+button:active{box-shadow:var(--neu-in-sm)}
+@media (prefers-color-scheme:dark){:root{--neu-up:8px 8px 18px rgba(8,10,16,.6),-8px -8px 18px rgba(255,255,255,.06);--neu-up-sm:4px 4px 10px rgba(8,10,16,.6),-4px -4px 10px rgba(255,255,255,.06);--neu-in:inset 5px 5px 10px rgba(8,10,16,.6),inset -5px -5px 10px rgba(255,255,255,.05);--neu-in-sm:inset 4px 4px 8px rgba(8,10,16,.6),inset -4px -4px 8px rgba(255,255,255,.05)}input:not([type=checkbox]):not([type=radio]):not([type=range]),select,textarea{background:#262b36!important}button.ghost{background:#262b36}}
 </style></head>
 <body>
 <header><span id="hdrTitle"></span><b>波次记录</b><span class="sp"></span>
@@ -3024,7 +3157,8 @@ function load(){
              + '<td>' + esc(r.carrier || '-') + '</td>'
              + '<td>' + skuCell(r.codes) + '</td>'
              + '<td class="act">' + (r.wave_id
-                 ? '<button class="fin" data-fw="' + esc(r.wave_id) + '" data-fwc="' + esc(r.wave_code || '') + '">一键拣完</button>'
+                 ? ('<button class="fin" data-fw="' + esc(r.wave_id) + '" data-fwc="' + esc(r.wave_code || '') + '">一键拣完</button>'
+                    + '')
                  : '<span class="muted">-</span>') + '</td></tr>';
         });
         $('recBody').innerHTML = h;
@@ -3050,6 +3184,49 @@ function load(){
 }
 
 $('refresh').onclick = function(e){ if(e) e.preventDefault(); load(); return false; };
+
+/* ---------------- 取消波次：先只读预览 → 再确认提交（不可撤销） ---------------- */
+function cxPreview(wid, wcode){
+  $('recBody').insertAdjacentHTML('beforeend',
+    '<tr id="cxRow"><td colspan="8"><div id="cxBox"><span class="muted">正在只读回读波次…</span></div></td></tr>');
+  $('cxBox').scrollIntoView({behavior:'smooth', block:'center'});
+  fetch(bust(withSid('/api/wave/cancel')), {method:'POST', cache:'no-store',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify({wave_id:wid, confirm:false})})
+    .then(function(r){ if(r.status === 401){ location.href = '/login'; throw new Error('请重新登录'); } return r.json(); })
+    .then(function(d){
+      if(!d || d.ok === false){ $('cxBox').innerHTML = '<span class="badtext">' + esc((d&&d.error)||'预览失败') + '</span>'; return; }
+      let h = '<div><b>波次 ' + esc(d.wave_code || wcode || wid) + '</b>'
+         + '　状态 ' + esc(d.status_cn || d.status || '?')
+         + '　件数 ' + esc(d.itemCount == null ? '-' : d.itemCount)
+         + '　' + (d.picked ? '已有拣货记录' : '未拣') + '</div>';
+      h += '<div class="muted">将执行：' + esc(d.will_execute || ('取消波次(waveIds=' + wid + ')'))
+         + '（只读预览，未提交）</div>';
+      if(d.warning) h += '<div class="badtext">' + esc(d.warning) + '</div>';
+      h += '<div class="bar" style="margin-top:6px"><button class="can" id="cxGo">确认取消波次（不可撤销）</button>'
+         + '<button class="can" id="cxCancel">取消</button></div>';
+      $('cxBox').innerHTML = h;
+      $('cxCancel').onclick = function(){ const r = $('cxRow'); if(r) r.remove(); };
+      $('cxGo').onclick = function(){
+        if(!confirm('确认取消波次 ' + (wcode || wid) + '？\n订单会从波次里踢出（回到待发货/待成波），不可撤销。')) return;
+        $('cxBox').innerHTML = '<span class="muted">正在提交取消…</span>';
+        fetch(bust(withSid('/api/wave/cancel')), {method:'POST', cache:'no-store',
+            headers:{'Content-Type':'application/json'}, body:JSON.stringify({wave_id:wid, confirm:true})})
+          .then(function(r){ return r.json(); })
+          .then(function(d2){
+            if(d2 && d2.ok){
+              $('cxBox').innerHTML = '<div style="color:#1B7F35"><b>已取消</b> '
+                + esc(d2.wave_code || wid) + '　' + esc(d2.status_cn || '已取消') + '</div>';
+              setTimeout(load, 1500);
+            } else {
+              $('cxBox').innerHTML = '<span class="badtext">未确认取消：' + esc((d2&&d2.error)||'未知') + '</span>'
+                + '<div class="muted">' + esc((d2&&d2.status_cn)||'') + '</div>';
+            }
+          })
+          .catch(function(e){ $('cxBox').innerHTML = '<span class="badtext">请求失败：' + esc(e.message) + '</span>'; });
+      };
+    })
+    .catch(function(e){ $('cxBox').innerHTML = '<span class="badtext">预览失败：' + esc(e.message) + '</span>'; });
+}
 
 /* ---------------- 一键拣完：先只读回读预览 → 再确认提交（不可撤销） ---------------- */
 function fwPreview(wid, wcode){
@@ -3096,6 +3273,8 @@ function fwPreview(wid, wcode){
 $('recBody').addEventListener('click', function(e){
   const b = e.target && e.target.closest ? e.target.closest('button[data-fw]') : null;
   if(b) fwPreview(b.getAttribute('data-fw'), b.getAttribute('data-fwc'));
+  const b2 = null;  /* 取消波次按钮已按需求撤掉 */
+  if(b2) cxPreview(b2.getAttribute('data-cw'), b2.getAttribute('data-cwc'));
 });
 $('home').href = withSid('/');
 window.addEventListener('focus', load);

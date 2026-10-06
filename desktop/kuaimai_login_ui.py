@@ -9,14 +9,14 @@ LOGIN_HTML = r"""<!doctype html>
 <style>
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   :root { --blue:#007AFF; --green:#34C759; --red:#FF3B30; --ink:#1d1d1f; --sub:#6e6e73;
-          --line:rgba(60,60,67,.12); --fill:rgba(120,120,128,.12); --glass:rgba(255,255,255,.72); }
+          --line:rgba(60,60,67,.12); --fill:rgba(120,120,128,.12); --glass:#e0e5ec; }
   body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; padding:20px;
          font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
          letter-spacing:-.01em; -webkit-font-smoothing:antialiased; color:var(--ink);
-         background:linear-gradient(170deg,#eef3fa 0%,#e6edf8 45%,#e1e8f4 100%) fixed; }
+         background:#e0e5ec; }
   .card { width:100%; max-width:400px; background:var(--glass); backdrop-filter:saturate(180%) blur(20px);
-          -webkit-backdrop-filter:saturate(180%) blur(20px); border:1px solid rgba(255,255,255,.62);
-          border-radius:20px; box-shadow:0 16px 44px rgba(24,39,75,.14), 0 1px 2px rgba(24,39,75,.05);
+          -webkit-backdrop-filter:saturate(180%) blur(20px); border:0;
+          border-radius:20px; box-shadow:var(--neu-up);
           padding:22px; }
   h1 { font-size:21px; margin:2px 0 4px; font-weight:700; letter-spacing:-.02em; }
   .sub { color:var(--sub); font-size:13px; margin-bottom:16px; }
@@ -44,11 +44,19 @@ LOGIN_HTML = r"""<!doctype html>
   .sep { height:1px; background:rgba(60,60,67,.10); margin:18px 0; }
   .small { font-size:12.5px; color:var(--sub); margin-top:10px; line-height:1.6; }
   @media (prefers-color-scheme: dark) {
-    body { background:linear-gradient(170deg,#1c1c1e,#151517 60%,#1a1a1c) fixed; color:#f2f2f7; }
-    .card { background:rgba(28,28,30,.72); border-color:rgba(255,255,255,.08); }
+    body { background:#262b36; color:#f2f2f7; }
+    .card { background:#262b36; border-color:rgba(255,255,255,.08); }
     input { background:rgba(118,118,128,.24); border-color:rgba(255,255,255,.12); color:#f2f2f7; }
     .sub, label, .small { color:#a1a1a6; }
   }
+</style>
+<style>
+:root{--neu-up:8px 8px 18px rgba(163,177,198,.55),-8px -8px 18px rgba(255,255,255,.95);--neu-up-sm:4px 4px 10px rgba(163,177,198,.55),-4px -4px 10px rgba(255,255,255,.95);--neu-in:inset 5px 5px 10px rgba(163,177,198,.5),inset -5px -5px 10px rgba(255,255,255,.9);--neu-in-sm:inset 4px 4px 8px rgba(163,177,198,.5),inset -4px -4px 8px rgba(255,255,255,.9);}
+input:not([type=checkbox]):not([type=radio]):not([type=range]),select,textarea{background:#e0e5ec!important;border:0!important;box-shadow:var(--neu-in)!important}
+button{border:0;box-shadow:var(--neu-up-sm)}
+button.ghost{background:#e0e5ec;box-shadow:var(--neu-up-sm)}
+button:active{box-shadow:var(--neu-in-sm)}
+@media (prefers-color-scheme:dark){:root{--neu-up:8px 8px 18px rgba(8,10,16,.6),-8px -8px 18px rgba(255,255,255,.06);--neu-up-sm:4px 4px 10px rgba(8,10,16,.6),-4px -4px 10px rgba(255,255,255,.06);--neu-in:inset 5px 5px 10px rgba(8,10,16,.6),inset -5px -5px 10px rgba(255,255,255,.05);--neu-in-sm:inset 4px 4px 8px rgba(8,10,16,.6),inset -4px -4px 8px rgba(255,255,255,.05)}input:not([type=checkbox]):not([type=radio]):not([type=range]),select,textarea{background:#262b36!important}button.ghost{background:#262b36}}
 </style></head>
 <body>
 <div class="card" id="box"><h1>载入中…</h1></div>
