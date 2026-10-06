@@ -1,10 +1,10 @@
 {
-  "version": "v1.57",
-  "notes": "波次页三处改进。\n\n**「待成波清单」新增合计件数（吸顶常驻）**\n· 清单上方常驻一条大字横幅：把清单里所有编码的数量相加，直接显示「合计 / 500」。\n· 未超上限=绿色「还可加 N 件」；**超过 500 变红色 + 红框 + 数字放大**，并提示「已超上限 N 件，请减少后再成波」。\n· 手动改某个编码的数量时，合计实时跟着变；往下滚清单时横幅吸顶不掉。\n\n**单快递模式也能刷新保留了**\n· 原来「单快递模式（旧）」刷新会丢清单，现在也会保存并在刷新后恢复；切换快递仍会清空当前清单（语义不变）。\n\n**补上 baglog 接口**\n· 波次页「待成波清单变动日志」（`_baglog.txt`）的后端接口补齐，网页与后端一致。",
+  "version": "v1.58",
+  "notes": "波次记录「实时回读失败」修复。\n\n**根因**：`erp.trade.waves.query` 在 24 小时窗口下返回体约 **10.2 MB**，**超过网关 8 MB 上限**被拒（网关原话：`Data length too large`）。\n\n**修复**\n· 回读遇到「响应过大」**自动把 pageSize 减半重试**（100 → 50 → 25 → …），绕开 8 MB 上限，实测已恢复正常。\n· 以前只判断「返回是不是字典」，会把**错误响应当成「成功但 0 个波次」**，所以页面只显示「实时回读失败」却给不出原因 —— 现在会**识别 success=false**，把接口的 code/msg 直接显示出来，不再装死。\n· 波次记录页、以及「一键拣完」的只读预览都一并恢复正常。",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.57/kuaimai-scan-setup-v1.57.exe",
-  "sha256": "fc4093801598d4d8307b0493ae8d85317e4e15476a22097d23e26681e8462f25",
-  "size": 28837462,
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.58/kuaimai-scan-setup-v1.58.exe",
+  "sha256": "8bba12f2e81636b030aacc0aba841c0b1d99f8414de784debb7f12834c3f1ac4",
+  "size": 28841066,
   "mandatory": false,
-  "published_at": "2026-10-06 23:55"
+  "published_at": "2026-10-07 01:20"
 }
