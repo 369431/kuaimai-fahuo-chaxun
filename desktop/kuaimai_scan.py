@@ -3432,6 +3432,22 @@ class _WebHandler(BaseHTTPRequestHandler):
                                                 "请先打开自动化浏览器并登录 ERP"}, 503)
                 except Exception as e:
                     return self._json({"error": "预览失败：%s" % str(e)[:200]}, 500)
+            if path == "/api/wave/baglog":
+                # 波次页「待成波清单」变动埋点（诊断用）：追加写 _baglog.txt（跑起来的 exe 同级）
+                try:
+                    import os as _os, json as _json, time as _time
+                    rec = body if isinstance(body, dict) else {}
+                    rec["ts"] = _time.strftime("%Y-%m-%d %H:%M:%S")
+                    import sys as _sys
+                    base = _os.path.dirname(_os.path.abspath(
+                        _sys.executable if getattr(_sys, "frozen", False) else __file__))
+                    logp = _os.path.join(base, "_baglog.txt")
+                    with open(logp, "a", encoding="utf-8") as f:
+                        f.write(_json.dumps(rec, ensure_ascii=False) + "\n")
+                    return self._json({"ok": True})
+                except Exception as e:
+                    return self._json({"ok": False, "error": str(e)[:150]})
+
             if path == "/api/wave/create":
                 # 真正成波（写 ERP）：需 wave.create 权限 + confirm=true；多个编码合并成一个波次
                 deny = self._need(me, "wave.create")

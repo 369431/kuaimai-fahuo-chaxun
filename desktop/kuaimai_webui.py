@@ -2313,6 +2313,20 @@ WAVE_HTML = r"""<!doctype html>
                    background:rgba(255,255,255,.92); border:1px solid var(--line); border-radius:10px; }
   .actions { display:flex; gap:8px; margin-top:12px; }
   .actions button { flex:1; padding:13px; font-size:16px; }
+  /* 待成波清单「合计件数」：吸顶常驻 + 大红/大绿，直观看超没超 ERP 单波次上限 500 */
+  .wtot { position:sticky; top:0; z-index:6;
+          display:flex; align-items:center; justify-content:space-between; gap:12px;
+          padding:12px 14px; border-radius:14px; margin:2px 0 10px;
+          background:#e0e5ec; color:#7b8494; box-shadow:0 4px 12px rgba(163,177,198,.45); }
+  .wtot.ok { background:#d8efdd; color:#1B7F35; }
+  .wtot.over { background:#fadadd; color:#c62828;
+               box-shadow:0 0 0 2px rgba(255,59,48,.55), 0 4px 12px rgba(163,177,198,.45); }
+  .wtot-t { font-size:14px; font-weight:700; }
+  .wtot-s { font-size:12px; opacity:.9; margin-top:3px; }
+  .wtot-r { flex:0 0 auto; white-space:nowrap; line-height:1; }
+  .wtot-r b { font-size:30px; font-weight:800; letter-spacing:-.03em; }
+  .wtot-r i { font-size:14px; font-style:normal; font-weight:700; opacity:.7; margin-left:2px; }
+  .wtot.over .wtot-r b { font-size:34px; }
   .tag { display:inline-block; font-size:12px; padding:2px 9px; border-radius:8px; background:var(--fill);
          color:var(--sub); margin:0 6px 4px 0; }
   .tag.warn { background:rgba(255,59,48,.15); color:#c62828; }
@@ -2339,6 +2353,9 @@ WAVE_HTML = r"""<!doctype html>
     .card { background:#262b36; border-color:rgba(255,255,255,.08); }
     h2 { color:#f2f2f7; }
     .muted, .rowitem .cmax { color:#a1a1a6; }
+    .wtot { background:#2b3140; color:#c9cfdd; }
+    .wtot.ok { background:#1e3a28; color:#4cd964; }
+    .wtot.over { background:#3d2226; color:#ff6b62; }
     .bar input, .rowitem input { background:rgba(118,118,128,.24); border-color:rgba(255,255,255,.12); color:#f2f2f7; }
   }
 </style>
@@ -2378,6 +2395,13 @@ button:active{box-shadow:var(--neu-in-sm)}
 </div>
 <div class="card">
   <h2>待成波清单 <span class="muted" id="cnt"></span></h2>
+  <div class="wtot zero" id="wtot">
+    <div class="wtot-l">
+      <div class="wtot-t">本次波次合计（<span id="wtot-car">中通</span>）</div>
+      <div class="wtot-s" id="wtot-note">单波次上限 500</div>
+    </div>
+    <div class="wtot-r"><b id="wtot-num">0</b><i>/500</i></div>
+  </div>
   <div id="list"><div class="muted">还没有添加编码</div></div>
   <div class="actions">
     <button id="prev" class="ghost">预览（不建波）</button>
@@ -2421,24 +2445,24 @@ function syncModeBtn(){
   const b = $('modeBtn'); if(!b) return;
   b.textContent = DUAL ? '双快递模式：开' : '单快递模式（旧）';
   b.title = DUAL ? '扫码：中通进中通清单、申通进申通清单；切换只是换着看，刷新可保留（点一下切回旧模式）'
-                 : '旧模式：扫码只进当前快递清单，切换快递会清空当前清单（点一下切回双快递模式）';
+                 : '旧模式：扫码只进当前快递清单，切换快递会清空当前清单；刷新页面会保留（点一下切回双快递模式）';
   if(DUAL){ b.classList.add('on'); } else { b.classList.remove('on'); }
 }
 function toggleMode(){
   DUAL = !DUAL; saveMode();
   bagLog('toggle-mode', DUAL ? '→双快递' : '→单快递(旧)');
   if(!DUAL){
-    /* 切回旧模式：只保留当前快递那份，其余丢弃，并清掉本地保存 */
+    /* 切回旧模式：只保留当前快递那份，其余丢弃（但照样存盘 → 刷新能恢复） */
     const keep = ITEMS.slice();
     BAGS = {'中通': [], '申通': []}; BAGS[CARRIER] = keep; ITEMS = bagOf(CARRIER);
-    try{ localStorage.removeItem(BAGKEY); }catch(e){}
+    saveBags();
   } else {
     saveBags();
   }
   syncCarrierButtons(); render();
   $('hint').innerHTML = DUAL
     ? '已切到「双快递模式」：扫码时<b>中通进中通清单、申通进申通清单</b>；切换只是换着看，两边互不清空，刷新可保留。'
-    : '已切回「单快递模式（旧）」：扫码只进<b>当前快递</b>清单；切换快递会清空当前清单。';
+    : '已切回「单快递模式（旧）」：扫码只进<b>当前快递</b>清单；切换快递会清空当前清单，<b>刷新页面会保留</b>。';
 }
 
 function bagOf(c){ if(!BAGS[c]) BAGS[c] = []; return BAGS[c]; }
@@ -2499,7 +2523,6 @@ function dropFromBag(carrier, p, items){
 }
 /* 刷新/重开页面：有上次的清单就恢复，并给「保留 / 不保留」选择（避免丢数据） */
 function restoreBags(){
-  if(!DUAL) return;                        /* 旧模式不恢复 */
   let v = null;
   try{ v = JSON.parse(localStorage.getItem(BAGKEY) || 'null'); }catch(e){ v = null; }
   if(!v || !v.bags) return;
@@ -2608,9 +2631,30 @@ function loadShelfForItems(){
     }).catch(function(){});
 }
 
+const WAVE_LIMIT = 500;   /* 快麦 ERP 单个波次的订单上限 */
+/* 待成波清单「合计件数」：当前快递清单里所有 SKU 的数量相加（≈ 这一波要挑多少单/多少件） */
+function updateTotal(){
+  const wt = $('wtot'); if(!wt) return;
+  let total = 0;
+  ITEMS.forEach(function(x){ total += (parseInt(x.qty, 10) || 0); });
+  const car = $('wtot-car'); if(car) car.textContent = CARRIER;
+  const num = $('wtot-num'); if(num) num.textContent = total;
+  const note = $('wtot-note');
+  if(total > WAVE_LIMIT){
+    wt.className = 'wtot over';
+    if(note) note.textContent = '⚠ 已超上限 ' + (total - WAVE_LIMIT) + ' 件！请减少后再成波';
+  } else if(total > 0){
+    wt.className = 'wtot ok';
+    if(note) note.textContent = '未超上限，还可加 ' + (WAVE_LIMIT - total) + ' 件';
+  } else {
+    wt.className = 'wtot zero';
+    if(note) note.textContent = '单波次上限 ' + WAVE_LIMIT;
+  }
+}
 function render(){
   $('cnt').textContent = (ITEMS.length ? ('共 ' + ITEMS.length + ' 个编码') : '')
     + (DUAL ? ('　｜　中通 ' + bagCount('中通') + ' 条 · 申通 ' + bagCount('申通') + ' 条') : '');
+  updateTotal();
   if(!ITEMS.length){ $('list').innerHTML = '<div class="muted">还没有添加编码</div>'; return; }
   let h = '';
   ITEMS.forEach(function(it, i){
@@ -2622,7 +2666,11 @@ function render(){
   });
   $('list').innerHTML = h;
   $('list').querySelectorAll('input[data-i]').forEach(function(el){
-    el.onchange = function(){ const i = +el.getAttribute('data-i'); ITEMS[i].qty = Math.max(0, parseInt(el.value,10) || 0); };
+    el.onchange = function(){
+      const i = +el.getAttribute('data-i');
+      ITEMS[i].qty = Math.max(0, parseInt(el.value,10) || 0);
+      updateTotal(); saveBags();
+    };
   });
   $('list').querySelectorAll('button[data-d]').forEach(function(el){
     el.onclick = function(){ ITEMS.splice(+el.getAttribute('data-d'), 1); render(); };
