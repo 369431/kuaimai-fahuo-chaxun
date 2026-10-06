@@ -659,29 +659,54 @@ def _biz_window(minutes):
             "end": (now + timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S")}
 
 
-def waves_list(caller, minutes=1440, page_size=100):
+def waves_list(caller, minutes=1440, page_size=50):
     """实时回读最近波次（开放平台 erp.trade.waves.query，只读）。
 
     caller(method, biz) 由主程序传入（api_call_authed）。只回波次级字段，不返回订单/客户信息。
+
+    ⚠ 这个接口的返回体里**带每个波次的订单明细**：24h 窗口 × pageSize=100 时返回体会超过网关
+    8MB 上限（实测 ~10.2MB），网关直接回 success=false / "Data length too large"。所以这里：
+      1) **识别 success=false** —— 以前只判断"是不是 dict"，会把错误响应当成"成功但 0 个波次"，
+         于是页面只显示「实时回读失败」却给不出任何原因；
+      2) **响应过大就自动降 pageSize 重试**（100 → 50 → 25 → 12 → 10），绕开 8MB 上限。
     """
-    biz = _biz_window(minutes)
-    biz["pageSize"] = page_size
-    try:
-        res = caller("erp.trade.waves.query", biz)
-    except Exception as e:
-        return {"ok": False, "error": "回读失败：%s" % str(e)[:150]}
-    if not isinstance(res, dict):
-        return {"ok": False, "error": "回读返回异常"}
-    out = []
-    for w in (res.get("list") or []):
-        out.append({
-            "wave_code": w.get("code"), "wave_id": w.get("id"),
-            "status": w.get("status"), "status_cn": status_cn(w.get("status"), w.get("pickEndTime")),
-            "tradesCount": w.get("tradesCount"), "itemCount": w.get("itemCount"),
-            "pickEndTime": w.get("pickEndTime"),
-            "sids": [x.get("sid") for x in (w.get("list") or [])],
-        })
-    return {"ok": True, "waves": out, "total": res.get("total")}
+    # 依次尝试的 pageSize：从传入值开始每次减半，最小 10
+    sizes, ps = [], int(page_size or 50)
+    while ps >= 10:
+        sizes.append(ps)
+        ps //= 2
+    if not sizes:
+        sizes = [10]
+
+    last_err = ""
+    for ps in sizes:
+        biz = _biz_window(minutes)
+        biz["pageSize"] = ps
+        try:
+            res = caller("erp.trade.waves.query", biz)
+        except Exception as e:
+            return {"ok": False, "error": "回读失败：%s" % str(e)[:150]}
+        if not isinstance(res, dict):
+            return {"ok": False, "error": "回读返回异常"}
+        if res.get("success") is False:
+            msg = ("%s %s" % (res.get("code") or "", res.get("msg") or "")).strip()
+            last_err = "回读失败：%s" % (msg[:180] or "接口返回 success=false")
+            low = msg.lower()
+            # 返回体超过网关上限 → 减小 pageSize 再试（pageSize 越小 → 返回体越小）
+            if ("too large" in low) or ("data length" in low) or ("payload" in low):
+                continue
+            return {"ok": False, "error": last_err}
+        out = []
+        for w in (res.get("list") or []):
+            out.append({
+                "wave_code": w.get("code"), "wave_id": w.get("id"),
+                "status": w.get("status"), "status_cn": status_cn(w.get("status"), w.get("pickEndTime")),
+                "tradesCount": w.get("tradesCount"), "itemCount": w.get("itemCount"),
+                "pickEndTime": w.get("pickEndTime"),
+                "sids": [x.get("sid") for x in (w.get("list") or [])],
+            })
+        return {"ok": True, "waves": out, "total": res.get("total"), "pageSize": ps}
+    return {"ok": False, "error": last_err or "回读失败：响应过大，已自动降档仍失败"}
 
 
 # ---------- 一键拣完（v1.42）：分拣明细(只读) → 拣选完成(写) → 播种完成(写) → 回读状态 ----------
@@ -854,7 +879,7 @@ def seed(caller, wave_id, list_obj):
 def _read_wave(caller, wave_id, minutes=1440):
     """按波次ID回读当前状态（只读，复用 waves_list）。"""
     try:
-        r = waves_list(caller, minutes=minutes, page_size=100)
+        r = waves_list(caller, minutes=minutes, page_size=50)
     except Exception as e:
         return {"ok": False, "error": "状态回读失败：%s" % str(e)[:150]}
     if not r.get("ok"):

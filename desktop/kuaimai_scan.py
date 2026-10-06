@@ -2992,7 +2992,7 @@ class _WebHandler(BaseHTTPRequestHandler):
                     local = wv.load_records()
                     live, err = {}, ""
                     try:
-                        r = wv.waves_list(api_call_authed, minutes=1440, page_size=100)
+                        r = wv.waves_list(api_call_authed, minutes=1440, page_size=50)
                         if r.get("ok"):
                             for w in (r.get("waves") or []):
                                 code = str(w.get("wave_code") or "")
