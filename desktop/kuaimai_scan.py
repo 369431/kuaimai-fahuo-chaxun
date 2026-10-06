@@ -4396,6 +4396,7 @@ class ScanApp:
             self._init_orders_db()
             self.reload_records()
             self._start_web()               # 先对外服务（手机能连），索引随后台加载
+            self._ensure_relay_async()      # 软件一启动就把 9443 中转在后台拉起（关窗口也继续听）
             self._restore_shelf_cache()
             self._restore_lock_cache()
             # 索引在后台建（51MB 的库聚合要几秒），界面先出来 —— 登录后不再“卡一下”
@@ -4418,6 +4419,71 @@ class ScanApp:
         if extra:
             note = (note + "；" if note else "") + "迁移 " + "、".join(extra)
         self.db_note = note
+
+    # ---------- HTTPS 中转（9443）：软件一起来就在后台拉起，并持续看着它 ----------
+    def _ensure_relay_async(self):
+        """软件启动就把 HTTPS 中转（9443）在后台拉起来（隐藏进程，关窗口也照样在听）。
+
+        之后每 3 分钟再看一眼：配了「对外访问」但 9443 没在听 → 自动重新拉起。
+        （中转程序偶尔会自己退出，这样就不用手动去点「只重启 HTTPS 中转」了。）
+        """
+        try:
+            threading.Thread(target=self._ensure_relay, daemon=True).start()
+        except Exception:
+            pass
+        try:
+            self.root.after(180000, self._relay_watchdog_tick)
+        except Exception:
+            pass
+
+    def _relay_watchdog_tick(self):
+        """每 3 分钟巡检一次（静默）。"""
+        try:
+            threading.Thread(target=self._ensure_relay, args=(True,), daemon=True).start()
+        except Exception:
+            pass
+        try:
+            self.root.after(180000, self._relay_watchdog_tick)
+        except Exception:
+            pass
+
+    def _ensure_relay(self, quiet=False):
+        """没配对外域名 / 没证书 → 跳过；已经在听 → 跳过；否则后台把 9443 中转拉起来。
+
+        全程不弹窗；只有第一次（quiet=False）会把结果写一行到状态栏。
+        """
+        if getattr(self, "_relay_busy", False):
+            return                          # 上一次还在起，别叠着来
+        self._relay_busy = True
+        try:
+            if kmgw is None:
+                return
+            # 装了「对外访问」证书才起（没证书起不来，也不该拿这事打扰用户）
+            try:
+                if not kmgw.cert_pairs():
+                    return
+            except Exception:
+                return
+            cfg = kmgw.load_config() or {}
+            port = int(cfg.get("https_port") or 9443)
+            try:
+                if kmgw.port_open(port):
+                    return                  # 已经在监听，别重复起（start_relay 会先 taskkill）
+            except Exception:
+                pass
+            ok, msg = kmgw.start_relay(cfg)
+            if quiet:
+                return
+            text = (("HTTPS 中转已在后台启动（%d）" % port) if ok
+                    else ("HTTPS 中转没起来：%s" % str(msg or "")[:60]))
+            try:
+                uikit.post(self.root, lambda: self.status_text.set(text))
+            except Exception:
+                pass
+        except Exception:
+            pass
+        finally:
+            self._relay_busy = False
 
     def _start_web(self):
         """启动内置手机网页服务并把访问地址显示在界面上。"""
