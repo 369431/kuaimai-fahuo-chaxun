@@ -1,10 +1,10 @@
 {
-  "version": "v1.66",
-  "notes": "**修：点「检查更新」说「已是最新版」，其实有新版本。**\n\n**原因**：清单只问了一个源 —— jsDelivr 的 CDN。它的 `@main` 缓存是 `s-maxage=43200`（**12 小时**），而且 purge（强制刷新）经常报告完成却**不真的失效**。结果新版本发布后，客户端最长 12 小时都拿到旧清单 → 拿旧版本号跟自己比 → 「已是最新版」。\n\n**修法**：改成**同时问多个源、取版本号最高**的那个：\n· jsDelivr（国内通常能通，但会缓存）\n· raw.githubusercontent（GitHub 自己的源，基本实时）\n· 有配置 `update_url` 时也一起问\n任一源给出更新的版本号就算有更新，并采用它那份的下载地址和 sha256。\n\n**实测**（当前 jsDelivr 还停在 v1.63、raw 已是 v1.65）：\n· 拿 v1.63 去查 → 正确发现 v1.65（采用 raw）；\n· 拿 v1.65 去查 → 正确地报「没有更新」；\n· 拿 v1.10 去查 → 正确发现 v1.65。\n\n> 提醒：本次要更新到 v1.66，**如果你当前跑的还是 v1.63 及更早，它的检查逻辑是旧的**，受 jsDelivr 缓存影响可能仍提示「已是最新版」（要等缓存过期，最多 12 小时）。这种情况直接跑一次安装包即可；**装到 v1.66 之后，检查更新就准了。**",
+  "version": "v1.67",
+  "notes": "**修「检查更新」说已是最新版、其实有新版**（比 v1.66 更彻底）。\n\n**问题**：更新的清单只问了 jsDelivr 一个 CDN。它的 `@main` 缓存是 **12 小时**，purge 还常常报告完成却不真失效 → 新版发布后客户端最长 12 小时都拿到旧清单 → 误报「已是最新版」。\n\n**v1.66 的做法**是「多问几个源、取版本号最高的」；实测发现 **raw.githubusercontent 也不稳**（偶尔超时，而且刚推的版本它也会落后几分钟）。\n\n**v1.67 再加一个真正实时的源：GitHub 官方 API**（实测发布后**立刻**可见、0.6 秒返回，完全不受 CDN 缓存影响）。现在三个源一起问、取最高版本：\n· GitHub 官方 API —— 最实时（版本以它为准）\n· raw.githubusercontent —— 基本实时\n· jsDelivr CDN —— 国内通常能通但会缓存\n发版时还会把安装包的 `sha256` 写进 Release 说明，这样从 API 拿到的版本**也能校验下载**。\n\n**实测**（当时 jsDelivr 停在 v1.63、raw 停在 v1.65、API 已是 v1.66）：\n拿 v1.63 去查 → 正确发现 v1.66，并给出对应的下载地址与 sha256。",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.66/kuaimai-scan-setup-v1.66.exe",
-  "sha256": "5f1be05b3b376612faebf67303435d39bcd9168b71335e077b59d607d2cfac01",
-  "size": 28851683,
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.67/kuaimai-scan-setup-v1.67.exe",
+  "sha256": "886bb1296866f4b12dc1e39e45a058fc6a920e9518b642cf0242778fbc41a980",
+  "size": 28855903,
   "mandatory": false,
-  "published_at": "2026-10-07 18:54"
+  "published_at": "2026-10-07 18:58"
 }
