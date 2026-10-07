@@ -184,14 +184,44 @@ def _post_many(c, path, forms, ctype="application/x-www-form-urlencoded", timeou
     return res if isinstance(res, list) else []
 
 
+def _erp_err(text):
+    """识别 ERP 的「会话异常 / 未登录」等错误响应，返回给用户看的原因；正常返回 ''。
+
+    ERP 错误响应形如：{"clueId":"null","data":{},"message":"会话异常，请重新登录","result":901}
+    —— 正常业务响应**没有 result 字段**（data 才是列表）。以前这里不检查，会把错误当成
+    「0 个候选订单」，界面上显示成「没有可成波订单」，让人误判成真没单。
+    """
+    try:
+        j = json.loads(text or "")
+    except Exception:
+        return ""
+    if not isinstance(j, dict):
+        return ""
+    res = j.get("result")
+    msg = str(j.get("message") or "").strip()
+    low = msg.lower()
+    login_issue = any(k in msg for k in ("会话异常", "重新登录", "未登录", "登录超时", "登录失效")) \
+        or ("session" in low) or ("login" in low)
+    is_err = login_issue or (res not in (None, 0, "0", ""))
+    if not is_err:
+        return ""
+    why = msg or ("result=%s" % res)
+    if login_issue:
+        return "ERP 登录已失效（%s）—— 请在软件里点「登录 ERP」重新登录后再试" % why
+    return "ERP 返回错误：%s" % why
+
+
 def _split_raw(res, code):
-    """解析 query 响应 → {"one": [一单一件候选], "multi_qty": 多件预留件数}。
+    """解析 query 响应 → {"one": [一单一件候选], "multi_qty": 多件预留件数, ["error": 原因]}。
 
     `one`：只含「一单一件」的候选单（波次只挑这些，用户硬约束）。
     `multi_qty`：该编码在**非一单一件**（一单多件/组合单）候选里的件数合计 ——
       波次不挑它们，但现货要先留出来，所以单独统计给 UI 显示「建议多件预留」。
     """
     text = (res or {}).get("text") or ""
+    _err = _erp_err(text)          # v1.61：ERP 报错（会话失效等）不再被当成「0 单」
+    if _err:
+        return {"one": [], "multi_qty": 0, "error": _err}
     try:
         j = json.loads(text)
     except Exception:
@@ -326,6 +356,8 @@ def lookup(code):
         raw = _query_raw(c, code)
     finally:
         c.close()
+    if isinstance(raw, dict) and raw.get("error"):
+        return {"error": raw["error"]}          # v1.61：ERP 报错直接告诉用户，别装成「0 单」
     orders = raw.get("one") or []
     multi_qty = int(raw.get("multi_qty") or 0)
     k = _ci(code)
@@ -458,6 +490,8 @@ def plan(items, carrier=""):
             # 否则遍历到字典的键（字符串）→ 'str' object has no attribute 'get'。
             _resp = _resps[_i] if _i < len(_resps) else {}
             _q = _split_raw(_resp, _codes[_i]) or {}
+            if isinstance(_q, dict) and _q.get("error"):
+                return {"error": _q["error"]}   # v1.61：会话失效等错误直接抛给用户
             _one = _q.get("one") if isinstance(_q, dict) else _q
             rows = [o for o in (_one or [])
                     if isinstance(o, dict) and _c_match(o.get("carrier"), carrier)]

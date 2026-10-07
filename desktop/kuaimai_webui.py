@@ -2770,6 +2770,44 @@ function post(path, obj){
     .then(function(r){ if(r.status === 401){ location.href = '/login'; throw new Error('请重新登录'); } return r.json(); });
 }
 
+/* ---- v1.61：成波排队「看得见」----
+   成波是串行的（多账号一起用会排队，最多等 3 分钟）。等结果期间轮询
+   /api/wave/queue，把提示从「正在挑单并成波…」换成「前面还有 N 个波次，已等 X 秒」，
+   免得看着像卡死。 */
+let _qTimer = null, _qT0 = 0, _qBox = null;
+function qMsg(html){
+  if(_qBox && _qBox.parentNode){ _qBox.innerHTML = html; }
+}
+function qSecs(){ return Math.max(0, Math.round((Date.now() - _qT0) / 1000)); }
+function qTick(){
+  if(!_qBox || !_qBox.parentNode){ stopQueueWatch(); return; }
+  const s = qSecs();
+  fetch(bust(withSid('/api/wave/queue')), {cache:'no-store'})
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if(!d || !d.ok){ qMsg('正在挑单并成波…已等 <b>' + s + '</b> 秒'); return; }
+      if(d.running && d.waiting > 0){
+        qMsg('<b>排队中</b>：前面还有 <b>' + d.waiting + '</b> 个波次在生成，已等 <b>' + s + '</b> 秒…');
+      } else if(d.running){
+        qMsg('正在挑单并成波…已等 <b>' + s + '</b> 秒（一个波次通常十几秒）');
+      } else {
+        qMsg('正在挑单并成波…已等 <b>' + s + '</b> 秒');
+      }
+    })
+    .catch(function(){ qMsg('正在挑单并成波…已等 <b>' + s + '</b> 秒'); });
+}
+function startQueueWatch(){
+  stopQueueWatch();
+  _qBox = document.querySelector('#out .wq');
+  _qT0 = Date.now();
+  qTick();
+  _qTimer = setInterval(qTick, 1500);
+}
+function stopQueueWatch(){
+  if(_qTimer){ clearInterval(_qTimer); _qTimer = null; }
+  _qBox = null;
+}
+
 function renderPlan(p){
   const cs = p.codes || [];
   let h = '<div class="card"><h2>预览（干跑，不建波）' + (p.carrier ? '　·　快递 ' + esc(p.carrier) : '') + '</h2>';
@@ -2914,10 +2952,12 @@ $('mk').onclick = function(){
   const items = bodyItems();
   if(!items.length){ alert('请先添加编码并填写件数'); return; }
   if(!confirm('将用「' + CARRIER + '」生成 1 个波次（清单里所有编码合并成一个波次，只含该快递）。真要建波吗？')) return;
-  $('out').innerHTML = '<div class="card"><div class="muted">正在挑单并成波…（请稍候）</div></div>';
+  $('out').innerHTML = '<div class="card"><div class="muted wq">正在挑单并成波…（请稍候）</div></div>';
+  startQueueWatch();
   /* v1.46：波次号由 ERP「波次管理」列表回读（含未拣选波次）。created=true 才显示成功样式；
      save 返回 success 但回读不到 → 显示「ERP 未建出波次（未确认），请重试」，不冒充成功。 */
   post('/api/wave/create', {items:items, carrier:CARRIER, confirm:true}).then(function(p){
+    stopQueueWatch();
     let h = '';
     if(p.busy){
       h += '<div class="card"><h2>正在生成波次</h2><div class="badtext">'
@@ -2957,7 +2997,7 @@ $('mk').onclick = function(){
     }
     $('out').innerHTML = h + planCard(p);
     wireFinishFromCreate();
-  }).catch(function(e){ $('out').innerHTML = '<div class="card"><div class="badtext">成波请求失败：' + esc(e.message) + '</div></div>'; });
+  }).catch(function(e){ stopQueueWatch(); $('out').innerHTML = '<div class="card"><div class="badtext">成波请求失败：' + esc(e.message) + '</div></div>'; });
 };
 
 function planCard(p){

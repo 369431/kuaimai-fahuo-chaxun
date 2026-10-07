@@ -1711,6 +1711,40 @@ _ODB_LOCK = threading.RLock()
 # v1.46：同一时刻只允许一个成波请求（写 ERP，耗时且不该并发）。抢不到锁立即返回 busy，不长时间阻塞。
 _WAVE_CREATE_LOCK = threading.Lock()
 
+# v1.61：成波闸门的「看得见」状态 —— 现在是不是有人在成波 / 前面还有几个在排队。
+# 前端在等成波结果期间轮询 GET /api/wave/queue，用来显示「前面还有 N 个波次，已等 X 秒」。
+_WAVE_STAT = {"running": False, "waiting": 0}
+_WAVE_STAT_LK = threading.Lock()
+
+
+def _wave_stat():
+    with _WAVE_STAT_LK:
+        return {"running": bool(_WAVE_STAT["running"]), "waiting": int(_WAVE_STAT["waiting"])}
+
+
+def _wave_enter(timeout=180):
+    """进成波闸门：先登记「我在排队」，再抢锁；抢到就把 running 置真。返回是否抢到。"""
+    with _WAVE_STAT_LK:
+        _WAVE_STAT["waiting"] += 1
+    got = False
+    try:
+        got = bool(_WAVE_CREATE_LOCK.acquire(timeout=timeout))
+    finally:
+        with _WAVE_STAT_LK:
+            _WAVE_STAT["waiting"] = max(0, _WAVE_STAT["waiting"] - 1)
+            if got:
+                _WAVE_STAT["running"] = True
+    return got
+
+
+def _wave_leave():
+    with _WAVE_STAT_LK:
+        _WAVE_STAT["running"] = False
+    try:
+        _WAVE_CREATE_LOCK.release()
+    except Exception:
+        pass
+
 
 def orders_db():
     """订单库连接（首次调用时建库建表）。"""
@@ -3448,6 +3482,14 @@ class _WebHandler(BaseHTTPRequestHandler):
                 except Exception as e:
                     return self._json({"ok": False, "error": str(e)[:150]})
 
+            if path == "/api/wave/queue":
+                # v1.61：成波排队状态（只读）—— 前端在等成波结果时轮询它，显示「前面还有 N 个」。
+                if not self._can(me, "wave.view"):
+                    return self._deny("wave.view")
+                out = _wave_stat()
+                out["ok"] = True
+                return self._json(out)
+
             if path == "/api/wave/create":
                 # 真正成波（写 ERP）：需 wave.create 权限 + confirm=true；多个编码合并成一个波次
                 deny = self._need(me, "wave.create")
@@ -3459,7 +3501,7 @@ class _WebHandler(BaseHTTPRequestHandler):
                 # v1.46c 多账号并发：成波都走同一个 ERP 自动化浏览器，必须串行。
                 # 后来者**排队等待**（最多 180 秒）而不是被直接挡掉；真的等太久才让重试。
                 _t_wait = time.time()
-                if not _WAVE_CREATE_LOCK.acquire(timeout=180):
+                if not _wave_enter(180):
                     return self._json({"error": "前面还有波次在生成（排队超过 3 分钟），请稍后再试",
                                        "busy": True})
                 _waited = time.time() - _t_wait
@@ -3503,10 +3545,7 @@ class _WebHandler(BaseHTTPRequestHandler):
                 except Exception as e:
                     return self._json({"error": "成波失败：%s" % str(e)[:200]}, 500)
                 finally:
-                    try:
-                        _WAVE_CREATE_LOCK.release()
-                    except Exception:
-                        pass
+                    _wave_leave()
             if path == "/api/wave/finish":
                 # 一键拣完（写 ERP）：把波次推成「等待验货」（拣选完成）；需 wave.create 权限 + confirm。
                 # 无 confirm 只做只读预览（回读 waves.query），绝不写；confirm=true 才 pick.hand 并回读状态。
