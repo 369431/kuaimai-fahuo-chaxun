@@ -158,6 +158,32 @@ def _post(c, path, body, ctype, timeout=90000):
     return c.js(js) or {}
 
 
+def _post_many(c, path, forms, ctype="application/x-www-form-urlencoded", timeout=90000):
+    """一次 c.js 调用里**并发** POST 多份 body，返回 [{status,text,err}, ...]（顺序与 forms 对齐）。
+
+    波次挑单是「一个编码一次查询」：逐个串行发时 N 个编码要 N 次往返（实测每个 1.3~3s）。
+    放进一个 Promise.all 让**浏览器自己并发**（同源通常 6 并发），总耗时 ≈ 最慢的那一个。
+    """
+    forms = list(forms or [])
+    if not forms:
+        return []
+    js = """(async function(){
+      const tmo = %d;
+      const one = function(body){
+        const ac = new AbortController();
+        const to = setTimeout(function(){ ac.abort(); }, tmo);
+        return fetch(%s, {method:'POST', credentials:'include',
+            headers:{'Content-Type':%s}, body:body, signal:ac.signal})
+          .then(function(r){ return r.text().then(function(t){
+              clearTimeout(to); return {status:r.status, text:t}; }); })
+          .catch(function(e){ clearTimeout(to); return {status:0, err:String(e)}; });
+      };
+      try { return await Promise.all(%s.map(one)); } catch(e){ return []; }
+    })()""" % (timeout, json.dumps(path), json.dumps(ctype), json.dumps(forms))
+    res = c.js(js)
+    return res if isinstance(res, list) else []
+
+
 def _split_raw(res, code):
     """解析 query 响应 → {"one": [一单一件候选], "multi_qty": 多件预留件数}。
 
@@ -207,9 +233,9 @@ def _split_raw(res, code):
     return {"one": one, "multi_qty": multi_qty}
 
 
-def _query_raw(c, code):
-    """按商家编码查该编码在火火火仓库的候选订单（可成波的一单一件 + 多件预留统计）。"""
-    form = urllib.parse.urlencode({
+def _query_form(code):
+    """波次候选单查询的表单体（对齐 ERP 生成波次页的 queryWaveTradeByCondition）。"""
+    return urllib.parse.urlencode({
         "warehouseId": WAREHOUSE_ID,
         "conditionId": "",
         "sids": "",
@@ -226,10 +252,12 @@ def _query_raw(c, code):
         "specifyShipperIds": "",
         "pageSize": DEFAULT_PAGE_SIZE,
     })
-    _r = _split_raw(_post(c, QUERY_PATH, form, "application/x-www-form-urlencoded"), code)
-    if isinstance(_r, dict):
-        return _r
-    return {"one": list(_r or []), "multi_qty": 0}
+
+
+def _query_raw(c, code):
+    """按商家编码查该编码在火火火仓库的候选订单（可成波的一单一件 + 多件预留统计）。"""
+    return _split_raw(_post(c, QUERY_PATH, _query_form(code),
+                            "application/x-www-form-urlencoded"), code)
 
 
 def _shelf_map():
@@ -323,18 +351,54 @@ def lookup(code):
             "bins_text": info["bins_text"], "shelf_index_empty": info["shelf_index_empty"]}
 
 
+SEARCH_PATH = "/trade/search"           # 打单页的订单搜索接口（「剩余时间」在这）
+SEARCH_PAGE_SIZE = 500                  # 与 KP.fetch_orders_live 的默认 page_size 对齐
+
+
+def _search_form(code):
+    """打单页 /trade/search 的表单体（与 KP.fetch_orders_live 同源同参数）。"""
+    return ("api_name=trade_search&queryId=77&pageSize=%d&field=timeoutActionTime&needOrder=1"
+            "&useCompress=0&minutesAfterPaidOrderAreNotDisplayed=0&outerId=%s"
+            % (SEARCH_PAGE_SIZE, urllib.parse.quote(code)))
+
+
 def _priority(codes):
-    """剩余时间（小时，可负）来源：打单页 /trade/search（与打单口径同源）。{sid: remain}"""
-    rem = {}
-    for code in codes:
+    """剩余时间（小时，可负）来源：打单页 /trade/search（与打单口径同源）。{sid: remain}
+
+    并发查：所有编码一次全发出去（不再逐个串行），只取 sid + timeoutActionTime。
+    """
+    codes = [str(c) for c in (codes or []) if c]
+    if not codes:
+        return {}
+    c = KP.open_cdp_page()
+    try:
+        resps = _post_many(c, SEARCH_PATH, [_search_form(cd) for cd in codes])
+    finally:
         try:
-            rows = KP.fetch_orders_live(code, fresh=True)
-        except BaseException:
-            continue
-        for o in rows or []:
+            c.close()
+        except Exception:
+            pass
+    now = time.time()
+    rem = {}
+    for resp in (resps or []):
+        try:
+            arr = (json.loads((resp or {}).get("text") or "").get("data") or {}).get("list") or []
+        except Exception:
+            arr = []
+        for o in arr:
+            if not isinstance(o, dict):
+                continue
             s = str(o.get("sid") or "")
-            if s:
-                rem[s] = o.get("remain")
+            if not s:
+                continue
+            r = None
+            try:
+                to = float(o.get("timeoutActionTime") or 0)
+                if to > 1e12:
+                    r = (to / 1000.0 - now) / 3600.0
+            except Exception:
+                r = None
+            rem[s] = r
     return rem
 
 
@@ -384,11 +448,16 @@ def plan(items, carrier=""):
     c = KP.open_cdp_page()
     try:
         cand, raw_by_code = {}, {}
-        for t in targets:
-            # _query_raw 现返回 {"one": [一单一件候选], "multi_qty": 多件预留件数}
-            # （v1.49 起的契约）—— 这里必须取 "one"，不能再把整个返回值当列表遍历，
+        # 并发查：所有编码一次全发出去（浏览器自己并发），不再逐个串行
+        _ts = list(targets)
+        _codes = [orig.get(t, t) for t in _ts]
+        _resps = _post_many(c, QUERY_PATH, [_query_form(cd) for cd in _codes])
+        for _i, t in enumerate(_ts):
+            # 契约：_split_raw 返回 {"one": [一单一件候选], "multi_qty": 多件预留件数}
+            # —— 这里必须取 "one"，不能再把整个返回值当列表遍历，
             # 否则遍历到字典的键（字符串）→ 'str' object has no attribute 'get'。
-            _q = _query_raw(c, orig.get(t, t)) or {}
+            _resp = _resps[_i] if _i < len(_resps) else {}
+            _q = _split_raw(_resp, _codes[_i]) or {}
             _one = _q.get("one") if isinstance(_q, dict) else _q
             rows = [o for o in (_one or [])
                     if isinstance(o, dict) and _c_match(o.get("carrier"), carrier)]
