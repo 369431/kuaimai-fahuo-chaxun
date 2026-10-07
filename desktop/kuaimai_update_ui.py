@@ -37,16 +37,29 @@ def ask_update(parent, info, current, on_done=None, on_later=None):
     win = tk.Toplevel(parent)
     win.title("发现新版本 %s" % (info.get("latest") or ""))
     win.geometry("560x420")
-    win.minsize(520, 360)
+    win.minsize(480, 320)
     try:
         win.configure(bg=BG)
-        win.transient(parent)
+        # 刻意**不用** win.transient(parent)：transient 在 Windows 上会把窗口变成「被主窗口拥有」，
+        # 任务栏里没有它的按钮 —— 最小化之后就找不回来了（用户反馈「下载时不可以最小化、一直在桌面」）。
+        # 改成普通窗口：有自己的任务栏按钮，最小化/还原都正常；构造时手动提到最前面一次就够。
+        win.lift()
+        win.focus_force()
     except Exception:
         pass
     try:
         uikit.start(win)
     except Exception:
         pass
+
+    def _show():
+        """把窗口弄回前台：下载期间用户可能把它最小化了，有结果时必须让他看得见。"""
+        try:
+            win.deiconify()
+            win.lift()
+            win.focus_force()
+        except Exception:
+            pass
 
     head = tk.Frame(win, bg=BG)
     head.pack(fill=tk.X, padx=14, pady=(12, 2))
@@ -79,6 +92,7 @@ def ask_update(parent, info, current, on_done=None, on_later=None):
         btn_install.state(["disabled"])
     ttk.Button(bar, text="打开发布页", command=lambda: webbrowser.open(str(info.get("page_url") or upd.RELEASES_PAGE))
                ).pack(side=tk.LEFT, padx=6)
+    ttk.Button(bar, text="最小化", command=lambda: win.iconify()).pack(side=tk.RIGHT, padx=6)
     ttk.Button(bar, text="稍后", command=lambda: _later()).pack(side=tk.RIGHT)
 
     def _later():
@@ -111,6 +125,7 @@ def ask_update(parent, info, current, on_done=None, on_later=None):
             path, err = upd.download_setup(info, progress=prog)
 
             def done():
+                _show()                    # 下载期间用户可能把它最小化了：有结果先弄回前台
                 if err:
                     tip.config(text=err, fg="#d70015")
                     btn_install.state(["!disabled"])
