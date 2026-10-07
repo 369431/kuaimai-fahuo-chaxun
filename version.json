@@ -1,10 +1,10 @@
 {
-  "version": "v1.64",
-  "notes": "**热修：扫码报「ERP 返回错误：result=1」**（v1.61 ~ v1.63 的问题，抱歉）。\n\n**原因**：快麦 ERP 的**正常**返回里 `result=1` 就是**成功码**：\n`{\"clueId\":\"…\",\"data\":[{…订单…}],\"qTime\":714,\"result\":1}`\n而 v1.61 为了识别「会话异常」加的那个判断，把「`result` 不是 0/空」**一律当成了错误** → 于是正常的 result=1 也被报成「ERP 返回错误：result=1」，扫码全废。\n\n**修法**：判定改成**以 `message` 为主**、`result` 只作辅助：\n· 正常（`result=1`，有没有数据都算正常）→ 不再报错；\n· 登录失效（`会话异常，请重新登录` / result=901）→ 仍然明确提示「请在软件里点『登录 ERP』重新登录」；\n· 其它带 message 且拿不到数据的 → 照旧报错。\n\n**已实测**：7 种返回形态全部符合预期（含 result=1 有数据 / result=1 空数据 / result=901 会话异常），并用真机跑了一次扫码：`max=25 中通1 申通24` 正常返回。\n\n装了这一版扫码即恢复。",
+  "version": "v1.65",
+  "notes": "**更新改成「静默一键」，不再弹安装向导。**\n\n以前点「检查更新 → 下载并安装」会弹出 Inno 安装向导，要一路点下一步、装完还得自己开程序。\n现在改成：\n· 下载完直接**静默安装**（只显示一个进度条，不问任何问题）\n· 安装器自动关掉正在运行的主程序和 9443 中转，装完**自动重新打开**，就是新版\n\n你只需要点两下：**检查更新 → 下载并安装**，然后等它自己重启。\n\n> 注意：**这一次（装到 v1.65）还得走一遍向导**，因为「静默」这个行为本身写在程序里，老版本装的还是老逻辑。**从 v1.65 往后就都是静默一键了。**",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.64/kuaimai-scan-setup-v1.64.exe",
-  "sha256": "dd71b1718feacf578a99b0e36f6afbc16f26e44ad8280ba7d944de7fd654048c",
-  "size": 28849322,
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.65/kuaimai-scan-setup-v1.65.exe",
+  "sha256": "4c7a8e8e8ffc51829e0628a619efe06a1c5a91fbb8097b139961021e3ba4196b",
+  "size": 28850546,
   "mandatory": false,
-  "published_at": "2026-10-07 18:48"
+  "published_at": "2026-10-07 18:50"
 }
