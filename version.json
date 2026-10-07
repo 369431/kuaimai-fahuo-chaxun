@@ -1,10 +1,10 @@
 {
-  "version": "v1.63",
-  "notes": "**「成波后隐藏」改为服务端共享**（以前只有本浏览器当前会话内才隐藏）。\n\n· 生成波次成功后，程序会把这一波用到的编码标记「已生波次」→ 这些编码在**现货可发**页对**所有账号、所有设备都看不到**（避免刚成波又被重复拣货）。\n· 隐藏**只持续到下一次「全量拉取数据」**：全量重拉（或到点的自动全量）完成后标记自动清空、编码重新出现（那时数据已更新）。每 5 分钟的**增量刷新不会**提前放出来。\n· 网页端早就在按这个字段过滤了，这版把**后端补齐**，两边终于对上（以前字段一直缺，等于没生效）。\n· 另外：「取消波次」（在波次管理页勾选后再调 ERP 接口那条路）按决定**不做**，这次把它的残留代码一并清掉了（前端本就没入口，后端接口/实现已移除）。",
+  "version": "v1.64",
+  "notes": "**热修：扫码报「ERP 返回错误：result=1」**（v1.61 ~ v1.63 的问题，抱歉）。\n\n**原因**：快麦 ERP 的**正常**返回里 `result=1` 就是**成功码**：\n`{\"clueId\":\"…\",\"data\":[{…订单…}],\"qTime\":714,\"result\":1}`\n而 v1.61 为了识别「会话异常」加的那个判断，把「`result` 不是 0/空」**一律当成了错误** → 于是正常的 result=1 也被报成「ERP 返回错误：result=1」，扫码全废。\n\n**修法**：判定改成**以 `message` 为主**、`result` 只作辅助：\n· 正常（`result=1`，有没有数据都算正常）→ 不再报错；\n· 登录失效（`会话异常，请重新登录` / result=901）→ 仍然明确提示「请在软件里点『登录 ERP』重新登录」；\n· 其它带 message 且拿不到数据的 → 照旧报错。\n\n**已实测**：7 种返回形态全部符合预期（含 result=1 有数据 / result=1 空数据 / result=901 会话异常），并用真机跑了一次扫码：`max=25 中通1 申通24` 正常返回。\n\n装了这一版扫码即恢复。",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.63/kuaimai-scan-setup-v1.63.exe",
-  "sha256": "e97f9a3a9c52b012ea79e246605dbb2f85cbc023588206815d94e873346c8f60",
-  "size": 28848607,
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.64/kuaimai-scan-setup-v1.64.exe",
+  "sha256": "dd71b1718feacf578a99b0e36f6afbc16f26e44ad8280ba7d944de7fd654048c",
+  "size": 28849322,
   "mandatory": false,
-  "published_at": "2026-10-07 18:33"
+  "published_at": "2026-10-07 18:48"
 }
