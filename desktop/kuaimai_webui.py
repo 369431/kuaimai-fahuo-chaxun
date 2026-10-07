@@ -3178,21 +3178,15 @@ button:active{box-shadow:var(--neu-in-sm)}
   <a class="home" href="#" id="refresh">刷新</a>
   <a class="home" href="#" id="home">返回扫码</a></header>
 <div class="card">
-  <div class="muted">状态 / 件数 / 订单数 <b>实时来自快麦 ERP</b>（每次打开/刷新都重新回读）；
-    本机只记录「我生成过哪些波次号」做索引。</div>
+  <div class="muted">状态 / 件数 / 订单数 <b>实时来自快麦 ERP</b>（每次打开/刷新都重新回读，近 24 小时）。
+    「<b>生成账号</b>」是<b>本系统</b>里点「生成波次」的那个账号 —— ERP 那边只有同一个登录，
+    分不出是谁在本系统操作的，所以这一列取自本机记录（只存「波次号 → 账号」）。</div>
 </div>
 <div class="card">
-  <h2>我生成的波次</h2>
+  <h2>最近 ERP 波次</h2>
   <div class="tw">
-  <table><thead><tr><th>波次号</th><th>状态</th><th>订单数</th><th>件数</th><th>时间</th><th>快递</th><th>明细</th><th>操作</th></tr></thead>
-  <tbody id="recBody"><tr><td colspan="8" class="muted">载入中…</td></tr></tbody></table>
-  </div>
-</div>
-<div class="card">
-  <h2>最近 ERP 波次（只读对照）</h2>
-  <div class="tw">
-  <table><thead><tr><th>波次号</th><th>状态</th><th>订单数</th><th>件数</th></tr></thead>
-  <tbody id="recentBody"><tr><td colspan="4" class="muted">载入中…</td></tr></tbody></table>
+  <table><thead><tr><th>波次号</th><th>状态</th><th>订单数</th><th>件数</th><th>生成账号</th><th>操作</th></tr></thead>
+  <tbody id="recentBody"><tr><td colspan="6" class="muted">载入中…</td></tr></tbody></table>
   </div>
 </div>
 <script>
@@ -3217,7 +3211,7 @@ function pill(status, status_cn){
   return '<span class="pill ' + cls + '">' + esc(label) + '</span>';
 }
 
-function skuCell(codes){
+function skuCell(codes){   /* 保留备用：波次记录页已改为「最近 ERP 波次」单表，暂不显示 SKU 明细 */
   if(!codes || !codes.length) return '<span class="muted">-</span>';
   let h = '<div class="skus">';
   codes.forEach(function(c){
@@ -3233,36 +3227,25 @@ function load(){
     .then(function(r){ if(r.status === 401){ location.href = '/login'; throw new Error('请重新登录'); } return r.json(); })
     .then(function(d){
       if(!d || d.error && !d.records){ $('upd').innerHTML = '<span class="badtext">' + esc((d&&d.error)||'读取失败') + '</span>'; return; }
-      const recs = d.records || [], recent = d.recent || [];
-      if(recs.length){
-        let h = '';
-        recs.forEach(function(r){
-          h += '<tr><td class="code">' + esc(r.wave_code || '-') + '</td>'
-             + '<td>' + pill(r.status, r.status_cn) + (r.live ? '' : ' <span class="muted">(离线)</span>') + '</td>'
-             + '<td class="num">' + esc(r.tradesCount == null ? '-' : r.tradesCount) + '</td>'
-             + '<td class="num">' + esc(r.itemCount == null ? '-' : r.itemCount) + '</td>'
-             + '<td class="time">' + esc(r.ts || '-') + '</td>'
-             + '<td>' + esc(r.carrier || '-') + '</td>'
-             + '<td>' + skuCell(r.codes) + '</td>'
-             + '<td class="act">' + (r.wave_id
-                 ? ('<button class="fin" data-fw="' + esc(r.wave_id) + '" data-fwc="' + esc(r.wave_code || '') + '">一键拣完</button>'
-                    + '')
-                 : '<span class="muted">-</span>') + '</td></tr>';
-        });
-        $('recBody').innerHTML = h;
-      } else {
-        $('recBody').innerHTML = '<tr><td colspan="8" class="muted">还没有生成过波次（本机无记录）</td></tr>';
-      }
+      const recent = d.recent || [];
       if(recent.length){
         let h = '';
         recent.forEach(function(w){
-          h += '<tr><td class="code">' + esc(w.wave_code || '-') + '</td><td>' + pill(w.status, w.status_cn) + '</td>'
+          const who = w.who ? esc(w.who)
+              : (w.known ? '<span class="muted">（旧记录无账号）</span>'
+                         : '<span class="muted">（非本系统）</span>');
+          h += '<tr><td class="code">' + esc(w.wave_code || '-') + '</td>'
+             + '<td>' + pill(w.status, w.status_cn) + '</td>'
              + '<td class="num">' + esc(w.tradesCount == null ? '-' : w.tradesCount) + '</td>'
-             + '<td class="num">' + esc(w.itemCount == null ? '-' : w.itemCount) + '</td></tr>';
+             + '<td class="num">' + esc(w.itemCount == null ? '-' : w.itemCount) + '</td>'
+             + '<td class="who">' + who + '</td>'
+             + '<td class="act">' + (w.wave_id
+                 ? ('<button class="fin" data-fw="' + esc(w.wave_id) + '" data-fwc="' + esc(w.wave_code || '') + '">一键拣完</button>')
+                 : '<span class="muted">-</span>') + '</td></tr>';
         });
         $('recentBody').innerHTML = h;
       } else {
-        $('recentBody').innerHTML = '<tr><td colspan="4" class="muted">近 24h 无波次</td></tr>';
+        $('recentBody').innerHTML = '<tr><td colspan="6" class="muted">近 24h 无波次</td></tr>';
       }
       $('upd').innerHTML = (d.live ? '实时已更新 ' : '实时回读失败：')
         + '<b>' + new Date().toLocaleTimeString() + '</b>'
@@ -3275,8 +3258,8 @@ $('refresh').onclick = function(e){ if(e) e.preventDefault(); load(); return fal
 
 /* ---------------- 一键拣完：先只读回读预览 → 再确认提交（不可撤销） ---------------- */
 function fwPreview(wid, wcode){
-  $('recBody').insertAdjacentHTML('beforeend',
-    '<tr id="fwRow"><td colspan="8"><div id="fwBox"><span class="muted">正在只读回读波次…</span></div></td></tr>');
+  $('recentBody').insertAdjacentHTML('beforeend',
+    '<tr id="fwRow"><td colspan="6"><div id="fwBox"><span class="muted">正在只读回读波次…</span></div></td></tr>');
   $('fwBox').scrollIntoView({behavior:'smooth', block:'center'});
   fetch(bust(withSid('/api/wave/finish')), {method:'POST', cache:'no-store',
       headers:{'Content-Type':'application/json'}, body:JSON.stringify({wave_id:wid, confirm:false})})
@@ -3315,7 +3298,7 @@ function fwPreview(wid, wcode){
     })
     .catch(function(e){ $('fwBox').innerHTML = '<span class="badtext">预览失败：' + esc(e.message) + '</span>'; });
 }
-$('recBody').addEventListener('click', function(e){
+$('recentBody').addEventListener('click', function(e){
   const b = e.target && e.target.closest ? e.target.closest('button[data-fw]') : null;
   if(b) fwPreview(b.getAttribute('data-fw'), b.getAttribute('data-fwc'));
 });

@@ -3054,8 +3054,27 @@ class _WebHandler(BaseHTTPRequestHandler):
                             "ts": rec.get("ts"),
                         })
                     recs.sort(key=lambda x: str(x.get("ts") or ""), reverse=True)
-                    known = set(str(x.get("wave_code") or "") for x in local)
-                    recent = [live[c] for c in sorted(live.keys(), reverse=True) if c not in known]
+                    # v1.68：本机记录（wave_records.json）只当「波次号 → 生成账号」的索引。
+                    # 列表本身显示 **ERP 的全部最近波次**（不再把本机生成过的排除掉），逐条补上
+                    # 「生成账号 who」——ERP 那边只有同一个登录，看不出是谁在本系统点的成波。
+                    # known=本机有没有这条记录：用来区分「旧记录没记账号」和「压根不是本系统生成的」。
+                    who_by_code, who_by_id = {}, {}
+                    for rec in local:
+                        _w = str((rec or {}).get("who") or "").strip()
+                        _c = str((rec or {}).get("wave_code") or "")
+                        _i = str((rec or {}).get("wave_id") or "")
+                        if _c:
+                            who_by_code[_c] = _w
+                        if _i:
+                            who_by_id[_i] = _w
+                    recent = []
+                    for c in sorted(live.keys(), reverse=True):
+                        w = dict(live[c])
+                        _c = str(w.get("wave_code") or "")
+                        _i = str(w.get("wave_id") or "")
+                        w["who"] = str(who_by_code.get(_c) or who_by_id.get(_i) or "").strip()
+                        w["known"] = bool((_c and _c in who_by_code) or (_i and _i in who_by_id))
+                        recent.append(w)
                     return self._json({"ok": True, "records": recs, "recent": recent,
                                        "live": bool(live), "error": err})
                 except Exception as e:
@@ -3527,6 +3546,8 @@ class _WebHandler(BaseHTTPRequestHandler):
                                 "itemCount": (out.get("verify") or {}).get("item_count"),
                                 "carrier": out.get("carrier") or "",
                                 "codes": out.get("codes") or [],
+                                # v1.68：记下**本系统**里点成波的那个账号（波次记录页的「生成账号」列）
+                                "who": str((me or {}).get("name") or "").strip(),
                                 "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
                             })
                         except Exception:
