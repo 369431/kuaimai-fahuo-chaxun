@@ -1,10 +1,10 @@
 {
-  "version": "v1.65",
-  "notes": "**更新改成「静默一键」，不再弹安装向导。**\n\n以前点「检查更新 → 下载并安装」会弹出 Inno 安装向导，要一路点下一步、装完还得自己开程序。\n现在改成：\n· 下载完直接**静默安装**（只显示一个进度条，不问任何问题）\n· 安装器自动关掉正在运行的主程序和 9443 中转，装完**自动重新打开**，就是新版\n\n你只需要点两下：**检查更新 → 下载并安装**，然后等它自己重启。\n\n> 注意：**这一次（装到 v1.65）还得走一遍向导**，因为「静默」这个行为本身写在程序里，老版本装的还是老逻辑。**从 v1.65 往后就都是静默一键了。**",
+  "version": "v1.66",
+  "notes": "**修：点「检查更新」说「已是最新版」，其实有新版本。**\n\n**原因**：清单只问了一个源 —— jsDelivr 的 CDN。它的 `@main` 缓存是 `s-maxage=43200`（**12 小时**），而且 purge（强制刷新）经常报告完成却**不真的失效**。结果新版本发布后，客户端最长 12 小时都拿到旧清单 → 拿旧版本号跟自己比 → 「已是最新版」。\n\n**修法**：改成**同时问多个源、取版本号最高**的那个：\n· jsDelivr（国内通常能通，但会缓存）\n· raw.githubusercontent（GitHub 自己的源，基本实时）\n· 有配置 `update_url` 时也一起问\n任一源给出更新的版本号就算有更新，并采用它那份的下载地址和 sha256。\n\n**实测**（当前 jsDelivr 还停在 v1.63、raw 已是 v1.65）：\n· 拿 v1.63 去查 → 正确发现 v1.65（采用 raw）；\n· 拿 v1.65 去查 → 正确地报「没有更新」；\n· 拿 v1.10 去查 → 正确发现 v1.65。\n\n> 提醒：本次要更新到 v1.66，**如果你当前跑的还是 v1.63 及更早，它的检查逻辑是旧的**，受 jsDelivr 缓存影响可能仍提示「已是最新版」（要等缓存过期，最多 12 小时）。这种情况直接跑一次安装包即可；**装到 v1.66 之后，检查更新就准了。**",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.65/kuaimai-scan-setup-v1.65.exe",
-  "sha256": "4c7a8e8e8ffc51829e0628a619efe06a1c5a91fbb8097b139961021e3ba4196b",
-  "size": 28850546,
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v1.66/kuaimai-scan-setup-v1.66.exe",
+  "sha256": "5f1be05b3b376612faebf67303435d39bcd9168b71335e077b59d607d2cfac01",
+  "size": 28851683,
   "mandatory": false,
-  "published_at": "2026-10-07 18:50"
+  "published_at": "2026-10-07 18:54"
 }
