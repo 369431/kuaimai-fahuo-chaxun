@@ -185,14 +185,29 @@ def download_setup(info, dest_dir=None, progress=None):
     return dest, ""
 
 
-def run_setup(path):
-    """启动安装包（Inno 安装器会自己处理“程序正在运行”）。"""
+def run_setup(path, silent=True):
+    """启动安装包。**默认静默**：不再弹 Inno 向导，只显示一个进度条，装完自动重启程序。
+
+    silent=True 带这三个参数：
+      · /SILENT            不提问（只显示进度条）
+      · /CLOSEAPPLICATIONS 让安装器自己关掉正在运行的程序（主程序 + 9443 中转都占着要被替换的文件）
+      · /NORESTART         不要重启电脑
+    配合安装脚本 `.iss` 里「启动全部」那条 [Run] **去掉了 skipifsilent**，所以静默装完也会自动拉起程序。
+
+    silent=False → 老行为（弹安装向导）。万一静默装失败，可以用它兜底。
+    """
     try:
         if not os.path.exists(path):
             return False, "文件不在了：%s" % path
-        if not str(path).lower().endswith((".exe", ".msi")):
+        low = str(path).lower()
+        if not low.endswith((".exe", ".msi")):
             os.startfile(os.path.dirname(path))
             return True, "已打开所在文件夹（不是安装包，没自动运行）"
+        if silent and low.endswith(".exe"):
+            import subprocess
+            subprocess.Popen([path, "/SILENT", "/CLOSEAPPLICATIONS", "/NORESTART"],
+                             close_fds=True)
+            return True, ""
         os.startfile(path)
         return True, ""
     except Exception as e:

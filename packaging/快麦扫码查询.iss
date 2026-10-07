@@ -69,4 +69,4 @@ Name: "{userstartup}\{#MyAppName} 启动"; Filename: "{app}\启动全部.cmd"; T
 
 [Run]
 Filename: "{app}\装开机自启.cmd"; Flags: runhidden waituntilterminated
-Filename: "{app}\启动全部.cmd"; Description: "立即启动 快麦扫码查询 + HTTPS中转"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\启动全部.cmd"; Description: "立即启动 快麦扫码查询 + HTTPS中转"; Flags: nowait postinstall

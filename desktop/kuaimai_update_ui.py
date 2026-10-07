@@ -117,13 +117,16 @@ def ask_update(parent, info, current, on_done=None, on_later=None):
                     pb.pack_forget()
                     messagebox.showerror("下载失败", err, parent=win)
                     return
-                tip.config(text="下载完成，正在启动安装程序…", fg=GREEN)
+                tip.config(text="下载完成，正在静默安装…", fg=GREEN)
                 okr, msg = upd.run_setup(path)
                 if okr:
                     messagebox.showinfo(
-                        "准备安装",
-                        "安装包已下载：\n%s\n\n接下来安装向导会自己关掉正在运行的程序，装完重新打开就是新版。"
-                        % path, parent=win)
+                        "正在更新",
+                        "安装包已下载：\n%s\n\n"
+                        "接下来会静默安装（不再弹安装向导，只显示一个进度条）：\n"
+                        "· 安装器会自动关掉本程序（和 9443 中转）\n"
+                        "· 装完自动重新打开，就是新版了\n\n"
+                        "如果窗口没自己消失，等几秒安装结束它会自行退出。" % path, parent=win)
                     try:
                         if callable(on_done):
                             on_done(path)
