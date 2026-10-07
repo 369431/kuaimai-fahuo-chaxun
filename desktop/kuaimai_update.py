@@ -83,6 +83,29 @@ def manifest_url():
     return DEFAULT_MANIFEST
 
 
+def manifest_urls(url=None):
+    """要问的清单源（去重保序）：配置里的 update_url → jsDelivr → raw。"""
+    cand = []
+    if url:
+        cand.append(str(url))
+    else:
+        try:
+            import kuaimai_client as kmc
+            u = str((kmc.load_config() or {}).get("update_url") or "").strip()
+            if u:
+                cand.append(u)
+        except Exception:
+            pass
+        cand.append(DEFAULT_MANIFEST)
+        cand.append(FALLBACK_MANIFEST)
+    seen, out = set(), []
+    for u in cand:
+        if u and u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
+
+
 def parse_ver(v):
     """'v1.11' / '1.11.2' / 'v1.12-beta' → (1, 11) / (1, 11, 2) / (1, 12)。"""
     s = str(v or "").strip().lower().lstrip("v")
@@ -108,34 +131,46 @@ def _fetch(url, timeout=10, binary=False):
 
 
 def check(current, url=None, timeout=10):
-    """查有没有新版 → dict(ok, has_update, latest, notes, page_url, setup_url, sha256, mandatory, error)。"""
+    """查有没有新版 → dict(ok, has_update, latest, notes, page_url, setup_url, sha256, mandatory, error)。
+
+    ⚠ 会**同时问多个清单源、取版本号最高**的那个：
+    jsDelivr 的 `@main` 是 CDN，缓存 `s-maxage=43200`（**12 小时**），而且 purge 常常报告完成却
+    不真的失效 —— 刚发的版本它会一直返回旧的。以前只用它一个源，于是新版本发布后点「检查更新」
+    会**误报「已是最新版」**（v1.66 修）。raw.githubusercontent 是 GitHub 自己的源，基本实时。
+    """
     out = {"ok": False, "has_update": False, "latest": "", "notes": "",
            "page_url": RELEASES_PAGE, "setup_url": "", "sha256": "",
-           "mandatory": False, "error": "", "url": ""}
-    murl = str(url or manifest_url())
-    out["url"] = murl
-    try:
-        raw = _fetch(murl, timeout)
-        man = json.loads(raw)
-        if not isinstance(man, dict):
-            raise ValueError("清单格式不对")
-    except urllib.error.HTTPError as e:
-        out["error"] = "清单拉不到（HTTP %s）：%s" % (e.code, murl)
-        return out
-    except Exception as e:
-        out["error"] = "检查更新失败：%s" % str(e)[:120]
-        return out
-    latest = str(man.get("version") or "").strip()
-    if not latest:
-        out["error"] = "清单里没写 version"
+           "mandatory": False, "error": "", "url": "", "sources": []}
+    errs, best_u, best_m = [], "", None
+    for u in manifest_urls(url):
+        try:
+            man = json.loads(_fetch(u, timeout))
+            if not isinstance(man, dict):
+                raise ValueError("清单格式不对")
+            v = str(man.get("version") or "").strip()
+            if not v:
+                raise ValueError("清单里没写 version")
+        except urllib.error.HTTPError as e:
+            errs.append("%s（HTTP %s）" % (u[-38:], e.code))
+            continue
+        except Exception as e:
+            errs.append("%s（%s）" % (u[-38:], str(e)[:40]))
+            continue
+        out["sources"].append({"url": u, "version": v})
+        if best_m is None or parse_ver(v) > parse_ver(str(best_m.get("version") or "")):
+            best_u, best_m = u, man
+    if best_m is None:
+        out["error"] = "检查更新失败：清单源都拉不到（%s）" % ("；".join(errs)[:170] or "无可用源")
         return out
     out["ok"] = True
+    out["url"] = best_u
+    latest = str(best_m.get("version") or "").strip()
     out["latest"] = latest
-    out["notes"] = str(man.get("notes") or "")
-    out["page_url"] = str(man.get("page_url") or RELEASES_PAGE)
-    out["setup_url"] = str(man.get("setup_url") or "")
-    out["sha256"] = str(man.get("sha256") or "").strip().lower()
-    out["mandatory"] = bool(man.get("mandatory"))
+    out["notes"] = str(best_m.get("notes") or "")
+    out["page_url"] = str(best_m.get("page_url") or RELEASES_PAGE)
+    out["setup_url"] = str(best_m.get("setup_url") or "")
+    out["sha256"] = str(best_m.get("sha256") or "").strip().lower()
+    out["mandatory"] = bool(best_m.get("mandatory"))
     out["has_update"] = newer(latest, current)
     return out
 
