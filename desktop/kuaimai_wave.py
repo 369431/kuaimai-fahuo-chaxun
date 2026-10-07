@@ -187,9 +187,13 @@ def _post_many(c, path, forms, ctype="application/x-www-form-urlencoded", timeou
 def _erp_err(text):
     """识别 ERP 的「会话异常 / 未登录」等错误响应，返回给用户看的原因；正常返回 ''。
 
-    ERP 错误响应形如：{"clueId":"null","data":{},"message":"会话异常，请重新登录","result":901}
-    —— 正常业务响应**没有 result 字段**（data 才是列表）。以前这里不检查，会把错误当成
-    「0 个候选订单」，界面上显示成「没有可成波订单」，让人误判成真没单。
+    ⚠ ERP **正常**返回也带 `result`，而且 `result=1` 就是**成功码**：
+        {"clueId":"...","data":[{…25 单…}],"qTime":714,"result":1}
+    只有出错（登录失效）才长这样：
+        {"clueId":"null","data":{},"message":"会话异常，请重新登录","result":901}
+
+    所以判定**以 message 为主**，result 只作辅助 —— v1.61 第一版把「result 不是 0/空」一律当错误，
+    结果把 result=1 的正常响应误判成「ERP 返回错误：result=1」，扫码全废（v1.64 修）。
     """
     try:
         j = json.loads(text or "")
@@ -199,16 +203,19 @@ def _erp_err(text):
         return ""
     res = j.get("result")
     msg = str(j.get("message") or "").strip()
+    data = j.get("data")
+    has_data = isinstance(data, (list, dict)) and bool(data)
     low = msg.lower()
     login_issue = any(k in msg for k in ("会话异常", "重新登录", "未登录", "登录超时", "登录失效")) \
         or ("session" in low) or ("login" in low)
-    is_err = login_issue or (res not in (None, 0, "0", ""))
-    if not is_err:
-        return ""
-    why = msg or ("result=%s" % res)
     if login_issue:
-        return "ERP 登录已失效（%s）—— 请在软件里点「登录 ERP」重新登录后再试" % why
-    return "ERP 返回错误：%s" % why
+        return ("ERP 登录已失效（%s）—— 请在软件里点「登录 ERP」重新登录后再试"
+                % (msg or ("result=%s" % res)))
+    if msg and not has_data:
+        return "ERP 返回错误：%s" % msg
+    if (not msg) and (not has_data) and res not in (None, 0, 1, "0", "1", ""):
+        return "ERP 返回错误：result=%s" % res
+    return ""
 
 
 def _split_raw(res, code):
