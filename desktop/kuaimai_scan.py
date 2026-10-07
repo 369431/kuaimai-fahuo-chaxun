@@ -3502,6 +3502,11 @@ class _WebHandler(BaseHTTPRequestHandler):
                 # 后来者**排队等待**（最多 180 秒）而不是被直接挡掉；真的等太久才让重试。
                 _t_wait = time.time()
                 if not _wave_enter(180):
+                    try:
+                        print_jobs_log("生成波次：排队超时（等了 %.1fs 仍没轮到），已让用户重试"
+                                       % (time.time() - _t_wait))
+                    except Exception:
+                        pass
                     return self._json({"error": "前面还有波次在生成（排队超过 3 分钟），请稍后再试",
                                        "busy": True})
                 _waited = time.time() - _t_wait
@@ -3532,10 +3537,11 @@ class _WebHandler(BaseHTTPRequestHandler):
                         out["ok"] = False
                         out["error"] = out.get("verify_error") or "ERP 未建出波次（未确认），请重试"
                     try:
-                        print_jobs_log("生成波次：快递=%s sids=%d save=%s 波次=%s created=%s" % (
+                        print_jobs_log("生成波次：快递=%s sids=%d save=%s 波次=%s created=%s%s" % (
                             out.get("carrier") or "-",
                             len(out.get("sids") or []), out.get("save_ok"),
-                            out.get("wave_code") or "-", out.get("created")))
+                            out.get("wave_code") or "-", out.get("created"),
+                            (" 排队等待=%.1fs" % _waited) if _waited > 1 else ""))
                     except Exception:
                         pass
                     return self._json(out)
@@ -3560,22 +3566,27 @@ class _WebHandler(BaseHTTPRequestHandler):
                     import kuaimai_wave as wv
                     # v1.46c 一键拣完也走同一个 ERP 自动化浏览器 → 与成波共用同一把锁（写入才排队）
                     _lk_hold = False
+                    _t_wait2 = time.time()
                     if do_write:
-                        if not _WAVE_CREATE_LOCK.acquire(timeout=180):
+                        if not _wave_enter(180):
+                            try:
+                                print_jobs_log("一键拣完：排队超时（等了 %.1fs 仍没轮到），已让用户重试"
+                                               % (time.time() - _t_wait2))
+                            except Exception:
+                                pass
                             return self._json({"error": "前面还有波次在生成/拣完（排队超过 3 分钟），"
                                                         "请稍后再试", "busy": True})
                         _lk_hold = True
+                    _waited2 = (time.time() - _t_wait2) if _lk_hold else 0.0
                     try:
                         out = wv.finish_pick(api_call_authed, wid, do_write=do_write)
                     finally:
                         if _lk_hold:
-                            try:
-                                _WAVE_CREATE_LOCK.release()
-                            except Exception:
-                                pass
+                            _wave_leave()
                     try:
-                        print_jobs_log("一键拣完：波次=%s 写入=%s ok=%s 状态=%s" % (
-                            wid, do_write, out.get("ok"), out.get("status_cn") or "-"))
+                        print_jobs_log("一键拣完：波次=%s 写入=%s ok=%s 状态=%s%s" % (
+                            wid, do_write, out.get("ok"), out.get("status_cn") or "-",
+                            (" 排队等待=%.1fs" % _waited2) if _waited2 > 1 else ""))
                     except Exception:
                         pass
                     return self._json(out)
