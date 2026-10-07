@@ -22,6 +22,10 @@ DEFAULT_MANIFEST = ("https://cdn.jsdelivr.net/gh/369431/kuaimai-fahuo-chaxun@mai
 # 备用源：jsDelivr 不可达时再试 raw（国内 jsDelivr 通常能通，raw.githubusercontent 经常被阻）
 FALLBACK_MANIFEST = ("https://raw.githubusercontent.com/369431/kuaimai-fahuo-chaxun/main/version.json")
 RELEASES_PAGE = "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest"
+# 最实时的源：GitHub 官方 API（实测发布后**立刻**能拿到 tag，完全不受 CDN 缓存影响；
+# 缺点：未认证时每 IP 每小时 60 次 —— 检查更新偶尔点一下，够用）
+API_LATEST = "https://api.github.com/repos/369431/kuaimai-fahuo-chaxun/releases/latest"
+API_ACCEPT = "application/vnd.github+json"
 
 # 走系统/环境代理：ProxyHandler({}) 是写死“不用代理”，客户机挂了梯子/系统代理反而更下不来
 import ssl as _ssl
@@ -130,19 +134,62 @@ def _fetch(url, timeout=10, binary=False):
     return data if binary else data.decode("utf-8", "replace")
 
 
+def _api_release(timeout=10):
+    """GitHub 官方 API 拿最新 Release（最实时）。
+
+    返回 {"version","notes","page_url","setup_url","sha256"}；失败返回 None。
+    安装包地址直接用它给的 browser_download_url（不靠猜文件名）。
+    sha256 从 Release 说明里找（发版脚本会写一行 `sha256: <64位>`）；找不到就留空 → 下载不校验。
+    """
+    try:
+        req = urllib.request.Request(API_LATEST, headers={
+            "User-Agent": "kuaimai-update/1", "Accept": API_ACCEPT})
+        with _open(req, timeout=float(timeout or 10)) as r:
+            j = json.loads(r.read().decode("utf-8", "replace"))
+        if not isinstance(j, dict):
+            return None
+        tag = str(j.get("tag_name") or "").strip()
+        if not tag:
+            return None
+        assets = [a for a in (j.get("assets") or []) if isinstance(a, dict)]
+        setup = ""
+        for a in assets:                       # 优先 *setup*.exe
+            n = str(a.get("name") or "").lower()
+            if n.endswith(".exe") and "setup" in n:
+                setup = str(a.get("browser_download_url") or "")
+                break
+        if not setup:
+            for a in assets:
+                if str(a.get("name") or "").lower().endswith(".exe"):
+                    setup = str(a.get("browser_download_url") or "")
+                    break
+        body = str(j.get("body") or "")
+        m = re.search(r"(?i)sha256[^0-9a-f]{0,12}([0-9a-f]{64})", body)
+        # 说明末尾那行 `sha256: …` 是给客户端校验用的，别显示在「这版改了什么」里
+        body = re.sub(r"\n*-{3,}\s*\n\s*sha256\s*:?\s*[0-9a-f]{64}\s*$", "", body, flags=re.I).strip()
+        return {"version": tag, "notes": body,
+                "page_url": str(j.get("html_url") or RELEASES_PAGE),
+                "setup_url": setup, "sha256": (m.group(1).lower() if m else "")}
+    except Exception:
+        return None
+
+
 def check(current, url=None, timeout=10):
     """查有没有新版 → dict(ok, has_update, latest, notes, page_url, setup_url, sha256, mandatory, error)。
 
-    ⚠ 会**同时问多个清单源、取版本号最高**的那个：
-    jsDelivr 的 `@main` 是 CDN，缓存 `s-maxage=43200`（**12 小时**），而且 purge 常常报告完成却
-    不真的失效 —— 刚发的版本它会一直返回旧的。以前只用它一个源，于是新版本发布后点「检查更新」
-    会**误报「已是最新版」**（v1.66 修）。raw.githubusercontent 是 GitHub 自己的源，基本实时。
+    ⚠ 会**同时问多个源、取版本号最高**的那个 —— 因为每个源都有自己的缓存：
+      · jsDelivr 的 `@main` 是 CDN，`s-maxage=43200`（**12 小时**），purge 还常常报告完成却不真失效；
+      · raw.githubusercontent 是 GitHub 自己的 CDN，基本实时但偶尔超时、也有几分钟延迟；
+      · GitHub 官方 API 最实时（发版后立刻可见）。
+    以前只用 jsDelivr 一个源，于是新版发布后点「检查更新」会**误报「已是最新版」**（v1.67 修）。
+    版本相同的多个源里，优先用**清单源**（它带 sha256，能校验下载）。
     """
     out = {"ok": False, "has_update": False, "latest": "", "notes": "",
            "page_url": RELEASES_PAGE, "setup_url": "", "sha256": "",
            "mandatory": False, "error": "", "url": "", "sources": []}
-    errs, best_u, best_m = [], "", None
-    for u in manifest_urls(url):
+    errs, cands = [], []
+    urls = [str(url)] if url else manifest_urls()
+    for u in urls:
         try:
             man = json.loads(_fetch(u, timeout))
             if not isinstance(man, dict):
@@ -157,20 +204,34 @@ def check(current, url=None, timeout=10):
             errs.append("%s（%s）" % (u[-38:], str(e)[:40]))
             continue
         out["sources"].append({"url": u, "version": v})
-        if best_m is None or parse_ver(v) > parse_ver(str(best_m.get("version") or "")):
-            best_u, best_m = u, man
-    if best_m is None:
+        cands.append((v, {"version": v,
+                          "notes": str(man.get("notes") or ""),
+                          "page_url": str(man.get("page_url") or RELEASES_PAGE),
+                          "setup_url": str(man.get("setup_url") or ""),
+                          "sha256": str(man.get("sha256") or "").strip().lower(),
+                          "mandatory": bool(man.get("mandatory")),
+                          "src": u}))
+    if not url:                                 # 只在「正常检查」时问 API；调试指定 url 时只认它
+        api = _api_release(timeout)
+        if api:
+            out["sources"].append({"url": API_LATEST, "version": api["version"]})
+            cands.append((api["version"], dict(api, mandatory=False, src=API_LATEST)))
+        else:
+            errs.append("api.github.com（拉不到）")
+    if not cands:
         out["error"] = "检查更新失败：清单源都拉不到（%s）" % ("；".join(errs)[:170] or "无可用源")
         return out
+    # 取版本最高的那个；版本相同时 max() 返回**先出现的**（清单源在前 → 优先用带 sha256 的）
+    _v, best = max(cands, key=lambda x: parse_ver(x[0]))
     out["ok"] = True
-    out["url"] = best_u
-    latest = str(best_m.get("version") or "").strip()
+    out["url"] = str(best.get("src") or "")
+    latest = str(best.get("version") or "").strip()
     out["latest"] = latest
-    out["notes"] = str(best_m.get("notes") or "")
-    out["page_url"] = str(best_m.get("page_url") or RELEASES_PAGE)
-    out["setup_url"] = str(best_m.get("setup_url") or "")
-    out["sha256"] = str(best_m.get("sha256") or "").strip().lower()
-    out["mandatory"] = bool(best_m.get("mandatory"))
+    out["notes"] = str(best.get("notes") or "")
+    out["page_url"] = str(best.get("page_url") or RELEASES_PAGE)
+    out["setup_url"] = str(best.get("setup_url") or "")
+    out["sha256"] = str(best.get("sha256") or "").strip().lower()
+    out["mandatory"] = bool(best.get("mandatory"))
     out["has_update"] = newer(latest, current)
     return out
 

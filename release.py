@@ -73,14 +73,17 @@ def main():
     print("资源：%s（%.1f MB）\nsha256：%s" % (asset, size / 1048576.0, digest))
 
     # 2) 发布 Release（已存在就覆盖那个资源）
+    #    说明里固定带一行 `sha256: <64位>` —— 客户端能从 **GitHub 官方 API** 读到它：
+    #    即使清单还被 CDN 缓存着（jsDelivr 最长 12 小时），也能校验下载下来的安装包。
+    notes = a.notes or ("快麦扫码查询 %s" % ver)
+    nf = os.path.join(os.environ.get("TEMP", "."), "km_release_notes.md")
+    io.open(nf, "w", encoding="utf-8").write("%s\n\n%s\n\n---\nsha256: %s\n" % (ver, notes, digest))
     rc, out = run(["gh", "release", "view", ver, "--repo", GH_REPO])
     if rc == 0:
+        run(["gh", "release", "edit", ver, "--repo", GH_REPO, "--notes-file", nf])
         rc2, out2 = run(["gh", "release", "upload", ver, asset, "--repo", GH_REPO, "--clobber"])
         print("已存在 %s，上传/覆盖资源：%s" % (ver, "ok" if rc2 == 0 else out2))
     else:
-        notes = a.notes or ("快麦扫码查询 %s" % ver)
-        nf = os.path.join(os.environ.get("TEMP", "."), "km_release_notes.md")
-        io.open(nf, "w", encoding="utf-8").write("%s\n\n%s\n" % (ver, notes))
         rc2, out2 = run(["gh", "release", "create", ver, asset, "--repo", GH_REPO,
                          "--title", ver, "--notes-file", nf])
         print("建 Release：%s" % ("ok" if rc2 == 0 else out2))
