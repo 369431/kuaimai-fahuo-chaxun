@@ -3536,6 +3536,17 @@ class _WebHandler(BaseHTTPRequestHandler):
                     elif not out.get("created"):
                         out["ok"] = False
                         out["error"] = out.get("verify_error") or "ERP 未建出波次（未确认），请重试"
+                    # v1.58：成波成功 → 把这些编码标记「已生波次」：现货可发先隐藏（避免重复拣货），
+                    # **只有下次全量拉取**（full_at 变了）才恢复显示。
+                    try:
+                        if out.get("ok"):
+                            _codes = [str((it or {}).get("code") or "").strip() for it in items]
+                            _codes = [c for c in _codes if c]
+                            if _codes:
+                                self.app.mark_waved(_codes)
+                                out["waved_hidden"] = _codes
+                    except Exception:
+                        pass
                     try:
                         print_jobs_log("生成波次：快递=%s sids=%d save=%s 波次=%s created=%s%s" % (
                             out.get("carrier") or "-",
@@ -3678,6 +3689,18 @@ class _WebHandler(BaseHTTPRequestHandler):
                 left = app.mark_sent(body.get("codes") or body.get("code") or [],
                                      undo=bool(body.get("undo")))
                 return self._json({"ok": True, "sent": len(left)})
+            if path == "/api/stock/waved":
+                # 现货可发：标记/清空「已生波次」（生成波次后隐藏；**全量拉取后自动清空**）
+                deny = self._need(me, "wave.view")
+                if deny:
+                    return deny
+                app = self.app
+                if body.get("clear"):
+                    app.clear_waved()
+                    return self._json({"ok": True, "waved": 0})
+                left = app.mark_waved(body.get("codes") or body.get("code") or [],
+                                      undo=bool(body.get("undo")))
+                return self._json({"ok": True, "waved": len(left)})
             if path == "/api/stock/canprint":
                 # 网页现货可发点「可发」并输入数量 → 写一条扫码日志（可打单数量 = 输入值）
                 deny = self._need(me, "stock.canprint")
@@ -4385,6 +4408,7 @@ class ScanApp:
         self.index = {}                 # 编码 → {"qty","orders","main"}
         self.stat = {"total_orders": 0, "included_orders": 0}
         self.loaded_at = "未加载"
+        self.full_at = "未加载"          # 只在**全量拉取**时更新（已生波次标记按它清空）
         self.shelf_map = {}             # 编码 → {"shelf","all","bins"}
         self.shelf_stat = {}
         self.shelf_at = "未加载"
@@ -5019,6 +5043,49 @@ class ScanApp:
         self._sent_set().clear()
         return []
 
+    def _waved_set(self):
+        """「已生波次」标记：生成波次后先从现货可发里藏起来（避免重复拣货）。
+
+        **只有下次全量拉取**（full_at 变了）才自动清空 → 那时又能查到（数据已更新）。
+        """
+        cur = getattr(self, "full_at", None)
+        old = getattr(self, "_waved_ver", None)
+        if old is not None and cur and cur != old:
+            self._waved = set()
+        if not hasattr(self, "_waved"):
+            self._waved = set()
+        if cur:
+            self._waved_ver = cur
+        return self._waved
+
+    def mark_waved(self, codes, undo=False):
+        if self.remote:
+            ok, res = self._remote_api("/api/stock/waved", "POST",
+                                       body={"codes": list(codes or []) if not isinstance(codes, str) else [codes],
+                                             "undo": bool(undo)})
+            if not ok or not isinstance(res, dict):
+                return []
+            return []
+        s2 = self._waved_set()
+        if isinstance(codes, str):
+            codes = [codes]
+        for c in (codes or []):
+            c = str(c).strip()
+            if not c:
+                continue
+            if undo:
+                s2.discard(c)
+            else:
+                s2.add(c)
+        return sorted(s2)
+
+    def clear_waved(self):
+        if self.remote:
+            ok, res = self._remote_api("/api/stock/waved", "POST", body={"clear": True})
+            return []
+        self._waved_set().clear()
+        return []
+
     # ---------- 改库存（盘点接口，按货位改数量） ----------
     def _adjust_conn(self):
         conn = get_conn()
@@ -5160,6 +5227,10 @@ class ScanApp:
             sent = self._sent_set()
         except Exception:
             sent = set()
+        try:
+            waved = self._waved_set()
+        except Exception:
+            waved = set()
         kw = str(kw or "").strip().upper()
         rows = []
         for code, v in items.items():
@@ -5194,6 +5265,7 @@ class ScanApp:
                          "uo": uo, "up": up, "p1": prio,
                          "ue": {k: int(v2 or 0) for k, v2 in ((v.get("ue") or {}).items())},
                          "sent": 1 if str(code) in sent else 0,
+                         "waved": 1 if str(code) in waved else 0,
                          "b": str(v.get("b") or ""),
                          "bl": v.get("bl") or [],
                          "f": free, "l": int(v.get("l") or 0)})
@@ -5218,6 +5290,7 @@ class ScanApp:
                            "up": sum(r["up"] for r in rows),
                            "prio": sum(r["p1"] for r in rows),
                            "sent": sum(r["sent"] for r in rows),
+                           "waved": sum(r.get("waved", 0) for r in rows),
                            "free": sum(r["f"] for r in rows)},
                 "loaded_at": self.loaded_at, "shelf_at": self.shelf_at,
                 "codes": len((self.web_index_payload().get("items") or {}))}
@@ -7716,6 +7789,7 @@ class ScanApp:
         self.last_full_ts = time.time()
         self._store_version = getattr(self, "_store_version", 0) + 1
         self.loaded_at = now_gmt8()
+        self.full_at = self.loaded_at      # 全量拉取 → 已生波次标记这时才清空
         self.rebuild_local()
         self._save_orders_meta()
         self._syncing = False

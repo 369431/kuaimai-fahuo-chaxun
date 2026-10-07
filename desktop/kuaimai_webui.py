@@ -3273,49 +3273,6 @@ function load(){
 
 $('refresh').onclick = function(e){ if(e) e.preventDefault(); load(); return false; };
 
-/* ---------------- 取消波次：先只读预览 → 再确认提交（不可撤销） ---------------- */
-function cxPreview(wid, wcode){
-  $('recBody').insertAdjacentHTML('beforeend',
-    '<tr id="cxRow"><td colspan="8"><div id="cxBox"><span class="muted">正在只读回读波次…</span></div></td></tr>');
-  $('cxBox').scrollIntoView({behavior:'smooth', block:'center'});
-  fetch(bust(withSid('/api/wave/cancel')), {method:'POST', cache:'no-store',
-      headers:{'Content-Type':'application/json'}, body:JSON.stringify({wave_id:wid, confirm:false})})
-    .then(function(r){ if(r.status === 401){ location.href = '/login'; throw new Error('请重新登录'); } return r.json(); })
-    .then(function(d){
-      if(!d || d.ok === false){ $('cxBox').innerHTML = '<span class="badtext">' + esc((d&&d.error)||'预览失败') + '</span>'; return; }
-      let h = '<div><b>波次 ' + esc(d.wave_code || wcode || wid) + '</b>'
-         + '　状态 ' + esc(d.status_cn || d.status || '?')
-         + '　件数 ' + esc(d.itemCount == null ? '-' : d.itemCount)
-         + '　' + (d.picked ? '已有拣货记录' : '未拣') + '</div>';
-      h += '<div class="muted">将执行：' + esc(d.will_execute || ('取消波次(waveIds=' + wid + ')'))
-         + '（只读预览，未提交）</div>';
-      if(d.warning) h += '<div class="badtext">' + esc(d.warning) + '</div>';
-      h += '<div class="bar" style="margin-top:6px"><button class="can" id="cxGo">确认取消波次（不可撤销）</button>'
-         + '<button class="can" id="cxCancel">取消</button></div>';
-      $('cxBox').innerHTML = h;
-      $('cxCancel').onclick = function(){ const r = $('cxRow'); if(r) r.remove(); };
-      $('cxGo').onclick = function(){
-        if(!confirm('确认取消波次 ' + (wcode || wid) + '？\n订单会从波次里踢出（回到待发货/待成波），不可撤销。')) return;
-        $('cxBox').innerHTML = '<span class="muted">正在提交取消…</span>';
-        fetch(bust(withSid('/api/wave/cancel')), {method:'POST', cache:'no-store',
-            headers:{'Content-Type':'application/json'}, body:JSON.stringify({wave_id:wid, confirm:true})})
-          .then(function(r){ return r.json(); })
-          .then(function(d2){
-            if(d2 && d2.ok){
-              $('cxBox').innerHTML = '<div style="color:#1B7F35"><b>已取消</b> '
-                + esc(d2.wave_code || wid) + '　' + esc(d2.status_cn || '已取消') + '</div>';
-              setTimeout(load, 1500);
-            } else {
-              $('cxBox').innerHTML = '<span class="badtext">未确认取消：' + esc((d2&&d2.error)||'未知') + '</span>'
-                + '<div class="muted">' + esc((d2&&d2.status_cn)||'') + '</div>';
-            }
-          })
-          .catch(function(e){ $('cxBox').innerHTML = '<span class="badtext">请求失败：' + esc(e.message) + '</span>'; });
-      };
-    })
-    .catch(function(e){ $('cxBox').innerHTML = '<span class="badtext">预览失败：' + esc(e.message) + '</span>'; });
-}
-
 /* ---------------- 一键拣完：先只读回读预览 → 再确认提交（不可撤销） ---------------- */
 function fwPreview(wid, wcode){
   $('recBody').insertAdjacentHTML('beforeend',
@@ -3361,8 +3318,6 @@ function fwPreview(wid, wcode){
 $('recBody').addEventListener('click', function(e){
   const b = e.target && e.target.closest ? e.target.closest('button[data-fw]') : null;
   if(b) fwPreview(b.getAttribute('data-fw'), b.getAttribute('data-fwc'));
-  const b2 = null;  /* 取消波次按钮已按需求撤掉 */
-  if(b2) cxPreview(b2.getAttribute('data-cw'), b2.getAttribute('data-cwc'));
 });
 $('home').href = withSid('/');
 window.addEventListener('focus', load);
