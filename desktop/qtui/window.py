@@ -24,8 +24,9 @@ from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFileDialog,
                                QFrame, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
-                               QLineEdit, QMenu, QMessageBox, QPushButton, QTableWidget,
-                               QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
+                               QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
+                               QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout,
+                               QWidget)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from qtui import ui as U            # noqa: E402
@@ -274,6 +275,11 @@ class LoginScreen(QDialog):
         self.b_setup.setToolTip("这台电脑是主机、还没建管理员账号时点这里")
         self.b_setup.clicked.connect(self.do_setup)
         row.addWidget(self.b_setup)
+        # ★ 登录页也要能「检查更新」：更新跟登录没关系，没登录也该能查、能下。
+        b_upd = U.GlowButton("检查更新")
+        b_upd.setToolTip("看看有没有新版本（不用登录也能查）")
+        b_upd.clicked.connect(lambda *a: self.do_check_update())
+        row.addWidget(b_upd)
         row.addStretch(1)
         self.btn = U.GlowButton("登  录", primary=True)
         self.btn.setMinimumHeight(46)
@@ -348,6 +354,30 @@ class LoginScreen(QDialog):
             return
         self._save(sess)
         self.accept()
+
+    def do_check_update(self):
+        """检查更新（登录页 / 主界面共用同一个窗）。
+
+        ★ 登录页没有 self.api（它只有 base），所以这里一律用 getattr 兜底 ——
+          以前直接取 self.api 会 AttributeError，点一下就弹「打不开检查更新窗」。
+        """
+        cur = ""
+        try:
+            cur = getattr(getattr(self, "api", None), "ver", "") or ""
+        except Exception:
+            cur = ""
+        if not cur:
+            try:
+                import kuaimai_client as _kc
+                cur = str(getattr(_kc, "APP_VER", "") or "")
+            except Exception:
+                cur = ""
+        try:
+            d = CheckUpdateDialog(getattr(self, "api", None),
+                                  getattr(self, "theme", "light"), self, current=cur)
+            d.exec()
+        except Exception as e:
+            QMessageBox.warning(self, "检查更新", "打不开检查更新窗：%s" % str(e)[:200])
 
     def do_setup(self):
         """首次设置管理员（只有主机本机能做）。"""
@@ -496,6 +526,8 @@ class Desktop(QWidget):
             "打开数据目录": lambda *a: self.do_action("open_dir"),
             "打开数据文件": lambda *a: self.do_action("open_db"),
             "关于": lambda *a: self.do_about(),
+            # ★ 检查更新也用电脑版自己的窗（以前调主程序弹旧版更新窗）
+            "检查更新": lambda *a: self.do_check_update(),
         }
         for label, name in self._ACTS.items():
             if name:
@@ -503,7 +535,6 @@ class Desktop(QWidget):
             else:
                 out[label] = (lambda *a: self.do_log())
         # 能用通用表格接口拿到数据的，走 Qt 表格窗（放在 _ACTS 之后，好覆盖同名项）
-        out["API 设置"] = (lambda *a: self.do_api_settings())
         out["现货可发"] = (lambda *a: self._open_dlg(StockDialog, "现货可发"))
         # 「按条件筛选（本地）」= 旧版那个带筛选的现货可发窗，跟「现货可发」是同一个功能
         out["按条件筛选（本地）"] = (lambda *a: self._open_dlg(StockDialog, "按条件筛选"))
@@ -677,10 +708,12 @@ class Desktop(QWidget):
         #   即**拣货/操作这个波次的人**，不是验货人（打包账号只在操作日志里，
         #   而按订单号查那个日志会 ERP 服务端超时，暂时拿不到 —— 别把列名写错误导人）。
         self.t_wave = QTableWidget(0, 8)
+        # ★「实发/订单」要给足宽度：内容是「179 / 180」这种，加上表头，
+        #   原来 90px 会被截断成「…」（用户反馈过）。所以表头写短一点 + 列宽 110。
         self.t_wave.setHorizontalHeaderLabels(
             ["波次号", "生成时间", "拣货人", "件数", "生成账号", "拣货数量",
-             "实发订单数", "波次状态"])
-        self._tbl_setup(self.t_wave, widths=[110, 150, 100, 60, 90, 80, 90, 100])
+             "实发/订单", "波次状态"])
+        self._tbl_setup(self.t_wave, widths=[110, 150, 100, 60, 90, 80, 110, 100])
         self.t_wave.cellClicked.connect(self.on_wave_click)
         # ★ 顺序按用户要求调换：波次记录在前，扫码记录在后
         self.tabs.addTab(self.t_wave, "波次记录")
@@ -1403,25 +1436,19 @@ class Desktop(QWidget):
                 pick_txt = str(picked)
                 if plan not in (None, "", picked):
                     pick_txt = "%s / %s" % (picked, plan)
-            # 实发订单数：拿这个波次的 sids 去对当天的发货日志缓存
-            #   · 有 sids 且有缓存 → 算出数字
-            #   · 有 sids 但缓存还没扫完 → 「…」（十几秒后自己出来）
-            #   · 压根没有 sids（平台只给未完成波次的订单明细）→ 算不出来，显示「—」
-            ship_txt = ""
+            # 「实发/订单」= 该波次**已打印的订单数 / 订单总数**
+            # ★ 数据来自服务端的 printed 映射（走 ERP「波次管理→点波次号」那个接口读 printTimes），
+            #   已完成/未完成都能算。这里以前还在用旧的「当日发货日志 + sids」逻辑，
+            #   结果那一列永远出不来数字（用户反馈"只能看到…"）。现在统一走 _ship_cell_text。
+            ship_txt = self._ship_cell_text(w) or "—"
             ship_tip = ""
-            day = (ms_to_text(ts) or "")[:10]
-            sids = w.get("sids") or []
-            if not sids:
-                ship_txt = "—"
-                ship_tip = ("平台不返回这个波次的订单明细（它只给未完成波次），"
-                            "所以算不出实发订单数")
-            elif day and day in ship:
-                m = ship[day]
-                hit = [s for s in sids if str(s) in m]
-                ship_txt = str(len(hit))
+            _pr = (getattr(self, "_printed", {}) or {}).get(str(w.get("wave_code") or "")) or {}
+            if not _pr:
+                ship_tip = "还没读到这个波次的订单（点一下顶上的「刷 新」或稍等几秒）"
+            elif _pr.get("n") is None:
+                ship_tip = "这个波次的订单暂时读不到（浏览器未就绪或 ERP 未登录）"
             else:
-                ship_txt = "…"
-                ship_tip = "正在后台扫这一天的发货日志，十几秒后自动出来"
+                ship_tip = ("已打印 %s 单 / 订单共 %s 单" % (_pr.get("n"), _pr.get("total") or "?"))
             vals = [w.get("wave_code", "-"), ms_to_text(ts) or str(ts or ""),
                     checker or "—", qty, who, pick_txt, ship_txt, st]
             for c in range(8):
@@ -1649,6 +1676,144 @@ class Desktop(QWidget):
                                    r.get("pending", r.get("pieces", "")),
                                    r.get("lock", ""), r.get("orders", "")]):
                 self.t_res.setItem(0, c, QTableWidgetItem("" if v is None else str(v)))
+
+
+class CheckUpdateDialog(QDialog):
+    """检查更新（登录页和主界面共用）。
+
+    直接调 kuaimai_update.check()：它会同时问多个源（jsDelivr / raw / GitHub API）
+    取版本号最高的那个，避免某个 CDN 缓存导致误报「已是最新版」。
+    登录页也要能点 —— 更新跟登录没关系，没登录也该能检查。
+    """
+
+    def __init__(self, api, theme="light", parent=None, current=""):
+        super().__init__(parent)
+        self.api = api
+        self._disp = Dispatcher(self)
+        self._info = {}
+        self.setWindowTitle("检查更新")
+        self.resize(620, 460)
+        self.setStyleSheet(U.qss(U.LIGHT if theme == "light" else U.DARK))
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 14, 16, 12)
+        lay.setSpacing(8)
+
+        self.lbl_cur = QLabel("当前版本：%s" % (current or "?"))
+        self.lbl_cur.setObjectName("sect")
+        lay.addWidget(self.lbl_cur)
+        self.lbl_st = QLabel("正在检查更新…")
+        self.lbl_st.setObjectName("hint")
+        self.lbl_st.setWordWrap(True)
+        lay.addWidget(self.lbl_st)
+
+        self.txt = QPlainTextEdit()
+        self.txt.setReadOnly(True)
+        self.txt.setPlaceholderText("有新版本时，这里显示更新说明")
+        lay.addWidget(self.txt, 1)
+
+        row = QHBoxLayout()
+        self.lbl_msg = QLabel("")
+        self.lbl_msg.setObjectName("hint")
+        row.addWidget(self.lbl_msg)
+        row.addStretch(1)
+        self.b_dl = U.GlowButton("下载并安装", primary=True)
+        self.b_dl.setToolTip("下载安装包并运行安装程序")
+        self.b_dl.clicked.connect(lambda *a: self.do_download())
+        self.b_dl.setVisible(False)
+        row.addWidget(self.b_dl)
+        self.b_page = U.GlowButton("打开下载页")
+        self.b_page.clicked.connect(lambda *a: self.open_page())
+        self.b_page.setVisible(False)
+        row.addWidget(self.b_page)
+        b_again = U.GlowButton("重新检查")
+        b_again.clicked.connect(lambda *a: self.check())
+        row.addWidget(b_again)
+        b_cl = U.GlowButton("关 闭")
+        b_cl.clicked.connect(self.accept)
+        row.addWidget(b_cl)
+        lay.addLayout(row)
+        QTimer.singleShot(150, self.check)
+
+    def check(self):
+        self.lbl_st.setText("正在检查更新…")
+        self.txt.setPlainText("")
+        self.b_dl.setVisible(False)
+        self.b_page.setVisible(False)
+        self._info = {}
+
+        def work():
+            info = {"ok": False, "error": "缺少 kuaimai_update 模块"}
+            try:
+                import kuaimai_update as upd
+                info = upd.check(self.lbl_cur.text().replace("当前版本：", "").strip())
+            except Exception as e:
+                info = {"ok": False, "error": str(e)[:180]}
+            self._disp.post(lambda: self.fill(info))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def fill(self, info):
+        self._info = info or {}
+        if not self._info.get("ok"):
+            self.lbl_st.setText("检查失败：%s" % str(self._info.get("error") or "未知原因")[:160])
+            self.lbl_st.setStyleSheet("color:#c62828;")
+            self.lbl_msg.setText("（可能没网，或 GitHub 访问不了）")
+            return
+        latest = str(self._info.get("latest") or "")
+        if not self._info.get("has_update"):
+            self.lbl_st.setText("已是最新版 ✓")
+            self.lbl_st.setStyleSheet("color:#1B7F35;")
+            self.txt.setPlainText("当前已经是最新版，不用更新。")
+            return
+        self.lbl_st.setText("发现新版本：%s" % latest)
+        self.lbl_st.setStyleSheet("color:#0b5394;")
+        self.txt.setPlainText(str(self._info.get("notes") or "（这次没有写更新说明）"))
+        self.b_dl.setVisible(bool(self._info.get("setup_url")))
+        self.b_page.setVisible(True)
+
+    def open_page(self):
+        url = str(self._info.get("page_url") or
+                  "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest")
+        try:
+            os.startfile(url)
+        except Exception:
+            try:
+                import subprocess
+                subprocess.Popen(["cmd", "/c", "start", "", url])
+            except Exception as e:
+                QMessageBox.warning(self, "打开失败", str(e)[:200])
+
+    def do_download(self):
+        self.lbl_msg.setText("正在下载安装包…")
+
+        def work():
+            path, err = "", ""
+            try:
+                import kuaimai_update as upd
+
+                def prog(done, total, pct):
+                    self._disp.post(lambda: self.lbl_msg.setText(
+                        "正在下载…%s" % (("%.0f%%（%.1f/%.1f MB）"
+                                          % (pct, done / 1048576.0, total / 1048576.0))
+                                         if total else "%.1f MB" % (done / 1048576.0))))
+
+                path, err = upd.download_setup(self._info, progress=prog)
+            except Exception as e:
+                path, err = "", str(e)[:150]
+            if path:
+                self._disp.post(lambda: self._launch(path))
+            else:
+                self._disp.post(lambda: self.lbl_msg.setText(
+                    "下载失败：%s（可点「打开下载页」手动下载）" % str(err)[:130]))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _launch(self, path):
+        self.lbl_msg.setText("下载完成，正在启动安装程序…")
+        try:
+            os.startfile(str(path))
+        except Exception as e:
+            QMessageBox.warning(self, "启动安装失败", "%s\n\n文件在：%s" % (str(e)[:160], path))
 
 
 class TableDialog(QDialog):
