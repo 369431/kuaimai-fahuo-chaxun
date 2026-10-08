@@ -1,0 +1,34 @@
+# -*- coding: utf-8 -*-
+"""发布 v1.61：成波排队可见 + ERP 会话失效明确提示。"""
+import os
+import sys
+
+REPO = r"C:\Users\Kerwin\Desktop\kuaimai发货查询"
+INSTALLER = r"C:\Users\Kerwin\Desktop\发布\快麦扫码查询_安装版_v1.61.exe"
+NOTES = ("两处「让你看得见真实状态」的改进。\n"
+         "\n"
+         "**① 多账号同时成波：能看到「在排队、排第几」**\n"
+         "成波是串行的（都走同一个 ERP 浏览器，必须一个一个来，最多排队等 3 分钟）。"
+         "以前等的时候页面只显示「正在挑单并成波…」，最长 3 分钟没动静，看着像卡死。"
+         "现在等的同时会实时显示：\n"
+         "· **前面还有 2 个波次在生成，已等 12 秒…**\n"
+         "· 或 正在挑单并成波…已等 6 秒（一个波次通常十几秒）\n"
+         "（排队规则没改：仍然先来后到、最多排 3 分钟。）\n"
+         "\n"
+         "**② ERP 登录失效：不再假装「没有订单」**\n"
+         "ERP 打单浏览器的登录过期时，ERP 会回一句 `会话异常，请重新登录`（result=901）。"
+         "以前程序把这个错误当成「0 个候选订单」，界面显示成「没有可成波订单」——"
+         "**看着像真没单，其实是掉登录了**。现在会明确告诉你：\n"
+         "> ERP 登录已失效（会话异常，请重新登录）—— 请在软件里点「登录 ERP」重新登录后再试\n"
+         "扫码查询、生成波次、预览 三处都会给这个提示，不会再把「没登录」误报成「没订单」。")
+
+assert os.path.isfile(INSTALLER), "安装包不存在：%s" % INSTALLER
+sys.path.insert(0, REPO)
+os.chdir(REPO)
+sys.argv = ["release.py", "--version", "v1.61", "--installer", INSTALLER, "--notes", NOTES]
+
+import release  # noqa: E402
+
+rc = release.main()
+print("\nrelease.main() returned", rc)
+sys.exit(rc)

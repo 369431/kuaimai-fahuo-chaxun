@@ -56,6 +56,14 @@ if (-not $iscc) { throw "找不到 ISCC.exe，请装 Inno Setup 6 或把它加�
 Say "[1] ISCC = $iscc"
 
 # ── 2. 重建 staging ────────────────────────────────────────────────────────────
+# -SkipPack 时先把上次的 exe 挪出来：下面要清空 staging，不挪的话"复用上次 exe"必然找不到。
+$keepDir = Join-Path $env:TEMP 'km_keep_pack'
+if ($SkipPack -and (Test-Path (Join-Path $Stage '快麦扫码查询.exe'))) {
+    if (Test-Path $keepDir) { Remove-Item $keepDir -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $keepDir | Out-Null
+    Get-ChildItem $Stage -Force | Where-Object { $_.Name -ne 'frp' -and $_.Name -ne 'kuaimai_https' } |
+        ForEach-Object { Copy-Item $_.FullName $keepDir -Recurse -Force }
+}
 if (Test-Path $Stage) { Remove-Item $Stage -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $Stage, $Out | Out-Null
 foreach ($f in Get-ChildItem (Join-Path $Here 'assets') -File) {
@@ -95,8 +103,11 @@ if (Test-Path $frpSrc) {
 
 # ── 5. PyInstaller 打主程序 ────────────────────────────────────────────────────
 if ($SkipPack) {
-    Say "[5] -SkipPack：跳过打包，沿用 staging 里现有的 exe"
-    if (-not (Test-Path (Join-Path $Stage '快麦扫码查询.exe'))) { throw "staging 里没有 快麦扫码查询.exe，不能 -SkipPack" }
+    Say "[5] -SkipPack：跳过打包，沿用上次的产物"
+    if (Test-Path $keepDir) {
+        Get-ChildItem $keepDir -Force | ForEach-Object { Copy-Item $_.FullName $Stage -Recurse -Force }
+    }
+    if (-not (Test-Path (Join-Path $Stage '快麦扫码查询.exe'))) { throw "没有可复用的 快麦扫码查询.exe，不能 -SkipPack（先整包跑一次）" }
 } else {
     Say "[5] PyInstaller 打包中…（约 15~60 秒）"
     $t0 = Get-Date
@@ -109,10 +120,20 @@ if ($SkipPack) {
     $packRc = $LASTEXITCODE
     $ErrorActionPreference = $ea
     if ($packRc -ne 0) { throw "PyInstaller 失败（退出码 $packRc）→ 看 out\pyinstaller.log" }
+    # onedir：产物在 staging\快麦扫码查询\ 里（exe + _internal）；拍平到 staging 根目录，
+    # 这样安装后的 exe 路径跟原来完全一致，快捷方式/自启脚本/数据目录都不用动。
+    $sub = Join-Path $Stage '快麦扫码查询'
     $exe = Join-Path $Stage '快麦扫码查询.exe'
+    if (Test-Path $sub) {
+        Get-ChildItem $sub -Force | ForEach-Object { Move-Item $_.FullName $Stage -Force }
+        Remove-Item $sub -Recurse -Force
+        Say "[5] onedir 产物已拍平到 staging 根目录"
+    }
     if (-not (Test-Path $exe)) { throw "PyInstaller 跑完但没看到 $exe" }
     $span = [math]::Round(((Get-Date) - $t0).TotalSeconds, 1)
-    Say ("[5] 主程序 = {0} MB（{1}s）" -f [math]::Round((Get-Item $exe).Length / 1MB, 2), $span)
+    $total = (Get-ChildItem $Stage -Recurse -File | Measure-Object Length -Sum).Sum
+    Say ("[5] 主程序 = {0} MB（{1}s），整个目录 {2} MB" -f `
+         [math]::Round((Get-Item $exe).Length / 1MB, 2), $span, [math]::Round($total / 1MB, 2))
 }
 
 # ── 6. ISCC 出安装包 ───────────────────────────────────────────────────────────

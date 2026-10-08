@@ -2899,6 +2899,95 @@ PRINT_URL = "https://erpb.superboss.cc/index.html#/trade/printv2"
 ERP_HOME_URL = "https://erpb.superboss.cc/"      # 登录 ERP 用（入口页，会自动跳到实际租户域名）
 
 
+def _automation_edge_pids():
+    """本机所有「用自动化配置目录」的 Edge 进程 pid。
+
+    为什么要它：如果自动化配置目录**已经有一个 Edge 在跑**（而且没带调试端口），
+    再 Popen 一个带 `--remote-debugging-port=9222` 的进程，Edge 只会把新标签塞进
+    已有实例、**忽略端口参数** → 9222 永远不响应 → 界面就报「浏览器启动超时」。
+    这个情况会自动把人卡死（用户实测反馈过）。
+    """
+    pids = []
+    try:
+        import subprocess as _sp
+        out = _sp.run(["powershell", "-NoProfile", "-Command",
+                       "Get-CimInstance Win32_Process -Filter \"Name='msedge.exe'\" | "
+                       "Where-Object { $_.CommandLine -like '*%s*' } | "
+                       "Select-Object -ExpandProperty ProcessId" % EDGE_PROFILE.replace("'", "''")],
+                      capture_output=True, text=True, timeout=25).stdout
+        for line in (out or "").splitlines():
+            line = line.strip()
+            if line.isdigit():
+                pids.append(int(line))
+    except Exception:
+        pass
+    return pids
+
+
+def _kill_automation_edge():
+    """关掉所有自动化配置目录的 Edge（配置目录保留 → ERP 登录状态还在）。"""
+    n = 0
+    for pid in _automation_edge_pids():
+        try:
+            import subprocess as _sp
+            _sp.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                    capture_output=True, timeout=15)
+            n += 1
+        except Exception:
+            pass
+    return n
+
+
+def _launch_erp_edge(url, minimized=False):
+    """用独立配置目录 + CDP 9222 启动 Edge，并在端口不通时自愈一次。"""
+    import subprocess as _sp
+    import time as _t
+    import urllib.request as _ur
+    exe = next((p for p in EDGE_CANDIDATES if os.path.isfile(p)), None)
+    if not exe:
+        return "no_browser", "没找到 Edge：%s" % EDGE_CANDIDATES[0]
+    try:
+        os.makedirs(EDGE_PROFILE, exist_ok=True)
+    except Exception:
+        pass
+
+    def alive():
+        try:
+            op = _ur.build_opener(_ur.ProxyHandler({}))
+            op.open("http://127.0.0.1:9222/json/version", timeout=3).read()
+            return True
+        except Exception:
+            return False
+
+    args = [exe, "--remote-debugging-port=9222", "--user-data-dir=" + EDGE_PROFILE,
+            "--no-first-run", "--no-default-browser-check"]
+    if minimized:
+        args.append("--start-minimized")
+    args.append(url)
+    try:
+        _sp.Popen(args)
+    except Exception as e:
+        return "no_browser", "启动浏览器失败：%s" % str(e)[:80]
+
+    tried_kill = False
+    for i in range(45):
+        _t.sleep(1)
+        if alive():
+            return "ok", ""
+        # 6 秒还没起来 + 发现配置目录已有 Edge（端口被忽略）→ 关掉重开一次
+        if (i >= 5) and (not tried_kill):
+            pids = _automation_edge_pids()
+            if pids:
+                tried_kill = True
+                _kill_automation_edge()
+                _t.sleep(3)
+                try:
+                    _sp.Popen(args)
+                except Exception as e:
+                    return "no_browser", "重启浏览器失败：%s" % str(e)[:80]
+    return "no_browser", "浏览器启动超时（Edge 没把调试端口 9222 打开）"
+
+
 def open_erp_browser():
     """打开/聚焦「打单浏览器」（独立配置目录 + CDP 9222）并定位到 ERP，供人工登录。
 
@@ -2908,7 +2997,6 @@ def open_erp_browser():
       no_browser   没找到 Edge / 启动超时
     注意：这里**不加 --start-minimized**（登录要看得见窗口）；窗口关掉后打单/生成波次都会不可用。
     """
-    import subprocess
     import urllib.request
 
     def alive():
@@ -2919,28 +3007,23 @@ def open_erp_browser():
         except Exception:
             return False
 
-    exe = next((p for p in EDGE_CANDIDATES if os.path.isfile(p)), None)
-    if not exe:
-        return "no_browser", "没找到 Edge：%s" % EDGE_CANDIDATES[0]
-    try:
-        os.makedirs(EDGE_PROFILE, exist_ok=True)
-    except Exception:
-        pass
     was = alive()
-    try:
-        # 同一配置目录 + 同一端口：已在跑就只是新开/聚焦一个标签并导航
-        subprocess.Popen([exe, "--remote-debugging-port=9222",
-                          "--user-data-dir=" + EDGE_PROFILE,
-                          "--no-first-run", "--no-default-browser-check", ERP_HOME_URL])
-    except Exception as e:
-        return "no_browser", "启动浏览器失败：%s" % str(e)[:80]
     if was:
+        # 已在跑：只开/聚焦一个 ERP 标签
+        try:
+            import subprocess as _sp
+            exe = next((p for p in EDGE_CANDIDATES if os.path.isfile(p)), None)
+            if exe:
+                _sp.Popen([exe, "--remote-debugging-port=9222",
+                           "--user-data-dir=" + EDGE_PROFILE,
+                           "--no-first-run", "--no-default-browser-check", ERP_HOME_URL])
+        except Exception:
+            pass
         return "ok", "打单浏览器已经在跑，已把 ERP 页面打开"
-    for _ in range(25):
-        time.sleep(1)
-        if alive():
-            return "opened", "已打开打单浏览器，请在弹出的窗口登录 ERP"
-    return "no_browser", "浏览器启动超时"
+    st, why = _launch_erp_edge(ERP_HOME_URL, minimized=False)
+    if st == "ok":
+        return "opened", "已打开打单浏览器，请在弹出的窗口登录 ERP"
+    return "no_browser", why or "浏览器启动超时"
 
 
 def ensure_browser(auto_start=True):
@@ -2969,20 +3052,11 @@ def ensure_browser(auto_start=True):
         exe = next((p for p in EDGE_CANDIDATES if os.path.isfile(p)), None)
         if not (exe and auto_start):
             return "no_browser", "没找到 Edge（或未允许自动启动），请手动打开打单浏览器"
-        try:
-            os.makedirs(EDGE_PROFILE, exist_ok=True)
-            subprocess.Popen([exe, "--remote-debugging-port=9222",
-                              "--user-data-dir=" + EDGE_PROFILE,
-                              "--start-minimized",          # 最小化启动（无头模式实测打不出纸，故不用）
-                              "--no-first-run", "--no-default-browser-check", PRINT_URL])
-        except Exception as e:
-            return "no_browser", "启动浏览器失败：%s" % str(e)[:80]
-        for _ in range(25):
-            time.sleep(1)
-            if alive():
-                break
-        else:
-            return "no_browser", "浏览器启动超时"
+        # ★ 走统一启动器：它会在「配置目录已有 Edge、调试端口被忽略」时自动关掉重开，
+        #   并给足 45 秒 —— 以前固定等 25 秒就报「浏览器启动超时」弹窗（用户反馈很烦）。
+        st, why = _launch_erp_edge(PRINT_URL, minimized=True)
+        if st != "ok":
+            return "no_browser", why or "浏览器启动超时"
     href = ""
     last = ""
     for _ in range(3):                     # 页面刚启动时可能还没就绪 → 重试几次

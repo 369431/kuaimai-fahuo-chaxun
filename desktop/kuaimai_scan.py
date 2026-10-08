@@ -201,6 +201,7 @@ TOTAL_LOOKBACK_DAYS = 3     # 估算总数时「待审核」向前回溯天数�
 
 # 全量拉取并发参数（实测 6 线程吞吐约为单线程的 3.7 倍）
 PARALLEL_WORKERS = 4        # 并发线程数（过高容易触发 429 限流）
+PAGE_WORKERS = 6            # 单个时间窗内**并行翻页**的线程数（同样别太高，防限流）
 CHUNK_HOURS = 6             # 时间窗大小（小时）
 MAX_LOOKBACK_DAYS = 90      # 最多回溯天数
 EMPTY_STOP = 4              # 连续 N 个空窗口即停止回溯
@@ -280,11 +281,20 @@ def api_call(method, business, session, timeout=40):
 
 
 def load_json(path, default=None):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return default
+    """读 JSON。★ 要能容忍带 BOM 的文件（utf-8-sig）。
+
+    为什么：Windows 上用记事本/PowerShell(Set-Content)/某些工具写出来的 UTF-8
+    会带 BOM。过去这里只按 utf-8 读，遇到 BOM 直接抛异常 → 落到 default={} →
+    **用户的配置被当成"没配过"，整份设置静默重置**（实测踩过一次）。
+    多试一种编码，代价几乎为零，能保住用户的设置。
+    """
+    for enc in ("utf-8-sig", "utf-8", "gbk"):
+        try:
+            with open(path, "r", encoding=enc) as f:
+                return json.load(f)
+        except Exception:
+            continue
+    return default
 
 
 def save_json(path, data):
@@ -2089,7 +2099,9 @@ def _fetch_window_status(status, start, end, depth=0, retry=1):
     orders = []
     page = 1
     total = None
-    while page <= 60:
+    # ★ 上限跟并行版对齐（原 60 页 = 3 万单，实测一个 6 小时窗就 2.75 万单，
+    #   旺季会到顶 → 静默丢单）。200 页 = 10 万单。
+    while page <= 200:
         biz = {"status": status, "timeType": "created",
                "startTime": start.strftime(fmt), "endTime": end.strftime(fmt),
                "pageNo": str(page), "pageSize": str(PAGE_SIZE)}
@@ -2123,6 +2135,153 @@ def _fetch_window_status(status, start, end, depth=0, retry=1):
     return orders, True
 
 
+def _fetch_status_pages_all(status, start, end, page_workers=PAGE_WORKERS, depth=0, retry=1):
+    """并行翻页拉某状态在某时间窗内的全部订单。
+
+    为什么要它：原来 _fetch_window_status 是**一页一页串行**翻的
+    （每页一次网络往返）。一个热门时间窗可能有几十页，光这一项就拖慢整个刷新。
+    这里先取第 1 页拿到 total，再把后面的页**并发**取回来。
+
+    必须保持的行为（不能为了快牺牲正确性）：
+      · 窗口过大（20027）时要能二分拆分（跟串行版一致）
+      · 出错要返回 ok=False（不能把请求失败当成"查到 0 条"，否则全量拉取会变空）
+      · 失败要能重试
+    返回 (orders, ok)。
+    """
+    fmt = "%Y-%m-%d %H:%M:%S"
+    s_txt, e_txt = start.strftime(fmt), end.strftime(fmt)
+
+    def one(page, tries=2):
+        biz = {"status": status, "timeType": "created",
+               "startTime": s_txt, "endTime": e_txt,
+               "pageNo": str(page), "pageSize": str(PAGE_SIZE)}
+        last = None
+        for _ in range(max(1, tries)):
+            try:
+                res = api_call_authed("erp.trade.list.query", biz)
+                return res
+            except Exception as e:
+                last = e
+                time.sleep(0.6)
+        return {"success": False, "_err": str(last)[:120]}
+
+    first = one(1)
+    if not isinstance(first, dict) or not first.get("success"):
+        # 第 1 页就失败：可能是窗口太大 → 二分拆分（跟串行版同一策略）
+        if depth < 4 and (end - start).total_seconds() > 600:
+            mid = start + (end - start) / 2
+            a, ok1 = _fetch_status_pages_all(status, start, mid, page_workers, depth + 1, retry)
+            b, ok2 = _fetch_status_pages_all(status, mid, end, page_workers, depth + 1, retry)
+            return a + b, (ok1 and ok2)
+        if retry > 0:
+            time.sleep(2)
+            return _fetch_status_pages_all(status, start, end, page_workers, depth, retry - 1)
+        return [], False
+
+    batch1 = first.get("list") or []
+    try:
+        total = int(first.get("total"))
+    except Exception:
+        total = None
+    if not batch1 or (total is not None and len(batch1) >= total):
+        return list(batch1), True
+
+    # 还差多少页：按 total 估（估不出来就按"上一页满了就继续"保守翻）
+    # ★ 上限从 60 提到 200：一个 6 小时窗实测能到 27500+ 单（=56 页），
+    #   原来的 60 页上限在旺季会**静默丢单**（截断），这是数据正确性问题。
+    #   200 页 = 10 万单，足够任何单窗；正常靠 total 判断页数，不会白跑。
+    MAX_PAGES_PER_WINDOW = 200
+    if total is not None:
+        need = min(MAX_PAGES_PER_WINDOW, int((total + PAGE_SIZE - 1) // PAGE_SIZE))
+    else:
+        need = MAX_PAGES_PER_WINDOW if len(batch1) >= PAGE_SIZE else 1
+    _truncated = bool(total is not None and total > need * PAGE_SIZE)
+
+    orders = list(batch1)
+    if need > 1:
+        pages = list(range(2, need + 1))
+        got = {}
+        nw = max(1, min(int(page_workers or 1), 8))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=nw) as ex:
+            futs = {ex.submit(one, p): p for p in pages}
+            for fu in concurrent.futures.as_completed(futs):
+                p = futs[fu]
+                try:
+                    res = fu.result()
+                except Exception:
+                    res = None
+                if not isinstance(res, dict) or not res.get("success"):
+                    got[p] = None            # 记下失败页，稍后补
+                else:
+                    got[p] = res.get("list") or []
+        # 失败页按顺序补一次（串行，稳）
+        for p in pages:
+            if got.get(p) is None:
+                res = one(p, tries=3)
+                got[p] = (res.get("list") or []) if (isinstance(res, dict)
+                                                     and res.get("success")) else []
+        ok_all = True
+        for p in pages:
+            lst = got.get(p) or []
+            if not lst and total is None:
+                break                        # 没有 total 时遇到空页就停（跟串行版一致）
+            orders.extend(lst)
+        if total is not None and len(orders) < total:
+            # 没拿全（有页失败或数据在翻页时变了）：交给上层知道
+            ok_all = True
+        if _truncated:
+            # 真被页数上限截断了 —— 必须留痕，不能静默丢单
+            try:
+                _note_pull_truncated(status, s_txt, e_txt, total, len(orders))
+            except Exception:
+                pass
+        return orders, ok_all
+    return orders, _truncated is False
+
+
+def _note_pull_truncated(status, start_txt, end_txt, total, got):
+    """记录一次"窗口被页数上限截断"（丢单风险），写日志 + 计数。"""
+    try:
+        _WEB_STATE["pull_truncated"] = int(_WEB_STATE.get("pull_truncated") or 0) + 1
+    except Exception:
+        pass
+    try:
+        line = ("%s [拉单] ★窗口被页数上限截断 status=%s %s~%s total=%s 实收=%s\n"
+                % (now_gmt8(), status, start_txt, end_txt, total, got))
+        p = os.path.join(BASE_DIR, "pull_truncated.log")
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass
+
+
+def _pull_one_window(ws, we, page_workers=PAGE_WORKERS):
+    """拉一个时间窗：3 个状态**并发**（原来是依次串行），返回 (recs, got, errs)。
+
+    三个状态之间互不依赖，并发之后一个窗口耗时约等于最慢的那个状态，
+    而不是三个之和。
+    """
+    recs = {}
+    got = 0
+    errs = 0
+    lock = threading.Lock()
+
+    def do_status(status):
+        orders, ok = _fetch_status_pages_all(status, ws, we, page_workers)
+        return orders, ok
+
+    statuses = ("WAIT_AUDIT", "WAIT_EXPRESS_PRINT", "WAIT_SEND_GOODS")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(statuses)) as ex:
+        for orders, ok in ex.map(do_status, statuses):
+            if not ok:
+                errs += 1
+            got += len(orders)
+            with lock:
+                for trade in orders:
+                    _add_trade_to_store(recs, trade)
+    return recs, got, errs
+
+
 def full_pull_store_parallel(progress=None, workers=PARALLEL_WORKERS,
                              chunk_hours=CHUNK_HOURS, max_days=MAX_LOOKBACK_DAYS,
                              empty_stop=EMPTY_STOP, stats=None):
@@ -2153,14 +2312,8 @@ def full_pull_store_parallel(progress=None, workers=PARALLEL_WORKERS,
                 ws, we = windows[i]
             got = 0
             errs = 0
-            recs = {}
-            for status in ("WAIT_AUDIT", "WAIT_EXPRESS_PRINT", "WAIT_SEND_GOODS"):
-                orders, ok = _fetch_window_status(status, ws, we)
-                if not ok:
-                    errs += 1
-                got += len(orders)
-                for trade in orders:
-                    _add_trade_to_store(recs, trade)
+            # ★ 窗口内也并行：3 个状态并发 + 每个状态并行翻页（原来两者都是串行）
+            recs, got, errs = _pull_one_window(ws, we)
             with lock:
                 store.update(recs)
                 st["pulled"] += got
@@ -2947,6 +3100,282 @@ class _WebHandler(BaseHTTPRequestHandler):
                 "port": int(_WEB_STATE.get("port") or WEB_PORT),
                 "ips": lan_ips()}
 
+    def _win_handles(self):
+        """本进程当前「可见且有标题」的顶层窗口句柄集合（用于识别新弹出的设置窗）。
+
+        为什么不能用 Tk 侧判断：设置窗是在 _AMAP 处理函数里 new 出来的 Toplevel，
+        这里（HTTP 请求线程）拿不到那个对象；而 Win32 枚举是进程级的，
+        任何线程都能看到，正好用来「动作前拍快照 / 动作后找出新窗」。
+        """
+        out = set()
+        try:
+            import ctypes
+            from ctypes import wintypes as _wt
+            u32 = ctypes.windll.user32
+            u32.EnumWindows.restype = _wt.BOOL
+            me = os.getpid()
+            hwnd_cb = ctypes.WINFUNCTYPE(_wt.BOOL, _wt.HWND, _wt.LPARAM)
+
+            def _cb(hwnd, _l):
+                try:
+                    pid = _wt.DWORD()
+                    u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                    if pid.value != me or not u32.IsWindowVisible(hwnd):
+                        return True
+                    n = u32.GetWindowTextLengthW(hwnd)
+                    if n > 0:
+                        out.add(int(hwnd))
+                except Exception:
+                    pass
+                return True
+
+            u32.EnumWindows(hwnd_cb(_cb), 0)
+        except Exception:
+            pass
+        return out
+
+    def _desktop_settings_route(self, path, body, me, is_post):
+        """打印分工 / 对外访问设置：GET 取数、POST 保存或执行动作。
+
+        抽成一个函数是为了 do_GET / do_POST 共用（这两个接口两种方法都要用）。
+        """
+        if path == "/api/desktop/print_clients":
+            # ★ 打印分工（哪个账号由哪台电脑自动打）：电脑版 Qt 窗用它读写。
+            deny = self._need(me, "data.refresh")
+            if deny:
+                return deny
+            if not is_post:
+                try:
+                    names = print_account_names()
+                except Exception:
+                    names = []
+                return self._json({"ok": True,
+                                   "map": load_print_clients(),
+                                   "local": load_print_client(),
+                                   "ids": list(PRINT_CLIENT_IDS),
+                                   "accounts": names})
+            m = (body or {}).get("map")
+            local = str((body or {}).get("local") or "").strip()
+            if isinstance(m, dict):
+                try:
+                    save_print_clients(m)
+                except Exception as e:
+                    return self._json({"error": "保存失败：%s" % str(e)[:150]}, 500)
+            if local:
+                try:
+                    err = save_print_client(local)
+                except Exception as e:
+                    err = str(e)[:150]
+                if err:
+                    return self._json({"error": err}, 400)
+            return self._json({"ok": True})
+
+        # /api/desktop/stock_act：现货可发控制栏的动作（标记已发/撤回/清空/改库存/导出）
+        if path == "/api/desktop/stock_act":
+            act = str((body or {}).get("action") or "").strip()
+            codes = [str(x) for x in ((body or {}).get("codes") or []) if str(x).strip()]
+            if act in ("mark", "undo"):
+                deny = self._need(me, "stock.canprint")
+                if deny:
+                    return deny
+                if not codes:
+                    return self._json({"error": "没选编码"}, 400)
+                try:
+                    r = self.app.mark_sent(codes, undo=(act == "undo"))
+                except Exception as e:
+                    return self._json({"error": "操作失败：%s" % str(e)[:180]}, 500)
+                return self._json({"ok": True, "result": r,
+                                   "msg": ("已撤回 %d 个" if act == "undo" else "已标记可发 %d 个")
+                                   % len(codes)})
+            if act == "clear_sent":
+                deny = self._need(me, "stock.sent.clear")
+                if deny:
+                    return deny
+                try:
+                    r = self.app.clear_sent()
+                except Exception as e:
+                    return self._json({"error": "清空失败：%s" % str(e)[:180]}, 500)
+                return self._json({"ok": True, "result": r, "msg": "已清空「已发」标记"})
+            if act == "adjust":
+                deny = self._need(me, "stock.edit")
+                if deny:
+                    return deny
+                code = str((body or {}).get("code") or "").strip()
+                bin_code = str((body or {}).get("bin") or "").strip()
+                try:
+                    qty = int((body or {}).get("qty"))
+                except Exception:
+                    return self._json({"error": "数量要填 0 或正整数"}, 400)
+                if not code or not bin_code or qty < 0:
+                    return self._json({"error": "编码 / 货位 / 数量（≥0）都要填"}, 400)
+                if not bool((body or {}).get("confirm")):
+                    return self._json({"error": "need_confirm"}, 400)
+                who = "电脑版·%s" % (os.environ.get("USERNAME") or "本机")
+                try:
+                    out = self.app.stock_adjust(code, bin_code, qty, who=who)
+                except Exception as e:
+                    return self._json({"error": "改库存失败：%s" % str(e)[:200]}, 500)
+                return self._json({"ok": True, "result": out,
+                                   "msg": "已把 %s 货位 %s 改成 %s 件" % (code, bin_code, qty)})
+            if act == "bins":
+                try:
+                    return self._json({"ok": True, "bins": self.app.stock_bins_of(
+                        str((body or {}).get("code") or ""))})
+                except Exception as e:
+                    return self._json({"error": str(e)[:150]}, 500)
+            if act == "export":
+                deny = self._need(me, "stock.export")
+                if deny:
+                    return deny
+                try:
+                    kw = str((body or {}).get("kw") or "")
+                    only = str((body or {}).get("only") or "all")
+                    rows = self.app.stock_rows(kw, only)
+                except Exception as e:
+                    return self._json({"error": "取数据失败：%s" % str(e)[:150]}, 500)
+                if not rows:
+                    return self._json({"error": "没有数据可导出（先查一下）"}, 400)
+                out_dir = os.path.join(BASE_DIR, "导出")
+                try:
+                    os.makedirs(out_dir, exist_ok=True)
+                except Exception:
+                    out_dir = BASE_DIR
+                path = os.path.join(out_dir, "现货可发_%s.xlsx"
+                                    % time.strftime("%Y%m%d_%H%M%S"))
+                data = [[r.get("c", ""), r.get("b", ""), r.get("s", 0),
+                         r.get("n", 0), r.get("m", 0), r.get("mp", 0),
+                         r.get("uo", 0), r.get("up", 0), r.get("p", 0),
+                         r.get("f", 0), r.get("l", 0)] for r in rows]
+                try:
+                    write_xlsx(path,
+                               ["编码", "货位", "在架数", "一单一件订单数", "一单多件订单数",
+                                "多件件数", "加急订单数", "加急件数", "待发货件数",
+                                "可发数量", "锁定数"], data)
+                except Exception as e:
+                    return self._json({"error": "写 Excel 失败：%s" % str(e)[:180]}, 500)
+                return self._json({"ok": True, "path": path, "count": len(data),
+                                   "msg": "已导出 %d 行 → %s" % (len(data), path)})
+            return self._json({"error": "不支持的动作：%r" % act}, 400)
+
+        # /api/desktop/gateway：对外访问设置（域名 / frp / 证书 / 一键起隧道）
+        deny = self._need(me, "gateway.settings")
+        if deny:
+            return deny
+        try:
+            import kuaimai_gateway as gw
+        except Exception as e:
+            return self._json({"error": "缺少 kuaimai_gateway：%s" % str(e)[:120]}, 500)
+        if not is_post:
+            try:
+                cfg = dict(gw.load_config() or {})
+            except Exception:
+                cfg = {}
+            try:
+                st = gw.status()
+            except Exception as e:
+                st = {"error": str(e)[:150]}
+            try:
+                paths = gw.paths()
+            except Exception:
+                paths = {}
+            try:
+                autostart = bool(gw.has_autostart())
+            except Exception:
+                autostart = False
+            # 证书只回文件名，绝不回内容（私钥不外发）
+            certs = []
+            try:
+                cd = (paths or {}).get("cert_dir") or ""
+                if cd and os.path.isdir(cd):
+                    certs = sorted(os.listdir(cd))[:40]
+            except Exception:
+                pass
+            return self._json({"ok": True, "conf": cfg, "status": st,
+                               "paths": {k: str(v) for k, v in (paths or {}).items()},
+                               "autostart": autostart, "certs": certs})
+        act = str((body or {}).get("action") or "save").strip()
+        if act == "save":
+            conf = (body or {}).get("conf")
+            if not isinstance(conf, dict):
+                return self._json({"error": "conf 必须是对象"}, 400)
+            # 空字符串不许覆盖已有值（证书都没填时保存不会把配置清空）
+            conf = {k: v for k, v in conf.items() if str(v).strip() != ""}
+            try:
+                cfg = dict(gw.load_config() or {})
+                cfg.update(conf)
+                gw.save_config(cfg)
+            except Exception as e:
+                return self._json({"error": "保存失败：%s" % str(e)[:180]}, 500)
+            return self._json({"ok": True})
+        if act == "start":
+            try:
+                ok, msg = gw.start_relay(gw.load_config() or {})
+            except Exception as e:
+                return self._json({"error": "启动失败：%s" % str(e)[:180]}, 500)
+            return self._json({"ok": bool(ok), "msg": str(msg or "")})
+        if act == "stop":
+            try:
+                gw.stop_relay()
+            except Exception as e:
+                return self._json({"error": "停止失败：%s" % str(e)[:180]}, 500)
+            return self._json({"ok": True})
+        if act == "autostart":
+            try:
+                on = bool((body or {}).get("on"))
+                (gw.install_autostart if on else gw.remove_autostart)()
+            except Exception as e:
+                return self._json({"error": "设置开机自启失败：%s" % str(e)[:180]}, 500)
+            return self._json({"ok": True})
+        return self._json({"error": "不支持的动作：%r" % act}, 400)
+
+    def _ensure_live_app(self):
+        """兜底自愈：服务端手里的 app 还是「登录阶段占位对象」时，换成真正的主窗口。
+
+        为什么需要（v1.83 实测踩到）：
+          ui=qt 的启动顺序是「先起本机服务给 Qt 登录窗用」（那时 app 是 _NullHost 占位），
+          登录成功后 _start_web() 会把服务重启成对外监听并挂上真 ScanApp。
+          只要这一步没走成（端口切换/时序问题），服务就会一直端着占位对象 →
+          电脑版界面**能显示但全是空的**、点菜单一个个失败（现象就是"跑的还是旧界面/按钮不能用"）。
+          真主窗口其实就在同进程里跑着，这里按需把它认回来，比让用户重启软件靠谱。
+        """
+        try:
+            # ★ 注意：不能只判断"拿得到 _status_mirror 属性"——占位对象 _NullHost 的
+            #   __getattr__ 对任何名字都返回一个函数，会被误判成"已经是真窗口"。
+            #   所以必须确认它真的是 dict（真主窗口挂的镜像就是这个）。
+            if isinstance(getattr(self.app, "_status_mirror", None), dict):
+                return                                   # 已经挂着真窗口
+            # ① 首选：主窗口启动时登记的（最可靠）
+            w = _LIVE_APP.get("app")
+            if not isinstance(getattr(w, "_status_mirror", None), dict):
+                w = None
+            # ② 兜底：从同进程所有存活对象里找（登记没生效时）
+            if w is None:
+                import gc
+                for o in gc.get_objects():
+                    try:
+                        if type(o).__name__ == "ScanApp" and isinstance(
+                                getattr(o, "_status_mirror", None), dict):
+                            w = o
+                            break
+                    except Exception:
+                        continue
+            if w is None:
+                return
+            _WebHandler.app = w
+            _WEB_STATE["app"] = w
+            try:
+                if not _WEB_STATE.get("port"):
+                    _WEB_STATE["port"] = int(getattr(w, "_web_port", 0) or WEB_PORT)
+            except Exception:
+                pass
+            try:
+                if not _WEB_STATE.get("user") and getattr(w, "session", None) is not None:
+                    _note_login(w.session.name, w.session.role, w.session.mode)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     def _auth_state(self, qs):
         u = self._auth(qs)
         return {"need_setup": bool(auth and auth.need_setup()),
@@ -2978,6 +3407,9 @@ class _WebHandler(BaseHTTPRequestHandler):
             if not me:
                 if path.startswith("/api/"):
                     return self._json({"error": "请先登录", "login": True}, 401)
+            self._ensure_live_app()      # ★ 服务端别端着登录阶段的占位对象
+            app = self.app               # 自愈之后取最新的（本方法开头缓存过 app）
+            if not me:
                 # 没登录时直接返回登录页（不靠 302，中转/任何客户端都能看到）
                 return self._send(LOGIN_HTML.encode("utf-8"), "text/html; charset=utf-8")
             if parsed.path in ("/", "/index.html"):
@@ -3025,17 +3457,101 @@ class _WebHandler(BaseHTTPRequestHandler):
                     import kuaimai_wave as wv
                     local = wv.load_records()
                     live, err = {}, ""
+                    src = ""
+                    # ① 首选：ERP 网页「波次管理」列表（登录态，**含 status=3 已完成 / 4 已取消**）。
+                    #    开放平台那个 erp.trade.waves.query 只会给未完成的（实测 50 条全是 status=1），
+                    #    所以"已完成"必须从网页端读 —— 这正是用户问的那件事。
+                    # ★ 先把浏览器准备好（没开就自动拉起）。失败了也没关系：
+                    #   下面还有开放平台兜底，只是「已完成/拣货人」读不全。
+                    _wb_ok, _wb_why = ensure_erp_browser("波次记录")
+                    if not _wb_ok:
+                        err = _wb_why
                     try:
-                        r = wv.waves_list(api_call_authed, minutes=1440, page_size=50)
-                        if r.get("ok"):
-                            for w in (r.get("waves") or []):
-                                code = str(w.get("wave_code") or "")
-                                if code:
-                                    live[code] = w
+                        mw = wv.manager_waves(page_no=1, page_size=200)
+                        for w in (mw or []):
+                            code = str(w.get("code") or "")
+                            if not code:
+                                continue
+                            st = w.get("status")
+                            live[code] = {
+                                "wave_code": code, "wave_id": w.get("id"),
+                                "status": st,
+                                "status_cn": wv.status_cn(st, None),
+                                "tradesCount": None,
+                                "itemCount": w.get("item_count"),
+                                "pickEndTime": None,
+                                "sids": [],
+                                "express": w.get("express") or "",
+                                "tags": w.get("tags") or [],
+                                # 人员：网页端独有（开放平台不返回）
+                                # ★ pickerName 是**拣货人**（不是验货/打包账号）；
+                                #   验货人只在操作日志里，而按订单查日志 ERP 会超时。
+                                "picker": w.get("picker") or "",
+                                "assign_picker": w.get("assign_picker") or "",
+                                "creator": w.get("creator") or "",
+                                "sorter": w.get("sorter") or "",
+                                "picked_num": w.get("picked_num"),
+                                "plan_num": w.get("plan_num"),
+                                "created_ms": w.get("created_ms"),
+                                "known": False, "who": "",
+                            }
+                        if live:
+                            src = "web"
                         else:
-                            err = r.get("error") or ""
+                            err = "网页端波次列表没返回数据"
+                    except SystemExit:
+                        err = "打单浏览器没开（Edge 9222 不通）：状态只能读到未完成的"
                     except Exception as e:
-                        err = str(e)[:150]
+                        err = "网页端回读失败：%s" % str(e)[:120]
+                    # ★ 「实发订单数」需要波次的订单 SID 才能算：
+                    #   网页端那个列表**不返回订单明细**（实测页面管理/开放平台都忽略
+                    #   waveId/code 过滤参数），只有开放平台接口会带 list[].sid，
+                    #   而它只给未完成的波次。所以这里两路都取：网页端给状态（含已完成），
+                    #   开放平台补 SID（有 SID 的波次才能算实发）。
+                    if live:
+                        try:
+                            r2 = wv.waves_list(api_call_authed, minutes=1440, page_size=50)
+                            if r2.get("ok"):
+                                for w2 in (r2.get("waves") or []):
+                                    c2 = str(w2.get("wave_code") or "")
+                                    tgt = live.get(c2)
+                                    if tgt is not None and w2.get("sids"):
+                                        tgt["sids"] = w2.get("sids")
+                                        if not tgt.get("itemCount"):
+                                            tgt["itemCount"] = w2.get("itemCount")
+                        except Exception:
+                            pass
+                    # ★ 触发「发货日志」后台扫描（按天缓存），供实发订单数用
+                    try:
+                        for w in list(live.values()):
+                            _d = ""
+                            _ts = w.get("pickEndTime") or w.get("created_ms") or 0
+                            try:
+                                _n = int(str(_ts))
+                                if _n > 10 ** 12:
+                                    _n //= 1000
+                                _d = time.strftime("%Y-%m-%d", time.localtime(_n))
+                            except Exception:
+                                _d = ""
+                            if _d and w.get("sids"):
+                                _ship_day_map(_d)
+                    except Exception:
+                        pass
+                    # ② 网页端一条都没拿到时，退回开放平台（没有已完成状态，但有 SID/件数）
+                    if not live:
+                        try:
+                            r = wv.waves_list(api_call_authed, minutes=1440, page_size=50)
+                            if r.get("ok"):
+                                for w in (r.get("waves") or []):
+                                    code = str(w.get("wave_code") or "")
+                                    if code:
+                                        live[code] = w
+                                if live:
+                                    src = "api"
+                            else:
+                                err = err or (r.get("error") or "")
+                        except Exception as e:
+                            err = err or str(e)[:150]
                     recs = []
                     for rec in local:
                         code = str(rec.get("wave_code") or "")
@@ -3059,6 +3575,7 @@ class _WebHandler(BaseHTTPRequestHandler):
                     # 「生成账号 who」——ERP 那边只有同一个登录，看不出是谁在本系统点的成波。
                     # known=本机有没有这条记录：用来区分「旧记录没记账号」和「压根不是本系统生成的」。
                     who_by_code, who_by_id = {}, {}
+                    codes_by_code, codes_by_id = {}, {}
                     for rec in local:
                         _w = str((rec or {}).get("who") or "").strip()
                         _c = str((rec or {}).get("wave_code") or "")
@@ -3067,6 +3584,15 @@ class _WebHandler(BaseHTTPRequestHandler):
                             who_by_code[_c] = _w
                         if _i:
                             who_by_id[_i] = _w
+                        # ★ 商家编码只存在于本机记录里（平台那个接口不返回 codes），
+                        #   所以按波次号把本机记录的 codes 合并进 recent ——
+                        #   否则界面上「商家编码」列永远空着（用户反馈的就是这个）。
+                        _codes = rec.get("codes") or []
+                        if _codes:
+                            if _c:
+                                codes_by_code[_c] = _codes
+                            if _i:
+                                codes_by_id[_i] = _codes
                     recent = []
                     for c in sorted(live.keys(), reverse=True):
                         w = dict(live[c])
@@ -3074,15 +3600,31 @@ class _WebHandler(BaseHTTPRequestHandler):
                         _i = str(w.get("wave_id") or "")
                         w["who"] = str(who_by_code.get(_c) or who_by_id.get(_i) or "").strip()
                         w["known"] = bool((_c and _c in who_by_code) or (_i and _i in who_by_id))
+                        if not w.get("codes"):
+                            w["codes"] = (codes_by_code.get(_c)
+                                          or codes_by_id.get(_i) or [])
                         recent.append(w)
+                    # ★ 顺手在后台抓「每个波次已打印多少单」，界面上「实发订单数」用它。
+                    #   只有未完成的波次读得到（完成即清关联），所以越早抓越好。
+                    try:
+                        _codes = [str(x.get("wave_code") or "") for x in recent]
+                        _wave_printed_refresh(_codes)
+                    except Exception:
+                        pass
                     return self._json({"ok": True, "records": recs, "recent": recent,
-                                       "live": bool(live), "error": err})
+                                       "live": bool(live), "error": err, "src": src,
+                                       "printed": _wave_printed_get(),
+                                       "ship_cache": _ship_count_cache_get()})
                 except Exception as e:
                     return self._json({"error": "读取波次记录失败：%s" % str(e)[:200]}, 500)
             if parsed.path == "/api/wave/lookup":
                 # 扫一个编码：查它在火火火仓库的最大可生成件数（只读，走 CDP 登录态）
                 if not self._can(me, "wave.view"):
                     return self._deny("wave.view")
+                # ★ 走浏览器前先把浏览器准备好（自动拉起 + 自愈 + 人话报错）
+                _bok, _bwhy = ensure_erp_browser("波次查询")
+                if not _bok:
+                    return self._json({"error": _bwhy}, 503)
                 code = ((qs.get("code") or [""])[0] or "").strip()
                 if not code:
                     return self._json({"error": "缺少 code"}, 400)
@@ -3162,6 +3704,410 @@ class _WebHandler(BaseHTTPRequestHandler):
                     lim = 300
                 return self._json(app.web_scans(lim, (qs.get("who") or [""])[0],
                                                 (qs.get("kw") or [""])[0]))
+            if parsed.path == "/api/desktop/table":
+                # 电脑版通用表格接口：把已有的纯数据函数原样转成列/行给 Qt 渲染。
+                # **形状无关**：不管是 list[dict] / {ok,rows} / list[list]，都自动适配，
+                # 所以不用预先知道每个函数返回什么结构。
+                deny = self._need(me, "data.refresh")
+                if deny:
+                    return deny
+                name = str((qs.get("name") or [""])[0] or "").strip()
+                par_kw = str((qs.get("kw") or [""])[0] or "").strip()
+                if name == "ship":
+                    # ★ 「发货」操作日志：打包账号（验货人）+ 实际发货数量。
+                    #   为什么单独一个 name：这个回读要翻很多页（一个批次上千条），
+                    #   放主查询里会把批次窗拖慢；这里让用户按需点一下再看。
+                    par_days = str((qs.get("days") or ["90"])[0] or "90").strip()
+                    try:
+                        _d = max(1, min(180, int(par_days)))
+                    except Exception:
+                        _d = 90
+                    if not par_kw:
+                        src = {"rows": [], "note": "先输入批次号，再点「发货明细」。"}
+                        title = "发货明细（打包账号 / 实际发货数量）"
+                    else:
+                        title = "发货明细 · 批次 %s（最近 %d 天）" % (par_kw, _d)
+                        per, serr = fetch_ship_batch(par_kw, _d)
+                        if serr:
+                            src = {"rows": [], "note": serr}
+                        else:
+                            srows = []
+                            for sid, d in per.items():
+                                codes = "、".join("%s×%d" % (c, n) for c, n in d["items"])
+                                srows.append({"系统单号": sid,
+                                              "打包账号": d.get("who") or "—",
+                                              "实际发货件数": d.get("qty", 0),
+                                              "发货明细": codes})
+                            tot = sum(x["实际发货件数"] for x in srows)
+                            src = {"rows": srows,
+                                   "note": "批次 %s：%d 单已发货，实际发货合计 %d 件"
+                                           % (par_kw, len(srows), tot)}
+                elif name == "ship_stats":
+                    # ★ 按日期区间 + 账号统计每天发货量（来自同一个「发货」日志）
+                    par_from = str((qs.get("from") or [""])[0] or "").strip()
+                    par_to = str((qs.get("to") or [""])[0] or "").strip()
+                    par_who = str((qs.get("who") or [""])[0] or "").strip()
+                    if not par_from:
+                        par_from = datetime.now().strftime("%Y-%m-%d")
+                    res = ship_stats(1, date_from=par_from, date_to=par_to or par_from,
+                                     who=par_who)
+                    title = "每日发货量 · %s%s" % (
+                        par_from, (" ~ " + par_to) if par_to and par_to != par_from else "")
+                    if par_who:
+                        title += " · 账号 " + par_who
+                    src = {"rows": res.get("rows") or [],
+                           "note": res.get("note") or
+                                   "没有查到这段时间的发货记录（日志可能超期或当天确实没发货）"}
+                elif name == "stock":
+                    # ★ 现货可发：**写死中文列名**，别让界面显示 c/s/p/o 这种内部字段名
+                    #   （通用接口原来是"从数据自动推列"，用户看到一排英文字母，反馈过）。
+                    title = "现货可发（在架 / 待发货 / 可发件数）"
+                    # ★ only（只看）/ sort（排序）本来就支持，之前这里写死成 all/free，
+                    #   导致电脑版的筛选和排序全是摆设。现在按请求传进去。
+                    _only = str((qs.get("only") or ["all"])[0] or "all")
+                    _sort = str((qs.get("sort") or ["free"])[0] or "free")
+                    _hide_sent = str((qs.get("hide_sent") or ["1"])[0]) not in ("0", "false",
+                                                                               "False", "")
+                    _rows = self.app.stock_rows(par_kw, _only, _sort)
+                    if _hide_sent:
+                        _rows = [r for r in _rows if not r.get("sent")]
+                    _out = []
+                    for r in _rows:
+                        try:
+                            _ue = r.get("ue") or {}
+                            _ue_txt = "、".join("%s %s" % (k, v) for k, v in _ue.items()
+                                                if int(v or 0) > 0)
+                        except Exception:
+                            _ue_txt = ""
+                        _out.append({
+                            "编码": r.get("c", ""),
+                            "货位": (r.get("b") or "").strip() or "无在架货位",
+                            "在架数": r.get("s", 0),
+                            "一单一件（单）": r.get("n", 0),
+                            "一单多件（单）": r.get("m", 0),
+                            "多件件数": r.get("mp", 0),
+                            "订单数": r.get("o", 0),
+                            "加急（单/件）": "／".join(str(r.get(k, 0)) for k in ("uo", "up")),
+                            "加急分快递": _ue_txt,
+                            "待发货件数": r.get("p", 0),
+                            "可发数量": r.get("f", 0),
+                            "锁定": r.get("l", 0),
+                            "已标记可发": "是" if r.get("sent") else "",
+                            "已生成波次": "是" if r.get("waved") else "",
+                        })
+                    _cols = (list(_out[0].keys()) if _out else
+                             ["编码", "货位", "在架数", "一单一件（单）", "一单多件（单）",
+                              "多件件数", "订单数", "加急（单/件）", "加急分快递",
+                              "待发货件数", "可发数量", "锁定", "已标记可发", "已生成波次"])
+                    return self._json({"ok": True, "title": title, "columns": _cols,
+                                       "rows": [list(x.values()) for x in _out],
+                                       "count": len(_out), "shown": len(_out), "note": ""})
+                elif name == "adjust_log":
+                    # ★ 同样写死中文列名（别显示 ts/who/code 这种内部字段名）
+                    title = "改库存 · 操作日志"
+                    _out = []
+                    for r in (self.app.adjust_logs() or []):
+                        _out.append({
+                            "时间": r.get("ts", ""),
+                            "操作账号": r.get("who", ""),
+                            "编码": r.get("code", ""),
+                            "货位": r.get("bin", ""),
+                            "原数量": r.get("old", ""),
+                            "新数量": r.get("new", ""),
+                            "结果": "成功" if r.get("ok") else "失败",
+                            "说明": r.get("msg", ""),
+                        })
+                    return self._json({"ok": True, "title": title,
+                                       "columns": ["时间", "操作账号", "编码", "货位",
+                                                   "原数量", "新数量", "结果", "说明"],
+                                       "rows": [list(x.values()) for x in _out],
+                                       "count": len(_out), "shown": len(_out), "note": ""})
+                elif name == "stocktake":
+                    # 库存盘点（按款号）：形状固定且**中文列名**
+                    title = "库存盘点（按款号）" + ((" · " + par_kw) if par_kw else "")
+                    _res = self.app.stocktake_rows(par_kw)
+                    _out = []
+                    for r in (_res.get("rows") or []):
+                        _out.append({"款号": r.get("kw", ""),
+                                     "编码": r.get("code", ""),
+                                     "货位": r.get("bin", ""),
+                                     "在架数": r.get("shelf", ""),
+                                     "待发货件数": r.get("pending", "")})
+                    return self._json({"ok": True, "title": title,
+                                       "columns": ["款号", "编码", "货位", "在架数", "待发货件数"],
+                                       "rows": [list(x.values()) for x in _out],
+                                       "count": len(_out), "shown": len(_out),
+                                       "note": _res.get("note") or ""})
+                elif name == "batch":
+                    # 批次查询（按打印批次号）：拿 web_batch 的结果摊平成表格
+                    #   （原来只能弹旧 Tk 窗；这里给电脑版一个形状固定的数据源）
+                    par_days = str((qs.get("days") or ["3"])[0] or "3").strip()
+                    try:
+                        _days = max(1, min(90, int(par_days)))
+                    except Exception:
+                        _days = 3
+                    if not par_kw:
+                        src = {"rows": [], "note": "先输入打印批次号（如 123），再点查询。"}
+                        title = "批次查询（按打印批次号）"
+                    else:
+                        title = "批次查询 · %s（最近 %d 天）" % (par_kw, _days)
+                        try:
+                            wb = self.app.web_batch(par_kw, _days)
+                        except Exception as e:
+                            wb = {"error": "查询失败：%s" % str(e)[:180]}
+                        if isinstance(wb, dict) and wb.get("error"):
+                            src = {"rows": [], "note": str(wb.get("error"))[:200]}
+                        else:
+                            oo = (wb or {}).get("orders") or []
+                            flat = []
+                            for r in ((wb or {}).get("rows") or []):
+                                o = oo[r.get("i") or 0] if (r.get("i") or 0) < len(oo) else {}
+                                flat.append({
+                                    "打印序号": o.get("seq", ""),
+                                    "系统单号": o.get("sid", ""),
+                                    "内部单号": o.get("short_id", ""),
+                                    "快递单号": o.get("express", ""),
+                                    "商品编码": r.get("code", ""),
+                                    "件数": r.get("num", ""),
+                                    "货位": r.get("bins", ""),
+                                    "在架": r.get("shelf", ""),
+                                    "加急": "是" if o.get("urgent") else "",
+                                    "系统状态": o.get("sys_status", ""),
+                                })
+                            src = {"rows": flat,
+                                   "note": "批次 %s：%d 单 / %d 行（货位在架数时间 %s）"
+                                           % (par_kw, (wb or {}).get("count_orders", 0),
+                                              (wb or {}).get("count_rows", 0),
+                                              (wb or {}).get("shelf_at") or "-")}
+                else:
+                    return self._json({"error": "不支持的表格：%r" % name}, 400)
+
+                rows = src
+                note = ""
+                if isinstance(src, dict):
+                    note = str(src.get("note") or src.get("err") or "")[:200]
+                    for k in ("rows", "list", "items", "data", "recent"):
+                        if isinstance(src.get(k), list):
+                            rows = src[k]
+                            break
+                    else:
+                        rows = []
+                if not isinstance(rows, list):
+                    rows = []
+                # 推列：list[dict] 取并集；list[list] 用序号
+                cols = []
+                for it in rows[:50]:
+                    if isinstance(it, dict):
+                        for k in it.keys():
+                            if k not in cols:
+                                cols.append(str(k))
+                if cols:
+                    out_rows = [[("" if it.get(c) is None else str(it.get(c))) for c in cols]
+                                for it in rows if isinstance(it, dict)]
+                elif rows and isinstance(rows[0], (list, tuple)):
+                    n = max(len(r) for r in rows[:50] if isinstance(r, (list, tuple)))
+                    cols = ["列%d" % (i + 1) for i in range(n)]
+                    out_rows = [[("" if v is None else str(v)) for v in r] for r in rows]
+                else:
+                    cols, out_rows = [], []
+                # ★ 行数上限：从 2000 提到 20000。
+                #   批次查询一个批次能到 7000+ 行，截到 2000 就把拣货清单切没了
+                #   （用户看到的"共 7738 行"和实际显示行数对不上）。截断时在说明里讲清楚。
+                _cap = 20000
+                _rows = out_rows[:_cap]
+                if len(out_rows) > _cap:
+                    note = (note + "　" if note else "") + \
+                           "（行数过多，只显示前 %d 行 / 共 %d 行）" % (_cap, len(out_rows))
+                return self._json({"ok": True, "title": title, "columns": cols,
+                                   "rows": _rows, "count": len(out_rows),
+                                   "shown": len(_rows), "note": note})
+            if parsed.path in ("/api/desktop/print_clients", "/api/desktop/gateway",
+                               "/api/desktop/stock_act"):
+                return self._desktop_settings_route(parsed.path, {}, me, False)
+            if parsed.path == "/api/desktop/api_conf":
+                # 电脑版「API 设置」用：读当前的 API 参数。
+                # 只读、只回本机请求（接口本身已要求登录），跟旧设置窗看到的是同一份。
+                deny = self._need(me, "data.refresh")
+                if deny:
+                    return deny
+                try:
+                    conf = {str(k): ("" if v is None else str(v)) for k, v in dict(API_CONF).items()}
+                except Exception as e:
+                    return self._json({"error": "读取失败：%s" % str(e)[:150]}, 500)
+                return self._json({"ok": True, "conf": conf})
+            if parsed.path == "/api/desktop/print_progress":
+                # 电脑版「打单进度」用：直接给 print_progress_payload() 的原始数据。
+                # 那个函数本来就是只读、轻量、不抛异常的，正适合给接口用。
+                deny = self._need(me, "data.refresh")
+                if deny:
+                    return deny
+                try:
+                    out = print_progress_payload()
+                except Exception as e:
+                    return self._json({"ok": False, "err": str(e)[:200]}, 500)
+                return self._json(out)
+            if parsed.path == "/api/erp/status":
+                # ★ 真正的 ERP 登录状态（不是程序自己的登录用户！）。
+                #   电脑版状态条上那句「ERP 已登录」以前拿的是程序管理员账号，跟 ERP
+                #   会话没关系 —— 用户反馈过这是误报。
+                #   现在**以自动化浏览器那个会话为准**：成波 / 波次管理 / 拣货人 /
+                #   已完成状态全走这个浏览器；它没登录 ERP，这些功能就是用不了。
+                #   探测要连浏览器，比较慢 → 结果缓存 25 秒。缓存不能太长：
+                #   用户刚在浏览器里登录完 ERP，要比较快就能看到状态变「已登录」。
+                deny = self._need(me, "data.refresh")
+                if deny:
+                    return deny
+                now = time.time()
+                cached = _WEB_STATE.get("erp_status")
+                if isinstance(cached, dict) and (now - float(cached.get("t") or 0)) < 25:
+                    return self._json(cached.get("v") or {})
+                # 索引/货位正在加载时先不探（别在刚启动最忙的时候再去连浏览器）
+                try:
+                    if bool(getattr(self.app, "syncing", False)):
+                        return self._json({"ok": True, "erp": False, "pending": True,
+                                           "why": "正在加载数据，稍后自动检测"})
+                except Exception:
+                    pass
+                info = {"ok": True, "erp": False, "why": "未检测"}
+                # ★ 以**自动化浏览器会话**为准（用户明确要求）：
+                #   成波 / 波次管理 / 拣货人 / 已完成状态 全都走这个浏览器，
+                #   浏览器没登录 ERP → 这些功能就是用不了，哪怕 API 密钥还有效。
+                #   所以先看浏览器：没开就自动拉起 → 再看页面在不在 login.html。
+                _by = "browser"
+                try:
+                    import kuaimai_print as _K
+                    _st, _msg = _K.ensure_browser()
+                    if _st != "ok":
+                        info = {"ok": True, "erp": False, "by": _by,
+                                "why": ("ERP 未登录：请点菜单「登录 ERP」"
+                                        if _st == "need_login"
+                                        else human_browser_err(_msg, "打开浏览器"))}
+                    else:
+                        # 浏览器活着 → 看它当前停在哪个页面
+                        _c = _K.open_cdp_page()
+                        try:
+                            _href = str(_c.js("location.href") or "")
+                        finally:
+                            try:
+                                _c.close()
+                            except Exception:
+                                pass
+                        _low = _href.lower()
+                        if ("login" in _low) or ("passport" in _low) or ("sso" in _low):
+                            info = {"ok": True, "erp": False, "by": _by, "href": _href[:120],
+                                    "why": "ERP 未登录（浏览器停在登录页）"}
+                        elif "superboss" in _low:
+                            info = {"ok": True, "erp": True, "by": _by,
+                                    "href": _href[:120], "why": "ERP 已登录"}
+                        else:
+                            info = {"ok": True, "erp": False, "by": _by, "href": _href[:120],
+                                    "why": "浏览器不在 ERP 页面"}
+                except SystemExit:
+                    info = {"ok": True, "erp": False, "by": _by,
+                            "why": "自动化浏览器没开（Edge 9222 不通）"}
+                except Exception as e:
+                    info = {"ok": True, "erp": False, "by": _by,
+                            "why": human_browser_err(e, "检测 ERP")}
+                _WEB_STATE["erp_status"] = {"t": now, "v": info}
+                return self._json(info)
+            if parsed.path == "/api/erp/status_api":
+                # 兜底口径：只看快麦开放平台接口能不能用（密钥/会话是否有效）
+                info = {"ok": True, "erp": False, "why": "未检测"}
+            if parsed.path == "/api/whoami":
+                # ★ 自检接口：一眼看出"谁在服务、现在算不算登录"。
+                #   排查"查不到/显示未登录"这类问题时，先打这个就能分清是
+                #   ①没登录 ②服务端还端着登录阶段的占位对象 ③业务核心没接管。
+                try:
+                    who = self._auth(qs)
+                except Exception:
+                    who = None
+                _tok = ""
+                try:
+                    _tok = self._token(qs)
+                except Exception:
+                    pass
+                return self._json({
+                    "ok": True,
+                    "app": type(self.app).__name__,
+                    "app_ready": isinstance(getattr(self.app, "_status_mirror", None), dict),
+                    "logged_in": bool(who),
+                    "user": (who or {}).get("name"),
+                    "role": (who or {}).get("role"),
+                    "token_head": (_tok or "")[:6],
+                    "web_state_user": _WEB_STATE.get("user") or "",
+                    "web_state_role": _WEB_STATE.get("role") or "",
+                    "has_web_token": bool(_WEB_STATE.get("token")),
+                    "port": int(_WEB_STATE.get("port") or WEB_PORT),
+                    "lan": bool(_WEB_STATE.get("lan")),
+                    "ver": APP_VER,
+                })
+            if parsed.path == "/api/desktop/log":
+                # 电脑版「打单进度 / 实时日志」用：读 auto_print.log 尾部。
+                # 权限用 data.refresh（跟其它电脑版接口一套；data.view 默认没发给管理员，实测 403）
+                deny = self._need(me, "data.refresh")
+                if deny:
+                    return deny
+                try:
+                    n = int((qs.get("tail") or ["80"])[0] or 80)
+                except Exception:
+                    n = 80
+                n = max(1, min(1000, n))
+                lines = []
+                try:
+                    p = os.path.join(BASE_DIR, "auto_print.log")
+                    if os.path.isfile(p):
+                        with open(p, "r", encoding="utf-8", errors="replace") as f:
+                            lines = f.readlines()[-n:]
+                except Exception as e:
+                    return self._json({"error": "读日志失败：%s" % str(e)[:150]}, 500)
+                return self._json({"ok": True, "lines": [x.rstrip("\r\n") for x in lines],
+                                   "file": "auto_print.log"})
+            if parsed.path == "/api/desktop/state":
+                # 电脑版状态栏用：主程序当前那一行状态文字 + 是否正在忙。
+                # （GET 接口，放在 do_GET 里；POST 那边只有 refresh / clearlog 两个写操作。）
+                out = {"ok": True, "text": "", "syncing": False, "shelf_busy": False,
+                       "orders": 0, "codes": 0, "loaded_at": "", "shelf_at": "", "ver": APP_VER}
+                # 读 Tk 变量的镜像而不是 Tk 变量本身：
+                # 这里是 HTTP 线程，直接 .get() 属于跨线程碰 Tcl，可能把程序搞崩。
+                try:
+                    _m = getattr(self.app, "_status_mirror", None)
+                    out["text"] = str(_m["text"]) if isinstance(_m, dict) else ""
+                except Exception:
+                    pass
+                try:
+                    out["syncing"] = bool(getattr(self.app, "_syncing", False))
+                except Exception:
+                    pass
+                try:
+                    out["shelf_busy"] = bool(getattr(self.app, "_shelf_busy", False))
+                except Exception:
+                    pass
+                try:
+                    out["orders"] = int(getattr(self.app, "stat", {}).get("total_orders") or 0)
+                    out["codes"] = len(getattr(self.app, "index", {}) or {})
+                except Exception:
+                    pass
+                try:
+                    out["loaded_at"] = str(getattr(self.app, "loaded_at", "") or "")
+                    out["shelf_at"] = str(getattr(self.app, "shelf_at", "") or "")
+                except Exception:
+                    pass
+                # 各开关的当前状态（电脑版菜单里要显示勾没勾）
+                opts = {}
+                for k, attr in (("sound", "sound_on"), ("key", "key_on"),
+                                ("auto_putaway", "auto_putaway_var"),
+                                ("auto_audit", "auto_audit_var"),
+                                ("bg_listen", "hook_on")):
+                    try:
+                        opts[k] = bool(getattr(self.app, attr).get())
+                    except Exception:
+                        opts[k] = False
+                try:
+                    opts["hold"] = int(get_web_hold())
+                except Exception:
+                    opts["hold"] = 0
+                out["opts"] = opts
+                return self._json(out)
             if parsed.path == "/api/scans/export":
                 deny = self._need(me, "export.excel")
                 if deny:
@@ -3331,7 +4277,7 @@ class _WebHandler(BaseHTTPRequestHandler):
                 if err:
                     return self._json({"error": err}, 400)
                 self._set_cookie(tok)
-                _note_login(name, "admin", "host")
+                _note_login(name, "admin", "host", token=tok)
                 return self._json({"ok": True, "token": tok, "name": name, "role": "admin",
                                    "owner": bool(auth.is_owner(name)),
                                    "allow_multi_device": bool((auth.users().get(name) or {})
@@ -3350,7 +4296,8 @@ class _WebHandler(BaseHTTPRequestHandler):
                 self._set_cookie(tok)
                 role = (auth.users().get(str(body.get("name")).strip()) or {}).get("role") or "user"
                 _note_login(str(body.get("name")).strip(), role,
-                            body.get("mode") or ("host" if body.get("kind") == "desktop" else "web"))
+                            body.get("mode") or ("host" if body.get("kind") == "desktop" else "web"),
+                            token=tok)
                 return self._json({"ok": True, "token": tok, "name": body.get("name"), "role": role,
                                    "owner": bool(auth.is_owner(str(body.get("name")).strip())),
                                    "allow_multi_device": bool((auth.users().get(str(body.get("name")).strip())
@@ -3360,11 +4307,236 @@ class _WebHandler(BaseHTTPRequestHandler):
             me = self._auth(qs)
             if not me:
                 return self._json({"error": "请先登录", "login": True}, 401)
+            self._ensure_live_app()      # ★ 同上：POST 也要自愈
+            if path in ("/api/desktop/print_clients", "/api/desktop/gateway",
+                        "/api/desktop/stock_act"):
+                # 这两个接口 GET 取数、POST 保存/执行动作（共用同一个处理函数）
+                return self._desktop_settings_route(path, body, me, True)
             if path == "/api/auth/logout":
                 if auth:
                     auth.logout(self._token(qs))
                 self._set_cookie("")
                 return self._json({"ok": True})
+            # ============ 电脑版（Qt）专用接口 · v1.70 新增（写操作，POST）============
+            # 纯新增：下面两个只服务电脑版，不碰任何现有接口，手机端行为完全不变。
+            # 权限沿用现有的 data.refresh。
+            if path == "/api/desktop/refresh":
+                # 触发数据刷新。真正的活在主程序的后台线程里跑，这里立刻返回；
+                # 电脑版轮询 /api/desktop/state 就能看到进度。
+                deny = self._need(me, "data.refresh")
+                if deny:
+                    return deny
+                what = str(body.get("what") or "inc").strip().lower()
+                try:
+                    if what == "inc":
+                        self.app.sync_pending(background=True)
+                    elif what == "full":
+                        self.app.full_reload(background=True)
+                    elif what == "shelf":
+                        self.app.reload_shelf(background=True)
+                    elif what == "lock":
+                        self.app.reload_lock(background=True)
+                    else:
+                        return self._json({"error": "不认识的刷新类型：%s" % what}, 400)
+                except Exception as e:
+                    return self._json({"error": "启动刷新失败：%s" % str(e)[:180]}, 500)
+                return self._json({"ok": True, "what": what})
+            if path == "/api/desktop/clearlog":
+                # 清空扫码日志（不可撤销）。电脑版会先弹确认框再调这里。
+                deny = self._need(me, "data.refresh")
+                if deny:
+                    return deny
+                try:
+                    conn = get_conn()
+                    conn.execute("DELETE FROM scan_record")
+                    conn.commit()
+                    conn.close()
+                except Exception as e:
+                    return self._json({"error": "清空失败：%s" % str(e)[:180]}, 500)
+                try:
+                    self.app.reload_records()
+                except Exception:
+                    pass
+                try:
+                    self.app.status_text.set("已清空扫码日志")
+                except Exception:
+                    pass
+                return self._json({"ok": True})
+            if path == "/api/desktop/api_conf":
+                # 保存 API 参数（复用已有的 save_api_conf，跟旧设置窗同一套逻辑）。
+                # 落盘 + 立刻生效；失败原样回报，不吞错。
+                deny = self._need(me, "data.refresh")
+                if deny:
+                    return deny
+                conf = body.get("conf")
+                if not isinstance(conf, dict):
+                    return self._json({"error": "conf 必须是对象"}, 400)
+                try:
+                    save_api_conf(dict(conf))
+                    reload_api_conf()
+                except Exception as e:
+                    return self._json({"error": "保存失败：%s" % str(e)[:180]}, 500)
+                return self._json({"ok": True,
+                                   "gateway": str(API_CONF.get("gateway") or ""),
+                                   "version": str(API_CONF.get("version") or "")})
+            if path == "/api/desktop/print_action":
+                # 电脑版「打单进度」窗里的几个动作。
+                deny = self._need(me, "data.refresh")
+                if deny:
+                    return deny
+                what = str(body.get("name") or "").strip()
+                if what == "clear_failed":
+                    n = print_jobs_delete(status="failed")
+                    return self._json({"ok": True, "deleted": int(n)})
+                if what == "delete":
+                    ids = body.get("ids") or []
+                    try:
+                        ids = [int(x) for x in ids]
+                    except Exception:
+                        return self._json({"error": "ids 必须是数字列表"}, 400)
+                    n = print_jobs_delete(ids=ids)
+                    return self._json({"ok": True, "deleted": int(n)})
+                if what == "open_dir":
+                    # 在主机上打开数据目录（Qt 窗和主程序在同一台机器）
+                    try:
+                        os.startfile(BASE_DIR)
+                    except Exception as e:
+                        return self._json({"error": "打不开：%s" % str(e)[:150]}, 500)
+                    return self._json({"ok": True})
+                return self._json({"error": "不支持的打单进度动作：%r" % what}, 400)
+            if path == "/api/desktop/action":
+                # 电脑版：执行一个「主程序侧」的动作（大多是打开原来的设置窗）。
+                # **白名单**，不做任意方法调用。
+                deny = self._need(me, "data.refresh")
+                if deny:
+                    return deny
+                name = str(body.get("name") or "").strip()
+                _AMAP = {
+                    "api_settings": "on_api_settings",
+                    "gateway": "on_gateway_settings",
+                    "admin": "on_admin_panel",
+                    "print_clients": "on_print_clients",
+                    "erp_login": "on_erp_login",
+                    "check_update": "on_check_update",
+                    "print_progress": "on_print_progress",
+                    "adjust_log": "on_adjust_log_dialog",
+                    "stock": "on_stock_dialog",
+                    "batch": "on_batch_dialog",
+                    "stocktake": "on_stocktake_dialog",
+                    "pick_file": "on_pick_file",
+                    "apply_filter": "apply_filter",
+                }
+                if name in ("open_dir", "open_db"):
+                    # 电脑版点「打开数据目录 / 打开数据文件」：
+                    # 这些文件在主程序这台机器上，所以在主程序进程里打开才有效。
+                    try:
+                        if name == "open_dir":
+                            target = BASE_DIR
+                            os.startfile(BASE_DIR)
+                        else:
+                            # 别直接 os.startfile(数据库)：.db 一般没有关联程序，
+                            # 会报 WinError 1155。改成"打开所在文件夹并选中它"，哪台机器都能用。
+                            import subprocess as _sp
+                            target = DB_FILE
+                            _sp.Popen(["explorer", "/select," + os.path.normpath(target)])
+                    except Exception as e:
+                        return self._json({"error": "打不开：%s" % str(e)[:150]}, 500)
+                    return self._json({"ok": True, "name": name, "path": target})
+                if name == "quit":
+                    # 电脑版点关闭 → 让主程序优雅退出（Qt 子进程随后自己退）
+                    try:
+                        # uikit = 线程安全队列；after() 从别的线程调会报
+                        # "main thread is not in main loop"，不能用。
+                        uikit.post(self.app.root, self.app.root.destroy)
+                    except Exception:
+                        pass
+                    return self._json({"ok": True, "name": "quit"})
+                fn = _AMAP.get(name)
+                if not fn or not hasattr(self.app, fn):
+                    # 报错自带诊断：把收到的名字和支持的名字都带上，
+                    # 这样"电脑版和主程序版本不一致"一眼就能看出来。
+                    return self._json({
+                        "error": "不支持的动作：%r（本版本支持：%s）"
+                                 % (name, "、".join(sorted(_AMAP.keys())))}, 400)
+                # ★ 先拍窗口快照，再执行动作：等动作跑完才知道哪个窗是「新弹出来的」。
+                #   以前是「无条件把所有可见窗口都提到最前」，枚举顺序不保证 →
+                #   经常变成 Qt 主窗被提到最后、设置窗又压回去了（用户看到的就是
+                #   「子客户端管理/打印分工/对外访问设置还是在主页面下面」）。
+                try:
+                    _snap = self._win_handles()
+                except Exception:
+                    _snap = ()
+                _raise_later(skip=_snap)
+
+                try:
+                    # ★ 必须丢回 Tk 主线程执行，而且**必须走 uikit 这条队列**。
+                    # 这里是 HTTP 请求线程，直接创建/操作 Tk 窗口会卡死；
+                    # 用 root.after() 也不行 —— after() 同样不是线程安全的，
+                    # 实测报 "main thread is not in main loop"，导致菜单全部无效。
+                    uikit.post(self.app.root, getattr(self.app, fn))
+                except Exception as e:
+                    return self._json({"error": "执行失败：%s" % str(e)[:180]}, 500)
+                return self._json({"ok": True, "name": name})
+            if path == "/api/desktop/opt":
+                # 电脑版：开关类设置。带 value = 设成该值；不带 = 切换。
+                deny = self._need(me, "data.refresh")
+                if deny:
+                    return deny
+                name = str(body.get("name") or "").strip()
+                val = body.get("value", None)
+                a = self.app
+                # ★ 开关也会碰 Tk 变量/回调，同样必须丢回 Tk 主线程。
+                # 这里不返回"新值"——电脑版会自己轮询 /api/desktop/state 同步勾选状态。
+                def _do_opt():
+                    try:
+                        if name == "sound":
+                            v = val
+                            if v is None:
+                                v = not bool(a.sound_on.get())
+                            a.sound_on.set(bool(v))
+                        elif name == "hold":
+                            if val is not None:
+                                set_web_hold(int(val))
+                        else:
+                            _TMAP = {"key": ("key_on", "on_key_toggle"),
+                                     "auto_putaway": ("auto_putaway_var", "_toggle_auto_putaway"),
+                                     "auto_audit": ("auto_audit_var", "_toggle_auto_audit"),
+                                     "bg_listen": ("hook_on", "on_hook_toggle")}
+                            pair = _TMAP.get(name)
+                            if not pair:
+                                return
+                            attr, handler = pair
+                            # ★★ 关键：这些处理函数的语义是「按当前勾选状态去应用」
+                            #    （函数内部是 on = self.xxx_var.get()），
+                            #    所以必须**先把勾选框翻过来**，再调它。
+                            #    只调函数不翻 var → 它读到的还是旧值 → 等于把旧值又应用一遍，
+                            #    表现就是"点了没反应"（实测 auto_putaway/auto_audit/key/hook 全中）。
+                            if attr:
+                                try:
+                                    var = getattr(a, attr)
+                                    newv = (not bool(var.get())) if val is None else bool(val)
+                                    var.set(newv)
+                                except Exception:
+                                    pass
+                            getattr(a, handler)()
+                    except Exception as e:
+                        try:
+                            a.status_text.set("开关设置失败：%s" % str(e)[:120])
+                        except Exception:
+                            pass
+
+                _KNOWN = ("sound", "hold", "key", "auto_putaway", "auto_audit", "bg_listen")
+                if name not in _KNOWN:
+                    return self._json({
+                        "error": "不支持的开关：%r（本版本支持：%s）"
+                                 % (name, "、".join(_KNOWN))}, 400)
+                try:
+                    # 同 action：开关也会碰 Tk 变量/回调，必须走 uikit 队列回主线程
+                    uikit.post(self.app.root, _do_opt)
+                except Exception as e:
+                    return self._json({"error": "设置失败：%s" % str(e)[:180]}, 500)
+                return self._json({"ok": True, "name": name})
+            # ================== 电脑版专用接口 结束 ==================
             if path == "/api/client/info":
                 # 子客户端心跳：刷新“最后活跃”和设备信息，供「在线设备」列表用
                 if auth:
@@ -3472,6 +4644,10 @@ class _WebHandler(BaseHTTPRequestHandler):
                     return self._json({"error": "心跳失败：%s" % str(e)[:120]}, 500)
                 return self._json({"ok": True, "refreshed": n})
             if path == "/api/wave/preview":
+                # 预览也走浏览器：同样先确保浏览器可用（报错说人话）
+                _bok2, _bwhy2 = ensure_erp_browser("波次预览")
+                if not _bok2:
+                    return self._json({"error": _bwhy2}, 503)
                 # 干跑挑单（只读，不建波）：列出将挑中的 sid 与每个编码实际成波件数
                 deny = self._need(me, "wave.view")
                 if deny:
@@ -3510,6 +4686,11 @@ class _WebHandler(BaseHTTPRequestHandler):
                 return self._json(out)
 
             if path == "/api/wave/create":
+                # ★ 成波走浏览器 CDP：先把浏览器准备好（自动拉起 + 自愈），
+                #   否则用户会看到「<urlopen error [WinError 10061] …积极拒绝…>」这种天书。
+                _bok, _bwhy = ensure_erp_browser("成波")
+                if not _bok:
+                    return self._json({"error": _bwhy}, 503)
                 # 真正成波（写 ERP）：需 wave.create 权限 + confirm=true；多个编码合并成一个波次
                 deny = self._need(me, "wave.create")
                 if deny:
@@ -3546,6 +4727,11 @@ class _WebHandler(BaseHTTPRequestHandler):
                                 "itemCount": (out.get("verify") or {}).get("item_count"),
                                 "carrier": out.get("carrier") or "",
                                 "codes": out.get("codes") or [],
+                                # ★ 把这一波的订单号**存下来**：ERP 在波次完成后会把
+                                #   「订单↔波次」的关联清掉（实测 waveId 过滤返回 0），
+                                #   到时候只能靠这份本地订单号去数「已打印/实发」。
+                                "orders": len(out.get("sids") or []),
+                                "sids": [str(s) for s in (out.get("sids") or [])][:2000],
                                 # v1.68：记下**本系统**里点成波的那个账号（波次记录页的「生成账号」列）
                                 "who": str((me or {}).get("name") or "").strip(),
                                 "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -3887,7 +5073,114 @@ class _WebHandler(BaseHTTPRequestHandler):
 
 # ==================== 内置服务 / 子客户端发现（主客户端那一侧） ====================
 _WEB_STATE = {"servers": [], "port": 0, "app": None, "user": "", "role": "",
-              "mode": "", "login_at": "", "udp": False, "udp_stop": False, "lan": False}
+              "mode": "", "login_at": "", "udp": False, "udp_stop": False, "lan": False,
+              # ★ 当前登录 token：后台任务（自动打单认领等）在 session.token 为空时兜底用它。
+              #   单进程启动器里 session 是新建的，token 可能没带上 → 会整片 401「请先登录」。
+              "token": ""}
+
+
+_WAVE_PRINTED = {}          # 波次号 → {"n": 已打印订单数, "total": 订单数, "t": 时间}
+
+
+def _wave_printed_get():
+    return dict(_WAVE_PRINTED)
+
+
+def _wave_printed_refresh(codes):
+    """后台把「每个波次已打印了多少单」抓一遍，缓存起来。
+
+    ★ 为什么这么做：ERP 的波次管理列表和开放平台都不给订单明细，
+      只有打单页 /trade/search 支持 waveId 过滤能取到订单列表（带打印状态）。
+      而且**波次一完成关联就被清掉**，所以只能趁未完成时抓。
+      抓到就缓存 —— 这样列表每隔一会儿刷新都能看到数字，而不是空着。
+    """
+    codes = [str(c) for c in (codes or []) if str(c).strip()]
+    if not codes:
+        return
+
+    def loop():
+        try:
+            import kuaimai_wave as wv
+        except Exception:
+            return
+        for code in codes:
+            try:
+                old = _WAVE_PRINTED.get(code)
+                if old and (time.time() - float(old.get("t") or 0)) < 300:
+                    continue                    # 5 分钟内抓过的跳过
+                # ★ 走用户指的那条路：波次管理点波次号 → 该波次订单列表 → 每单 printTimes
+                #   （实测已完成波次也能读，这才是「实发订单数」靠得住的来源）
+                p, total, ok = wv.wave_printed_count(code)
+                _WAVE_PRINTED[code] = {"n": p, "total": total, "t": time.time(),
+                                       "reachable": bool(ok)}
+            except Exception:
+                _WAVE_PRINTED[code] = {"n": None, "total": 0, "t": time.time(),
+                                       "reachable": False}
+
+    try:
+        if _WEB_STATE.get("wave_printed_thread") is not None:
+            return
+        t = threading.Thread(target=loop, daemon=True)
+        _WEB_STATE["wave_printed_thread"] = t
+        t.start()
+    except Exception:
+        pass
+
+
+def human_browser_err(text, action=""):
+    """把浏览器/CDP 的原始报错翻译成人话。
+
+    为什么要它：以前成波/查波次失败会把
+        「<urlopen error [WinError 10061] 由于目标计算机积极拒绝，无法连接。>」
+    原样丢给用户，完全看不懂、也不知道该干什么（用户反馈过）。
+    """
+    t = str(text or "")
+    low = t.lower()
+    if ("10061" in t) or ("积极拒绝" in t) or ("connection refused" in low) or ("refused" in low):
+        return ("%s失败：自动化浏览器没开或没登录 ERP。"
+                "请先点菜单「登录 ERP」把浏览器打开并登录，再试一次。" % (action or "操作"))
+    if "9222" in t:
+        return ("%s失败：连不上自动化浏览器（调试端口 9222）。"
+                "请点菜单「登录 ERP」重新打开浏览器。" % (action or "操作"))
+    if "timeout" in low or "timed out" in low or "超时" in t:
+        return "%s失败：浏览器响应超时，请确认浏览器窗口还开着再试。" % (action or "操作")
+    return "%s失败：%s" % (action or "操作", t[:180])
+
+
+def ensure_erp_browser(action=""):
+    """走浏览器之前先把自动化浏览器准备好（没开就自动拉起，含自愈）。
+
+    返回 (ok, 给用户看的原因)。ok=False 时调用方直接把这个原因返回给界面。
+    """
+    try:
+        import kuaimai_print as K
+        st, msg = K.ensure_browser()
+        if st == "ok":
+            return True, ""
+        if st == "need_login":
+            return False, ("%s失败：%s" % (action or "操作",
+                                          msg or "需要先在自动化浏览器里登录 ERP"))
+        return False, human_browser_err(msg or "浏览器没起来", action)
+    except Exception as e:
+        return False, human_browser_err(e, action)
+def _web_token():
+    """当前登录 token（后台任务没凭证时用它）。"""
+    try:
+        t = str(_WEB_STATE.get("token") or "")
+        if t:
+            return t
+    except Exception:
+        pass
+    try:
+        if auth is not None:
+            for _n, _u in (auth.users() or {}).items():
+                toks = auth._tokens(_u) if hasattr(auth, "_tokens") else {}
+                for k in ("desktop", "host", "web"):
+                    if toks.get(k):
+                        return str(toks[k])
+    except Exception:
+        pass
+    return ""
 
 
 class _NullHost:
@@ -3913,11 +5206,27 @@ def _web_host_info():
             "ver": APP_VER}
 
 
-def _note_login(name, role, mode=""):
+def _note_login(name, role, mode="", token=""):
     _WEB_STATE["user"] = str(name or "")
     _WEB_STATE["role"] = str(role or "")
     _WEB_STATE["mode"] = str(mode or "")
     _WEB_STATE["login_at"] = now_gmt8()
+    if token:
+        _WEB_STATE["token"] = str(token)
+    # ★ 顺手把 token 补给业务会话（ScanApp.session）：后台任务（自动打单认领等）
+    #   都走 session.api，会话没 token —— 或者 token 是旧的/失效的 ——
+    #   就会整片 401「请先登录」。
+    #   注意：不能只在"会话 token 为空"时才补。启动器里会话可能是新建的、
+    #   带着一个读不到的旧 token，那样永远补不上（真机踩过）。
+    #   所以这里**以服务端当前登录 token 为准**，直接覆盖。
+    try:
+        _app = _LIVE_APP.get("app")
+        _sess = getattr(_app, "session", None)
+        if _sess is not None and token:
+            if str(getattr(_sess, "token", "") or "") != str(token):
+                _sess.token = str(token)
+    except Exception:
+        pass
 
 
 def discovery_payload():
@@ -4234,6 +5543,285 @@ _B_RE_EXP = re.compile(r"快递单号[：:]\s*([A-Za-z0-9]+)")
 _B_RE_CO = re.compile(r"快递公司[：:]\s*([^；;]+)")
 
 
+def fetch_ship_batch(batch, days=90, max_pages=20, size=200, progress=None):
+    """按批次号回读「发货」操作日志：每单的**打包账号（验货人）**和**实际发货数量**。
+
+    为什么走这条路（实测结论）：
+      · 开放平台没有发货数量接口；
+      · action="打包"/"验货" 在 ERP 后端 Dubbo 超时（60s 无响应）；
+      · **action="发货" 秒回**，而且每条日志正好带 operator（打包账号）和
+        content 里的「出库商品:编码->件数」（真实出库件数）。
+    返回 (per_sid, err)：per_sid = {sid: {"who": 打包账号, "qty": 实际件数, "items": [(编码, 件数)]}}
+    """
+    batch = str(batch or "").strip()
+    if not batch:
+        return {}, "请输入批次号"
+    RE_OUT = re.compile(r"出库商品[:：]\s*([^;；]+)")
+    per, total_logs = {}, 0
+    end = datetime.now()
+    start = end - timedelta(days=max(1, int(days or 90)))
+    to_ms = lambda d: str(int(d.timestamp() * 1000))
+    for page in range(1, max(1, int(max_pages)) + 1):
+        biz = {"action": "发货", "content": batch,
+               "operateTimeStart": to_ms(start), "operateTimeEnd": to_ms(end),
+               "pageNo": str(page), "pageSize": str(int(size))}
+        try:
+            res = api_call_authed("erp.trade.trace.list", biz, timeout=90)
+        except Exception as e:
+            if per:
+                break
+            return {}, "查询发货记录失败：%s" % str(e)[:120]
+        if not isinstance(res, dict) or not res.get("success"):
+            if per:
+                break
+            return {}, "查询发货记录失败：%s" % str((res or {}).get("msg") or "")[:120]
+        lst = res.get("list") or []
+        total_logs += len(lst)
+        if progress:
+            try:
+                progress(len(lst), total_logs)
+            except Exception:
+                pass
+        for x in lst:
+            sid = str(x.get("sid") or "")
+            if not sid:
+                continue
+            d = per.setdefault(sid, {"who": "", "qty": 0, "items": []})
+            op = str(x.get("operator") or "").strip()
+            if op and not d["who"]:
+                d["who"] = op
+            m = RE_OUT.search(str(x.get("content") or ""))
+            if m:
+                for part in re.split(r"[;；,，]", m.group(1)):
+                    part = part.strip()
+                    if not part:
+                        continue
+                    mm = re.match(r"^(.*?)->\s*(\d+)$", part)
+                    if mm:
+                        code, n = mm.group(1).strip(), int(mm.group(2))
+                        # 同一单可能有多条发货日志（线下发货等）→ 同编码只取最大件数，避免重复累加
+                        found = None
+                        for i, (c0, n0) in enumerate(d["items"]):
+                            if c0 == code:
+                                found = i
+                                break
+                        if found is None:
+                            d["items"].append((code, n))
+                        elif n > d["items"][found][1]:
+                            d["items"][found] = (code, n)
+            d["qty"] = sum(n for _c, n in d["items"])
+        if len(lst) < int(size):
+            break
+    return per, ""
+
+
+def ship_stats(days=1, date_from=None, date_to=None, who="", max_pages=250, size=200,
+               progress=None):
+    """按日期区间统计**每个账号每天的发货数量**（来自「发货」操作日志）。
+
+    数据来源：erp.trade.trace.list，action="发货"（实测秒回；action="打包"会超时）。
+    每条日志带 operator（打包/发货账号）、operateTime、content 里的
+    「出库商品:编码->件数」（真实出库件数）。
+
+    · date_from / date_to：'YYYY-MM-DD'；只给 date_from 就查那一天
+    · who：只看某个账号（空=全部）
+    返回 {"rows": [{日期, 账号, 发货单数, 发货件数, 明细}], "note": ..., "pages": n}
+    """
+    def _day(s):
+        try:
+            return datetime.strptime(str(s)[:10], "%Y-%m-%d")
+        except Exception:
+            return None
+
+    d1 = _day(date_from) or (datetime.now() - timedelta(days=max(1, int(days or 1)) - 1))
+    d2 = _day(date_to) or d1
+    if d2 < d1:
+        d1, d2 = d2, d1
+    start = d1.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = d2.replace(hour=23, minute=59, second=59, microsecond=0)
+    span_days = (end - start).days + 1
+    if span_days > 31:
+        return {"rows": [], "note": "时间跨度最多 31 天（再大日志会翻不完）", "pages": 0}
+
+    RE_OUT = re.compile(r"出库商品[:：]\s*([^;；]+)")
+    agg = {}          # (day, who) -> {"orders":set, "qty":int, "codes":{}}}
+    logs = 0
+    pages = 0
+    truncated = []
+    to_ms = lambda d: str(int(d.timestamp() * 1000))
+    # ★ 按天分别翻页：实测**一天**的发货日志就超过 1.6 万条，
+    #   如果整段共用一个页数上限，后面的日期会被整段截掉、统计偏小（实测踩到）。
+    #   每天各自用满 max_pages，真的翻不完就在说明里如实标注。
+    day_list = [start.date() + timedelta(days=i)
+                for i in range((end.date() - start.date()).days + 1)]
+    for day in day_list:
+        ds = datetime.combine(day, datetime.min.time())
+        de = ds.replace(hour=23, minute=59, second=59)
+        full = True
+        for page in range(1, max(1, int(max_pages)) + 1):
+            biz = {"action": "发货", "content": "",
+                   "operateTimeStart": to_ms(ds), "operateTimeEnd": to_ms(de),
+                   "pageNo": str(page), "pageSize": str(int(size))}
+            try:
+                res = api_call_authed("erp.trade.trace.list", biz, timeout=120)
+            except Exception as ex:
+                if pages == 0:
+                    return {"rows": [], "note": "查询发货日志失败：%s" % str(ex)[:140],
+                            "pages": 0}
+                full = False
+                break
+            if not isinstance(res, dict) or not res.get("success"):
+                if pages == 0:
+                    return {"rows": [],
+                            "note": "查询发货日志失败：%s"
+                                    % str((res or {}).get("msg") or "")[:140], "pages": 0}
+                full = False
+                break
+            lst = res.get("list") or []
+            pages += 1
+            logs += len(lst)
+            if progress:
+                try:
+                    progress(page, logs)
+                except Exception:
+                    pass
+            for x in lst:
+                op = str(x.get("operator") or "").strip()
+                if who and op != str(who).strip():
+                    continue
+                t = x.get("operateTime")
+                try:
+                    ts = int(t) / 1000.0
+                    dday = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+                except Exception:
+                    continue
+                sid = str(x.get("sid") or "")
+                d = agg.setdefault((dday, op or "（无账号）"),
+                                   {"orders": set(), "qty": 0, "codes": {}})
+                m = RE_OUT.search(str(x.get("content") or ""))
+                if not m:
+                    continue                  # 非出库记录（如"上传平台状态"）→ 不计件数
+                if sid:
+                    d["orders"].add(sid)
+                for part in re.split(r"[;；,，]", m.group(1)):
+                    part = part.strip()
+                    if not part:
+                        continue
+                    mm = re.match(r"^(.*?)->\s*(\d+)$", part)
+                    if mm:
+                        code, n = mm.group(1).strip(), int(mm.group(2))
+                        k2 = (sid, code)
+                        old = d["codes"].get(k2, 0)
+                        if n > old:
+                            d["codes"][k2] = n
+            if len(lst) < int(size):
+                full = False
+                break
+        if full:
+            truncated.append(day.strftime("%Y-%m-%d"))
+    rows = []
+    who_tot = {}
+    for (day, op), d in agg.items():
+        qty = sum(d["codes"].values())
+        rows.append({"日期": day, "账号": op,
+                     "发货单数": len(d["orders"]), "发货件数": qty,
+                     "明细": "、".join("%s×%d" % (c, n) for (s, c), n in
+                                      list(d["codes"].items())[:12])})
+        w = who_tot.setdefault(op, {"orders": set(), "qty": 0})
+        w["orders"] |= d["orders"]
+        w["qty"] += qty
+    rows.sort(key=lambda r: (r["日期"], -r["发货件数"], r["账号"]))
+    # 末尾追加每个账号的合计（日期列写「合计」）
+    for op, v in sorted(who_tot.items(), key=lambda x: -x[1]["qty"]):
+        rows.append({"日期": "合计", "账号": op, "发货单数": len(v["orders"]),
+                     "发货件数": v["qty"], "明细": ""})
+    note = ("%s ~ %s：扫了 %d 页 / %d 条发货日志，共 %d 个账号有发货"
+            % (start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"),
+               pages, logs, len(who_tot)))
+    if truncated:
+        note += "　⚠ %s 的日志超过页数上限，当天数字偏小（可把那一天单独查）" \
+                % "、".join(truncated)
+    if who:
+        note += "（已按账号 %s 过滤）" % who
+    return {"rows": rows, "note": note, "pages": pages, "logs": logs,
+            "truncated": truncated}
+
+
+# ---------- 「实发订单数」缓存（按天扫发货日志，算每个波次实际发了多少单）----------
+# 为什么缓存：波次记录是每 15 秒轮询的，而扫一天的「发货」日志要翻上百页；
+# 直接放进请求里会把界面拖死。所以由后台线程按天算好，接口只读结果。
+_SHIP_CNT = {}          # day -> {"m": {sid: who}, "ts": 时间戳, "busy": bool}
+
+
+def _ship_day_map(day, force=False):
+    """把某一天的发货日志读成 {sid: 打包账号}（带 10 分钟缓存）。"""
+    now = time.time()
+    rec = _SHIP_CNT.get(day)
+    if rec and not force and (now - rec.get("ts", 0) < 600):
+        return rec.get("m") or {}
+    if rec and rec.get("busy"):
+        return rec.get("m") or {}
+    _SHIP_CNT[day] = {"m": (rec or {}).get("m") or {}, "ts": (rec or {}).get("ts", 0),
+                      "busy": True}
+
+    def work():
+        m = {}
+        try:
+            y, mo, dd = str(day).split("-")
+            ds = datetime(int(y), int(mo), int(dd), 0, 0, 0)
+            de = ds.replace(hour=23, minute=59, second=59)
+            to_ms = lambda d: str(int(d.timestamp() * 1000))
+            for page in range(1, 201):
+                biz = {"action": "发货", "content": "",
+                       "operateTimeStart": to_ms(ds), "operateTimeEnd": to_ms(de),
+                       "pageNo": str(page), "pageSize": "200"}
+                res = api_call_authed("erp.trade.trace.list", biz, timeout=120)
+                if not isinstance(res, dict) or not res.get("success"):
+                    break
+                lst = res.get("list") or []
+                for x in lst:
+                    sid = str(x.get("sid") or "")
+                    if sid and sid not in m:
+                        m[sid] = str(x.get("operator") or "").strip()
+                if len(lst) < 200:
+                    break
+        except Exception:
+            pass
+        _SHIP_CNT[day] = {"m": m, "ts": time.time(), "busy": False}
+
+    try:
+        threading.Thread(target=work, daemon=True).start()
+    except Exception:
+        _SHIP_CNT[day]["busy"] = False
+    return _SHIP_CNT[day]["m"]
+
+
+def _ship_count_cache_get():
+    """给接口读的缓存快照：{日期: {sid: 账号}}（不含 busy 标记）。"""
+    out = {}
+    for k, v in _SHIP_CNT.items():
+        m = v.get("m") or {}
+        if m:
+            out[k] = m
+    return out
+
+
+def shipped_counts(sids, day):
+    """给定 SID 列表 + 日期，返回 (实发订单数, {账号: 单数})。只读缓存，不阻塞。"""
+    raw = [str(s) for s in (sids or []) if str(s)]
+    if not raw:
+        return None, {}
+    m = _ship_day_map(day)
+    if not m:
+        return None, {}
+    hit = [s for s in raw if s in m]
+    bywho = {}
+    for s in hit:
+        w = m.get(s) or "（无账号）"
+        bywho[w] = bywho.get(w, 0) + 1
+    return len(hit), bywho
+
+
 def fetch_print_batch(batch, days=3, progress=None, max_pages=30):
     """按打印批次号反查：先查订单操作日志拿 sid，再批量取订单明细（商品编码/件数）。
 
@@ -4398,7 +5986,32 @@ def read_table_file(path):
     return table[0], table[1:]
 
 
+def _size_rank(code):
+    """款号编码里的尺码排序权重：S<M<L<XL<2XL<3XL…；数字尺码排其后，认不出的排最后。
+
+    跟网页版 /stocktake 的 sizeRank() 同一套规则，保证电脑版和网页版排序一致。
+    """
+    t = re.sub(r"[\s\-]", "", str(code or "").upper())
+    m = re.search(r"(XXXL|XXL|XS|XL|[2-9]XL|S|M|L|[0-9]{2,3})$", t)
+    if not m:
+        return 900
+    tok = m.group(1)
+    fixed = {"XS": 5, "S": 10, "M": 20, "L": 30, "XL": 40, "XXL": 50, "XXXL": 60}
+    if tok in fixed:
+        return fixed[tok]
+    d = re.match(r"^([2-9])XL$", tok)
+    if d:
+        return 30 + int(d.group(1)) * 10
+    if re.match(r"^[0-9]{2,3}$", tok):
+        return 200 + int(tok)
+    return 900
+
+
 # ============================ 界面 ============================
+# 真正在跑的主窗口登记处（内置服务自愈时要用；只放主窗口引用，别放别的）
+_LIVE_APP = {}
+
+
 class ScanApp:
     GREEN = "#1e9e4a"
     GREEN_BG = "#d7f5e0"
@@ -4458,6 +6071,25 @@ class ScanApp:
         self.filter_n = tk.StringVar(value="1")
         self.scan_text = tk.StringVar()
         self.status_text = tk.StringVar(value="就绪")
+        # v1.74：给状态文字挂一份"纯文本镜像"。
+        # HTTP 线程（别的线程）直接读 Tk 变量属于跨线程碰 Tcl，可能把程序搞崩，
+        # 所以在这里让 Tk 线程自己同步一份出来，接口只读镜像。
+        try:
+            self._status_mirror = {"text": str(self.status_text.get() or "")}
+
+            def _km_mirror(*_a):
+                try:
+                    self._status_mirror["text"] = str(self.status_text.get() or "")
+                except Exception:
+                    pass
+
+            self.status_text.trace_add("write", _km_mirror)
+            # ★ 登记"真正在跑的主窗口"：内置服务万一还端着登录阶段的占位对象，
+            #   接口层靠这个把真窗口认回来（见 _WebHandler._ensure_live_app）。
+            _LIVE_APP["app"] = self
+        except Exception:
+            self._status_mirror = None
+
         self.sound_on = tk.BooleanVar(value=True)
         self.q = queue.Queue()
 
@@ -4599,7 +6231,8 @@ class ScanApp:
             self.web_label.config(text="手机网页服务启动失败：%s" % str(e)[:60])
             return
         if port and self.session is not None:
-            _note_login(self.session.name, self.session.role, self.session.mode)
+            _note_login(self.session.name, self.session.role, self.session.mode,
+                        token=str(getattr(self.session, "token", "") or ""))
         if not port:
             self.web_label.config(text="手机网页服务启动失败（端口被占用）")
             return
@@ -5316,6 +6949,46 @@ class ScanApp:
                 "loaded_at": self.loaded_at, "shelf_at": self.shelf_at,
                 "codes": len((self.web_index_payload().get("items") or {}))}
 
+    def stocktake_rows(self, kw="", only="all"):
+        """库存盘点（按款号）：把「编码 → 各货位在架数」摊平成一行一个货位。
+
+        和网页版 /stocktake 同一个口径：数据来自本地索引 + 货位在架，不联网；
+        排序按尺码 S<M<L<XL<2XL…，同尺码再按编码。
+        返回 {"kw","rows":[{...}],"note"} —— 给电脑版通用表格接口用（形状固定，不靠猜）。
+        """
+        kw = str(kw or "").strip()
+        if not kw:
+            return {"kw": "", "rows": [],
+                    "note": "先输入款号（如 7107），再点查询。"}
+        src = self.stock_rows(kw, only or "all", "code")
+        k0 = kw.upper()
+        out = []
+        for r in src:
+            code = str(r.get("c") or "")
+            # 去掉「裸款号」本身那一行（网页版同样处理）
+            if code.upper() == k0 and "-" not in code:
+                continue
+            pend = int(r.get("p") or 0)
+            bins = r.get("bl") or []
+            if not bins:
+                bins = [["无在架货位", 0]]
+            for b in bins:
+                try:
+                    loc, qty = str(b[0]), int(b[1] or 0)
+                except Exception:
+                    loc, qty = str(b), 0
+                out.append({"kw": kw, "code": code, "bin": loc,
+                            "shelf": qty, "pending": pend,
+                            "rank": _size_rank(code)})
+        out.sort(key=lambda x: (x["rank"], str(x["code"]), str(x["bin"])))
+        for x in out:
+            x.pop("rank", None)
+        note = ("款号 %s：%d 个规格 / %d 个货位行（按尺码 S<M<L<XL<2XL 排序）"
+                % (kw, len(src), len(out))) if out else \
+               ("款号 %s：没查到编码（试试只输数字前缀，如 7107）" % kw)
+        return {"kw": kw, "rows": out, "note": note}
+
+
     def stock_xlsx(self, kw="", only="all", sort="free"):
         """导出 Excel：编码 / 一单一件订单数 / 一单多件订单数 / 多件件数 / 待发货件数 / 在架数 / 可发数量。"""
         rows = self.stock_rows(kw, only, sort)
@@ -5527,6 +7200,12 @@ class ScanApp:
 
     def on_erp_login(self):
         """打开/聚焦打单浏览器并定位到 ERP，供人工登录（这个窗口不要关，打单/生成波次都靠它）。"""
+        # ★ 先把 ERP 状态缓存作废：用户点完这个按钮就要看到最新状态，
+        #   否则状态条可能还显示着 25 秒前的「未登录」。
+        try:
+            _WEB_STATE.pop("erp_status", None)
+        except Exception:
+            pass
         try:
             import kuaimai_print as kp
             st, msg = kp.open_erp_browser()
@@ -8592,6 +10271,16 @@ def start_auto_print_watcher(db_path=None, session=None):
     def api(path, method="GET", params=None, body=None, timeout=25):
         # 复用现有会话/主端地址机制：主端 → 127.0.0.1:本机端口；子端 → session.base
         if session is not None:
+            # ★ 会话没带 token 时用服务端记的当前登录 token 兜底。
+            #   单进程启动器里 session 是新建的，token 可能是空的 → 否则整片
+            #   401「请先登录」，自动打单就一直认领失败（真机踩到过）。
+            if not str(getattr(session, "token", "") or ""):
+                t = _web_token()
+                if t:
+                    try:
+                        session.token = t
+                    except Exception:
+                        pass
             return session.api(path, method=method, params=params, body=body, timeout=timeout)
         import kuaimai_client as kc
         base = "http://127.0.0.1:%d" % int(_WEB_STATE.get("port") or WEB_PORT)
@@ -8656,7 +10345,308 @@ def _single_instance_guard():
         return None
 
 
+# ==================== 电脑版（Qt）界面 · v1.70 新增 ====================
+UI_QT_MODULE = "qtui.window"
+
+_RAISE_ROOT = {}
+# 记忆：已受理过提窗的窗口句柄 —— 动作后如果再冒出**新的**窗口，照样会再提一次
+_RAISE_DONE = set()
+
+
+def _win_enum(skip=()):
+    """本进程所有「可见且有标题」的顶层窗口句柄（枚举顺序就是 z-order，自上而下）。"""
+    out = []
+    try:
+        import ctypes
+        from ctypes import wintypes as _wt
+        u32 = ctypes.windll.user32
+        u32.EnumWindows.restype = _wt.BOOL
+        u32.GetWindowThreadProcessId.argtypes = [_wt.HWND, ctypes.POINTER(_wt.DWORD)]
+        u32.GetWindowTextLengthW.argtypes = [_wt.HWND]
+        u32.GetWindowTextW.argtypes = [_wt.HWND, _wt.LPWSTR, ctypes.c_int]
+        me = os.getpid()
+        hwnd_cb = ctypes.WINFUNCTYPE(_wt.BOOL, _wt.HWND, _wt.LPARAM)
+
+        def _cb(hwnd, _l):
+            try:
+                h = int(hwnd)
+                if h in skip:
+                    return True
+                pid = _wt.DWORD()
+                u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if pid.value != me or not u32.IsWindowVisible(hwnd):
+                    return True
+                if u32.GetWindowTextLengthW(hwnd) > 0:
+                    out.append(h)
+            except Exception:
+                pass
+            return True
+
+        u32.EnumWindows(hwnd_cb(_cb), 0)
+    except Exception:
+        pass
+    return out
+
+
+def _win_force_front(hwnd, topmost_ms=420):
+    """把某个窗口强制提到最前：借「置顶」拿到真实最前，短暂后自动取消置顶。
+
+    为什么必须这样：Windows 有一条前台锁——**不是**当前前台进程的进程调
+    SetForegroundWindow 会被系统忽略。设置窗是主程序（Tk）进程弹的，此刻前台是
+    Qt 窗口（另一个进程），所以主程序怎么叫都提不上来 → 用户看到的现象就是
+    「点了没反应 / 窗口被压在电脑版主界面下面」。
+    设 WS_EX_TOPMOST 不受前台锁限制（窗口一定在最上层），再取消置顶就能保持激活。
+    """
+    if not hwnd:
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes as _wt
+        u32 = ctypes.windll.user32
+        u32.SetWindowPos.argtypes = [_wt.HWND, _wt.HWND, ctypes.c_int, ctypes.c_int,
+                                     ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+        u32.SetWindowPos.restype = _wt.BOOL
+        HWND_TOPMOST, HWND_NOTOPMOST = -1, -2
+        SWP_NOSIZE, SWP_NOMOVE, SWP_SHOWWINDOW = 0x0001, 0x0002, 0x0040
+        flags = SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW
+        h = _wt.HWND(hwnd)
+        # ① 置顶 + 激活
+        try:
+            u32.ShowWindow(h, 5)                       # SW_SHOW
+        except Exception:
+            pass
+        u32.SetWindowPos(h, _wt.HWND(HWND_TOPMOST), 0, 0, 0, 0, flags)
+        try:
+            u32.BringWindowToTop(h)
+            u32.SetForegroundWindow(h)
+        except Exception:
+            pass
+        # ② 短暂后取消置顶（保持最前但不再霸占置顶；TOPMOST 本身没有激活权，得补一次激活）
+        def _un():
+            try:
+                u32.SetWindowPos(h, _wt.HWND(HWND_NOTOPMOST), 0, 0, 0, 0, flags)
+            except Exception:
+                pass
+            try:
+                u32.SetForegroundWindow(h)
+            except Exception:
+                pass
+            try:
+                u32.SetFocus(h)
+            except Exception:
+                pass
+
+        root = _RAISE_ROOT.get("root")
+        try:
+            if root is not None:
+                root.after(int(topmost_ms), _un)
+                return
+        except Exception:
+            pass
+        _un()
+    except Exception:
+        pass
+
+
+def _app_raise_windows(delay_ms=460, skip=()):
+    """在 Tk 主线程里跑（**必须**经 uikit.post 进来）：把刚弹出的设置窗强制提到最前。
+
+    为什么不能在 HTTP 线程里直接 root.after()：after() 不是线程安全的
+    （项目里为此专门有 uikit.post），跨线程调可能静默失败 —— 那样提窗就没了。
+    """
+    try:
+        skip = {int(x) for x in (skip or ())}
+    except Exception:
+        skip = set()
+    last = [0]
+
+    def _step():
+        try:
+            new = [h for h in _win_enum(skip=skip) if h not in _RAISE_DONE]
+            if new:
+                # EnumWindows 自上而下 → new[0] 就是刚弹出来的那个设置窗
+                for h in new:
+                    _win_force_front(h)
+                    _RAISE_DONE.add(h)
+                last[0] = 0
+                return
+            if last[0] < 2:            # Tk 还没映射出来：再等一小会儿
+                last[0] += 1
+                root = _RAISE_ROOT.get("root")
+                if root is not None:
+                    root.after(300, _step)
+        except Exception:
+            pass
+
+    _step()
+
+
+def _raise_later(delay_ms=380, skip=()):
+    """动作受理后，安排「把新弹出的设置窗提到最前」。只在 ui=qt 时需要。
+
+    从 HTTP 请求线程调用，所以必须走 uikit.post（线程安全队列）。
+    skip：动作前拍的窗口快照（本进程已有窗口），用来排除掉 Qt 主窗和 Tk 主窗。
+    """
+    if not ui_prefers_qt():
+        return
+    root = _RAISE_ROOT.get("root")
+    if root is None:
+        return
+    try:
+        if uikit is not None:
+            uikit.post(root, _app_raise_windows, int(delay_ms), tuple(skip or ()))
+        else:
+            root.after(int(delay_ms), lambda: _app_raise_windows(int(delay_ms), tuple(skip or ())))
+    except Exception:
+        pass
+
+
+
+def ui_prefers_qt():
+    """配置项 ui=qt 就用电脑版界面（默认 qt）；读不到按 qt 处理。"""
+    try:
+        v = str((load_settings() or {}).get("ui") or "qt").strip().lower()
+    except Exception:
+        v = "qt"
+    return v != "tk"
+
+
+def qt_login_session(root, wait_secs=900):
+    """ui=qt：用 Qt 登录窗代替老的 Tk 登录窗，成功返回 Session，失败返回 None（调用方回退）。
+
+    做法：
+      1) 先把本机网页服务拉起来（登录接口就在它上面）
+      2) 起 Qt 窗口的"登录模式"（--login-out 文件）
+      3) 它登录成功后把会话写进那个临时文件；这里轮询读到就返回
+    期间用 root.update() 让 Tk 事件循环转着（Tk 窗口是藏着的，用户看不到）。
+    """
+    import json as _json
+    import subprocess
+    import tempfile
+    here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        ensure_web_server(None, lan=False)
+    except Exception:
+        return None
+    port = int(_WEB_STATE.get("port") or WEB_PORT)
+    base = "http://127.0.0.1:%d" % port
+    out = os.path.join(tempfile.gettempdir(), "km_qt_session_%d.json" % os.getpid())
+    try:
+        if os.path.isfile(out):
+            os.remove(out)
+    except Exception:
+        pass
+    if getattr(sys, "frozen", False):
+        args = [sys.executable, "--qt-window", "--base", base, "--login-out", out]
+    else:
+        args = [sys.executable, "-m", UI_QT_MODULE, "--base", base, "--login-out", out]
+    try:
+        env = dict(os.environ)
+        env["PYTHONPATH"] = here + os.pathsep + env.get("PYTHONPATH", "")
+        proc = subprocess.Popen(args, cwd=here, env=env, close_fds=True)
+    except Exception:
+        return None
+    t0 = time.time()
+    try:
+        while time.time() - t0 < float(wait_secs):
+            if proc.poll() is not None:
+                return None                      # 用户把登录窗关了
+            if os.path.isfile(out):
+                d = None
+                try:
+                    with open(out, "r", encoding="utf-8") as f:
+                        d = _json.load(f)
+                except Exception:
+                    d = None
+                if isinstance(d, dict) and d.get("token"):
+                    # ★ 千万别在这里删！Qt 窗口还要读这个文件拿会话。
+                    #   之前这里 os.remove 了 → Qt 读不到 → 又弹一次登录框 → 拿不到凭证
+                    #   → 所有接口 401 → "按钮都不能用 / 每次都要重新登录"。
+                    #   现在改成：只读不删，由 Qt 窗口读完自己删。
+                    pass
+                    if kmclient is None:
+                        return None
+                    try:
+                        return kmclient.Session(
+                            mode=d.get("mode") or "host",
+                            base=d.get("base") or base,
+                            token=d.get("token") or "",
+                            name=d.get("name") or "",
+                            role=d.get("role") or "",
+                            server_name=d.get("server_name") or "")
+                    except Exception:
+                        return None
+            try:
+                root.update()                    # 让 Tk 事件循环别僵住
+            except Exception:
+                pass
+            time.sleep(0.15)
+    finally:
+        if proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+    return None
+
+
+def start_qt_window(web_port=None, wait_secs=6.0, token="", user=""):
+    """起一个独立的 Qt 窗口进程。成功返回进程对象，失败返回 None（调用方保持 Tk 界面）。
+
+    打包成 exe 之后 sys.executable 就是主程序自己，用 --qt-window 让它以"只开 Qt 窗口"模式跑。
+
+    token/user：桌面端登录拿到的会话。**这个 token 就是网页端的 token**
+    （桌面端登录走的也是 /api/auth/login），所以直接传给 Qt 窗口，它就不用再让用户登录一遍。
+    """
+    import subprocess
+    here = os.path.dirname(os.path.abspath(__file__))
+    port = int(web_port or _WEB_STATE.get("port") or WEB_PORT)
+    base = "http://127.0.0.1:%d" % port
+    if getattr(sys, "frozen", False):
+        args = [sys.executable, "--qt-window", "--base", base]
+    else:
+        args = [sys.executable, "-m", UI_QT_MODULE, "--base", base]
+    args += ["--parent-pid", str(os.getpid())]     # 主程序没了，Qt 窗口自己退，不留孤儿
+    try:
+        env = dict(os.environ)
+        env["PYTHONPATH"] = here + os.pathsep + env.get("PYTHONPATH", "")
+        # 用环境变量而不是命令行传 token：命令行在进程列表里任何人可见
+        env["KM_QT_TOKEN"] = str(token or "")
+        env["KM_QT_USER"] = str(user or "")
+        p = subprocess.Popen(args, cwd=here, env=env, close_fds=True)
+    except Exception:
+        return None
+    t0 = time.time()
+    while time.time() - t0 < float(wait_secs):
+        time.sleep(0.2)
+        if p.poll() is not None:
+            return None                            # 中途退了 = 起不来（缺 PySide6 等）
+    return p
+
+
+# ==================== 电脑版界面支持 结束 ====================
+
+
 def main():
+    if "--qt-window" in sys.argv:
+        # 被主程序以「Qt 启动器」方式调用：直接开 Qt 窗口
+        try:
+            sys.argv = [x for x in sys.argv if x != "--qt-window"]
+        except Exception:
+            pass
+        from qtui.window import main as _qt_main
+        return _qt_main()
+    # ★ v1.84 单进程：ui=qt 时交给 kuaimai_qt_main 启动器（引擎搬进电脑版自己的进程）。
+    #   KM_FROM_LAUNCHER=1 是启动器回退调进来时的标记 → 不能再转回去，否则死循环。
+    try:
+        _from_launcher = str(os.environ.get("KM_FROM_LAUNCHER") or "") == "1"
+        _env_off = str(os.environ.get("KM_LEGACY_MAIN") or "") == "1"
+        if "--tk" not in sys.argv and not _from_launcher and not _env_off and ui_prefers_qt():
+            import kuaimai_qt_main as _qt_entry
+            os.environ["KM_FROM_LAUNCHER"] = "1"
+            return _qt_entry.main()
+    except Exception:
+        pass
     if "--selftest" in sys.argv:
         run_selftest()
         return
@@ -8668,9 +10658,31 @@ def main():
         return
     root = tk.Tk()
     root.withdraw()
+    _RAISE_ROOT["root"] = root
+    # v1.78：ui=qt 时，把老的那些 Tk 设置窗全局换肤，让它们看起来跟新版电脑版界面是一套。
+    # 只改颜色/字体/扁平样式，不动任何布局和逻辑；选 ui=tk 时完全不生效（老界面保持原样）。
+    if ui_prefers_qt():
+        try:
+            import kuaimai_theme
+            kuaimai_theme.apply(root)
+        except Exception:
+            pass
     session = None
+    # v1.73：ui=qt 时优先用 Qt 登录窗（跟电脑版同一套样式，用户完全看不到旧界面）。
+    # 它失败/被关掉就 session 保持 None，下面自动回退老的 Tk 登录窗。
+    if ui_prefers_qt():
+        try:
+            session = qt_login_session(root)
+        except Exception:
+            try:
+                sys.stderr.write(traceback.format_exc())
+            except Exception:
+                pass
+            session = None
     try:
-        session = ask_login(root, lambda: ensure_web_server(None, lan=False), default_port=WEB_PORT)
+        if session is None:
+            session = ask_login(root, lambda: ensure_web_server(None, lan=False),
+                                default_port=WEB_PORT)
     except Exception:
         detail = traceback.format_exc()
         try:
@@ -8708,6 +10720,48 @@ def main():
         session._port = int(_WEB_STATE.get("port") or WEB_PORT)
         root.deiconify()
         app = ScanApp(root, session)
+        # v1.70：ui=qt（默认）→ 起独立 Qt 窗口，把 Tk 主窗口藏起来。
+        # 先藏再起（否则要等 Qt 起来那几秒，旧窗口会亮在屏幕上，看着像开了两个软件）；
+        # Qt 起不来就把 Tk 窗口放回来，用户完全无感。
+        #
+        # ★ 必须用「全透明」而不是 withdraw()：
+        #   withdraw 会让所有 transient(主窗口) 的设置窗【创建出来但不显示】——
+        #   用 Win32 EnumWindows 实测确认：窗口存在，但 IsWindowVisible=False，
+        #   表现就是"点 API 设置等菜单，什么窗口都不弹"。
+        #   全透明窗口仍是"已映射"状态 → 子窗口/设置窗能正常弹，用户又看不见它。
+        if ui_prefers_qt():
+            _hid = False
+            try:
+                try:
+                    root.attributes("-alpha", 0.0)
+                except Exception:
+                    root.withdraw()
+                _hid = True
+                _qp = start_qt_window(token=getattr(session, "token", ""),
+                                      user=getattr(session, "name", ""))
+                if _qp is not None:
+                    app._qt_proc = _qp
+                    try:
+                        app.status_text.set("已切到电脑版界面（Qt）")
+                    except Exception:
+                        pass
+                elif _hid:
+                    # Qt 没起来 → 放回 Tk 界面
+                    try:
+                        root.attributes("-alpha", 1.0)
+                    except Exception:
+                        pass
+                    root.deiconify()
+            except Exception:
+                if _hid:
+                    try:
+                        root.attributes("-alpha", 1.0)
+                    except Exception:
+                        pass
+                    try:
+                        root.deiconify()
+                    except Exception:
+                        pass
         try:
             session.start_heartbeat()
         except Exception:

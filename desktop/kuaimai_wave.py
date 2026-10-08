@@ -82,6 +82,9 @@ CARRIERS = ("中通", "申通")            # 波次按快递拆开：一个波�
 QUERY_PATH = "/trade/wave/checked/trade/query"
 SAVE_PATH = "/trade/wave/checked/trade/save"
 MANAGER_PATH = "/trade/wave/manager/list"   # ERP 网页「波次管理」列表（登录态，含未拣选波次）
+# ★ ERP 网页「波次管理 → 点波次号」时调的接口：该波次的订单列表 + 每单打印状态(printTimes)。
+#   实测**已完成波次也能读**（这是「实发订单数」唯一可靠的来源）。
+WAVE_TRADE_LOG_PATH = "/trade/wave/trade/list/log"
 DEFAULT_PAGE_SIZE = 600               # 与服务端 queryWaveTradeByCondition 的 limit 600 对齐
 
 
@@ -544,6 +547,161 @@ def plan(items, carrier=""):
             "candidates": len(cand), "warehouseId": WAREHOUSE_ID}
 
 
+def wave_orders(wave_code, page_size=500, max_pages=4):
+    """按波次号取该波次的**订单列表**（含每单打印状态）。
+
+    ★ 正确接口（用户在 ERP 里指的路：交易-波次打印-波次管理-点波次号）：
+        POST /trade/wave/trade/list/log   body: waveId=<波次号>&pageNo=&pageSize=
+      返回 data.list[]，每单带：
+        · printTimes        = 打印次数（>0 = 已打印）★ 这就是页面上的「打印状态」
+        · expressPrintTime  = 快递单打印时间
+        · sysStatus / chSysStatus / tradeWaveStatus
+        · sid / tid / outSid / shortId / positionCode
+      实测：**已完成波次也能读**（204430 → 180 单、179 已打印；204449 → 201 单）。
+
+      （弯路记录：我先试过 /trade/search?waveId= —— 那个接口在波次完成后返回 0，
+        看起来像"关联被清掉了"，其实只是接口选错了。这个 /trade/wave/trade/list/log
+        才是波次管理页点波次号时真正调的接口。）
+
+    返回 (orders, total)；失败返回 ([], 0)。
+    """
+    import json as _json
+    import urllib.parse as _up
+    code = str(wave_code or "").strip()
+    if not code:
+        return [], 0
+    c = KP.open_cdp_page()
+    orders = []
+    total = 0
+    try:
+        for page in range(1, max(1, int(max_pages)) + 1):
+            payload = _up.urlencode({"waveId": code, "pageNo": page,
+                                     "pageSize": int(page_size),
+                                     "warehouseId": WAREHOUSE_ID})
+            r = _post(c, WAVE_TRADE_LOG_PATH, payload,
+                      "application/x-www-form-urlencoded")
+            try:
+                j = _json.loads((r or {}).get("text") or "")
+            except Exception:
+                break
+            d = j.get("data") or {}
+            lst = d.get("list") or []
+            try:
+                total = int(d.get("total") or 0)
+            except Exception:
+                total = 0
+            orders.extend(lst)
+            if not lst or len(lst) < int(page_size):
+                break
+            if total and len(orders) >= total:
+                break
+    finally:
+        try:
+            c.close()
+        except Exception:
+            pass
+    return orders, total
+
+
+_ARC = 946656000000          # ERP 的空时间占位值（946656000000 = 2000-01-01）
+
+
+def order_printed(o):
+    """这一单是不是「已经打印过」。
+
+    判定依据（实测字段）：
+      · printTimes > 0        → 打印过（ERP 波次管理页的「打印状态」就是它）★ 首选
+      · printCount > 0        → 打印过
+      · expressPrintTime 有值 → 快递单打印过
+      · deliverPrintTime 有值 → 发货单打印过
+    **不能**用 chStatus（交易状态）：实测未完成波次里它是「已发货」，不可靠。
+    """
+    if not isinstance(o, dict):
+        return False
+    try:
+        if int(o.get("printTimes") or 0) > 0:
+            return True
+    except Exception:
+        pass
+    try:
+        if int(o.get("printCount") or 0) > 0:
+            return True
+        if int(o.get("expressPrintTime") or 0) > _ARC:
+            return True
+        if int(o.get("deliverPrintTime") or 0) > _ARC:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def wave_printed_count(wave_code):
+    """波次「已打印订单数」。返回 (printed, orders_total, reachable)。
+
+    口径（用户确认）：点进波次看到 180 个订单、179 个已打印 → 实发就是 179。
+    """
+    orders, total = wave_orders(wave_code)
+    if not orders:
+        return None, total, False
+    p = sum(1 for o in orders if order_printed(o))
+    return p, (total or len(orders)), True
+
+
+def wave_printed_by_sids(sids, chunk=200, max_chunks=12):
+    """拿订单号列表回读打印状态 → (已打印数, 取到的订单数, 总数)。
+
+    ★ 为什么需要它（用户给的关键线索）：ERP 在波次**完成后**会把「订单↔波次」的
+      关联清掉，那时 `waveId=` 过滤返回 0，波次的订单再也取不回来。
+      但订单本身还在系统里 —— 只要**成波时把订单号存下来**，之后就能用
+      /trade/search?sids= 批量（实测一次 200 个没问题）把每单的打印状态读回来。
+      所以：成波时存 sids，之后用它算「实发订单数」。
+    """
+    import json as _json
+    import urllib.parse as _up
+    ids = [str(s) for s in (sids or []) if str(s).strip()]
+    if not ids:
+        return None, 0, 0
+    total_want = len(ids)
+    c = KP.open_cdp_page()
+    got = []
+    try:
+        for i in range(0, min(len(ids), int(chunk) * int(max_chunks)), int(chunk)):
+            part = ids[i:i + int(chunk)]
+            form = ("api_name=trade_search&queryId=77&pageSize=%d&field=timeoutActionTime"
+                    "&needOrder=1&useCompress=0&minutesAfterPaidOrderAreNotDisplayed=0"
+                    "&sids=%s&page=1" % (int(chunk), _up.quote(",".join(part))))
+            r = _post(c, SEARCH_PATH, form, "application/x-www-form-urlencoded")
+            try:
+                j = _json.loads((r or {}).get("text") or "")
+            except Exception:
+                continue
+            lst = ((j.get("data") or {}).get("list")) or []
+            got.extend(lst)
+    finally:
+        try:
+            c.close()
+        except Exception:
+            pass
+    if not got:
+        return None, 0, total_want
+    p = sum(1 for o in got if order_printed(o))
+    return p, len(got), total_want
+
+
+def local_wave_sids():
+    """本机记录里存下来的 {波次号: [订单号]}（成波时写入，见 append_record）。"""
+    out = {}
+    try:
+        for rec in (load_records() or []):
+            code = str((rec or {}).get("wave_code") or "")
+            sids = (rec or {}).get("sids") or []
+            if code and sids:
+                out[code] = [str(s) for s in sids]
+    except Exception:
+        pass
+    return out
+
+
 def manager_waves(page_no=1, page_size=20, c=None, warehouse_id=None):
     """ERP 网页「波次管理」列表（只读）：含未拣选波次，替代开放平台 verify_wave 回读。
 
@@ -597,6 +755,20 @@ def manager_waves(page_no=1, page_size=20, c=None, warehouse_id=None):
             "created_ms": _int(w.get("created")),
             "express": w.get("expressName") or "",
             "tags": tags or [],
+            # ★ 人员字段（只有网页端有；开放平台那个接口一个都不返回）：
+            #   pickerName       = 实际拣货/操作这个波次的人
+            #   assignPickerName = 被指派的人
+            #   creatorName      = 在 ERP 里创建这个波次的人
+            #   sorterName       = 分拣人（多数为空）
+            "picker": str(w.get("pickerName") or "").strip(),
+            "assign_picker": str(w.get("assignPickerName") or "").strip(),
+            "creator": str(w.get("creatorName") or "").strip(),
+            "sorter": str(w.get("sorterName") or w.get("assignSorterName") or "").strip(),
+            "check_finished": w.get("checkGoodsFinished"),
+            "finished_ms": _int(w.get("finished")),
+            "pick_end_ms": _int(w.get("pickEndTime")),
+            "created_human": _int(w.get("created")),
+            "rule_name": w.get("ruleName") or "",
         })
     return out
 
