@@ -4474,14 +4474,39 @@ class _WebHandler(BaseHTTPRequestHandler):
                 _raise_later(skip=_snap)
 
                 def _run_action():
-                    """在主线程里执行动作。失败也让调用方看到（不再静默吞掉）。"""
+                    """在主线程里执行动作。
+
+                    ★ 必须把异常写文件：以前异常被 uikit 的队列静默吞掉，
+                      结果"点了没反应"完全无从查起（排查了很久）。
+                    """
+                    import tempfile as _tf
+                    _lp = os.path.join(_tf.gettempdir(), "km_action.log")
+                    try:
+                        with open(_lp, "a", encoding="utf-8") as _f:
+                            _f.write("%s [action] 开始 %s（线程 %s）\n"
+                                     % (time.strftime("%H:%M:%S"), fn,
+                                        threading.current_thread().name))
+                    except Exception:
+                        pass
                     try:
                         getattr(self.app, fn)()
-                    except Exception as e:
+                        _okm = "ok"
+                    except BaseException as e:
+                        import traceback as _tb
+                        _okm = "异常 %s: %s" % (type(e).__name__, str(e)[:160])
                         try:
-                            print_jobs_log("电脑版动作 %s 执行失败：%s" % (fn, str(e)[:200]))
+                            with open(_lp, "a", encoding="utf-8") as _f:
+                                _f.write("%s [action] %s 执行失败：\n%s\n"
+                                         % (time.strftime("%H:%M:%S"), fn,
+                                            _tb.format_exc()[-1200:]))
                         except Exception:
                             pass
+                    try:
+                        with open(_lp, "a", encoding="utf-8") as _f:
+                            _f.write("%s [action] 结束 %s → %s\n"
+                                     % (time.strftime("%H:%M:%S"), fn, _okm))
+                    except Exception:
+                        pass
 
                 try:
                     # ★ 必须丢回 Tk 主线程执行，而且**必须走 uikit 这条队列**。
