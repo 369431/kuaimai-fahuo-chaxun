@@ -3476,10 +3476,15 @@ class _WebHandler(BaseHTTPRequestHandler):
                             live[code] = {
                                 "wave_code": code, "wave_id": w.get("id"),
                                 "status": st,
-                                "status_cn": wv.status_cn(st, None),
+                                # ★ 用完整 5 档口径（未拣选 / 拣选中 / 等待验货 / 已完成 / 已取消）：
+                                #   以前只传 status 拿不到时间，区分不了「等待验货 / 拣选中」。
+                                "status_cn": wv.status_cn_full(st, w.get("pick_start_ms"),
+                                                               w.get("pick_end_ms")),
+                                "pick_start_ms": w.get("pick_start_ms"),
+                                "pick_end_ms": w.get("pick_end_ms"),
                                 "tradesCount": None,
                                 "itemCount": w.get("item_count"),
-                                "pickEndTime": None,
+                                "pickEndTime": w.get("pick_end_ms") or None,
                                 "sids": [],
                                 "express": w.get("express") or "",
                                 "tags": w.get("tags") or [],

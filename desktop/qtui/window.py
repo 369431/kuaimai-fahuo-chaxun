@@ -1510,49 +1510,29 @@ class Desktop(QWidget):
             pass
 
     def _ship_cell_text(self, it):
-        """某个波次的「实发订单数」文案。
+        """「实发/订单」= 该波次**已打印订单数 / 属于本波次的订单数**。
 
-        ★ 口径（用户确认过）：波次里**已打印（快递单）的订单数** ——
-          用户就是这样数的：点进波次看到 180 个订单、179 个已打印 → 实发 179。
-        数据来源：主程序用打单页 /trade/search?waveId= 取该波次订单列表，
-                 按 sysStatus / expressPrintTime 判定是否打印过（见 printed 缓存）。
-        ★ 已完成波次读不到：ERP 在波次完成后会把订单与波次的关联清掉，
-          所以那一列只能显示「—」。
+        口径（用户确认）：点进波次看到 180 个订单、179 个已打印 → 实发 179。
+        数据来源：主程序走 ERP「波次管理 → 点波次号」那个接口
+                  （/trade/wave/trade/list/log）读每单 printTimes，
+                  并且**只统计订单自带 waveId == 本波次号**的单 ——
+                  不过滤会把「已重新分配到别的波次」的单也算进来（含已取消波次，
+                  用户抓到过）。
+
+        ★ 这里**只用** printed 映射，不再退回旧的「当日发货日志」兜底：
+          那个兜底在数据没到时会吐出一个不可信的数字（用户看到过跟商品种类一样的 9）。
+          没数据就老实显示「…」或「—」。
         """
-        try:
-            code = str(it.get("wave_code") or it.get("code") or "")
-            pmap = getattr(self, "_printed", {}) or {}
-            rec = pmap.get(code)
-            if isinstance(rec, dict):
-                n = rec.get("n")
-                total = rec.get("total")
-                if n is None:
-                    # 还没抓到：给个「正在读」，别让用户以为是坏的
-                    return "…" if rec.get("t") else "—"
-                if total:
-                    return "%s / %s" % (n, total)
-                return str(n)
-            # 兜底：老的「当日已发货」缓存（只在有 sids 时能用）
-            sids = it.get("sids") or []
-            if not sids:
-                return "—"
-            day = ""
-            ts = it.get("ts") or it.get("pickEndTime") or it.get("created_ms") or ""
-            try:
-                v = int(str(ts))
-                if v > 10 ** 12:
-                    v //= 1000
-                day = time.strftime("%Y-%m-%d", time.localtime(v))
-            except Exception:
-                return "…"
-            cache = getattr(self, "_ship_cache", {}) or {}
-            if day not in cache:
-                return "…"
-            m = cache[day] or {}
-            hit = [s for s in sids if str(s) in m]
-            return str(len(hit))
-        except Exception:
-            return ""
+        code = str(it.get("wave_code") or it.get("code") or "")
+        rec = (getattr(self, "_printed", {}) or {}).get(code)
+        if not isinstance(rec, dict):
+            return "…"                      # 还没抓到：显示读取中（后台马上补）
+        n, total = rec.get("n"), rec.get("total")
+        if n is None:
+            return "—"                      # 抓了但读不到（浏览器/ERP 未就绪）
+        if total:
+            return "%s / %s" % (n, total)
+        return str(n)
 
     def on_wave_click(self, row, col):
         """点波次行：先把明细写到底部详情行（一定看得见），编码多再补一个弹窗。"""

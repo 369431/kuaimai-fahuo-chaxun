@@ -78,6 +78,44 @@ def wave_state(status, pick_end_time=None):
 def status_cn(s, pick_end_time=None):
     """波次状态 → 中文；未知值返回原始字符串（绝不瞎猜）。传入 pickEndTime 才能区分「等待验货」。"""
     return wave_state(s, pick_end_time).get("status_cn") or ""
+
+
+def status_cn_full(s, pick_start_time=None, pick_end_time=None):
+    """波次状态 → 中文（**完整 5 档**，跟 ERP 页面口径一致）。
+
+    ERP 页面上的波次状态共 5 种：
+        未拣选 / 拣选中 / 等待验货 / 已完成 / 已取消
+    码值（实测）：status=3 → 已完成；status=4 → 已取消；
+    status=1 时再按拣货时间区分：
+        · 没有拣货开始时间            → 未拣选
+        · 有开始、没有结束            → 拣选中（ERP 页面就叫"拣选中"）
+        · 开始和结束都有              → 等待验货
+    判时间时用毫秒数值比较：ERP 用 0 / 946656000000(2000-01-01) 当「没有时间」占位，
+    真实时间戳远大于 1e12（v1.42 踩过"0 被当成已拣"的坑）。
+    """
+    ARC = 1000000000000
+
+    def _has(v):
+        try:
+            return int(v or 0) > ARC
+        except Exception:
+            return False
+
+    try:
+        iv = int(s)
+    except Exception:
+        return str(s or "")
+    if iv == 3:
+        return "已完成"
+    if iv == 4:
+        return "已取消"
+    if iv == 1:
+        if _has(pick_end_time):
+            return "等待验货"
+        if _has(pick_start_time):
+            return "拣选中"
+        return "未拣选"
+    return str(s)
 CARRIERS = ("中通", "申通")            # 波次按快递拆开：一个波次只含一种快递（名称子串匹配）
 QUERY_PATH = "/trade/wave/checked/trade/query"
 SAVE_PATH = "/trade/wave/checked/trade/save"
@@ -689,12 +727,23 @@ def wave_printed_count(wave_code):
     """波次「已打印订单数」。返回 (printed, orders_total, reachable)。
 
     口径（用户确认）：点进波次看到 180 个订单、179 个已打印 → 实发就是 179。
+
+    ★ 必须过滤：`/trade/wave/trade/list/log?waveId=X` 会把**已经重新分配到别的波次**
+      的订单也带出来（实测：已取消的 204450 查出 1 单，而它 waveId=204457；
+      已完成的 204430 里也有 1 单 waveId=0）。
+      不过滤的话「已取消的波次」会被算成有实发（用户抓到过这个 bug）。
+      所以只统计 `订单自带 waveId == 本波次号` 的单。
     """
     orders, total = wave_orders(wave_code)
     if not orders:
         return None, total, False
-    p = sum(1 for o in orders if order_printed(o))
-    return p, (total or len(orders)), True
+    want = str(wave_code or "").strip()
+    mine = [o for o in orders if str(o.get("waveId") or "").strip() == want]
+    if not mine:
+        # 一单都不属于这个波次（比如已取消后订单被重新分配）→ 就是 0，别算别人的单
+        return 0, 0, True
+    p = sum(1 for o in mine if order_printed(o))
+    return p, len(mine), True
 
 
 def wave_printed_by_sids(sids, chunk=200, max_chunks=12):
@@ -803,6 +852,9 @@ def manager_waves(page_no=1, page_size=20, c=None, warehouse_id=None):
             "plan_num": _int(w.get("planPickNum")),
             "picked_num": _int(w.get("pickedNum")),
             "created_ms": _int(w.get("created")),
+            # ★ 拣货开始/结束时间：区分「未拣选 / 拣选中 / 等待验货」要用（见 status_cn_full）
+            "pick_start_ms": _int(w.get("pickStartTime")),
+            "pick_end_ms": _int(w.get("pickEndTime")),
             "express": w.get("expressName") or "",
             "tags": tags or [],
             # ★ 人员字段（只有网页端有；开放平台那个接口一个都不返回）：
