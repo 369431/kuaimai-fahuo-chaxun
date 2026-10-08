@@ -76,6 +76,7 @@ def main():
         except Exception:
             pass
         data = host.login_via_qt(root)
+        host.login_data = data if isinstance(data, dict) else {}
         _log("登录返回：%s" % ("拿到 token" if (isinstance(data, dict) and data.get("token"))
                               else "没拿到（%r）" % (data,)))
         try:

@@ -52,6 +52,46 @@ def _L(*parts):
         pass
 
 
+def _make_transient_safe(root):
+    """把 Tk 的 transient() 换成「父窗隐藏时跳过」的安全版本。
+
+    ★ 为什么必须这么做（真机踩到，而且是"很多按钮点了没反应"的元凶）：
+      单进程模式下，宿主为了不让用户看到旧界面，把 Tk 根窗 withdraw + alpha=0。
+      而 Tk 的规则是：**transient 到一个隐藏/未映射的父窗，子窗自己也会变成 withdrawn**
+      （实测：state=withdrawn、viewable=0，完全看不见）。
+      于是所有 `tk.Toplevel(root)` + `win.transient(root)` 的设置窗
+      （API 设置 / 对外访问 / 现货可发 / 批次 / 盘点…）都"点了没反应"。
+      旧版是双进程、主窗口可见，所以从来没有这个问题。
+
+    做法：不改几十处业务代码，只把 transient 包一层 —— 父窗可见时才真的调它。
+    """
+    try:
+        import tkinter as _tk
+        _orig_root = _tk.Tk.transient
+        _orig_tl = _tk.Toplevel.transient
+
+        def _safe(self, master=None):
+            try:
+                if master is None:
+                    master = getattr(self, "master", None)
+                if master is not None:
+                    # 父窗没映射（withdraw 过）→ 跳过，否则窗口会被连带隐藏
+                    if not int(master.winfo_ismapped()):
+                        return
+            except Exception:
+                return
+            try:
+                return (_orig_root if isinstance(self, _tk.Tk) else _orig_tl)(self, master)
+            except Exception:
+                return
+
+        _tk.Tk.transient = _safe
+        _tk.Toplevel.transient = _safe
+        _L("transient 已换成安全版本（父窗隐藏时不隐藏子窗）")
+    except Exception:
+        pass
+
+
 class Host(object):
     """单进程宿主：持有 root / app / session，负责全部后台启动。"""
 
@@ -61,6 +101,8 @@ class Host(object):
         self.session = None
         self.qt_proc = None
         self._qt_thread = None
+        # 登录窗拿到的会话（token 以它为准，见 start()）
+        self.login_data = {}
         self.err = ""
 
     # ---------- 登录 ----------
@@ -162,7 +204,41 @@ class Host(object):
         except Exception:
             pass
 
+        # ★ 必须在建任何窗口之前打这个补丁：单进程下 Tk 根窗是隐藏的，
+        #   而 transient(隐藏父窗) 会让子窗自己也变 withdrawn（点了没反应）。
+        _make_transient_safe(root)
+
         self.session = session
+        # ★ 把「登录窗真正拿到的 token」交给业务会话 —— 这必须是权威 token：
+        #   登录窗是用户真正登录的那一个，服务端认的是它的 token。
+        #   以前这里用启动器自己那份 token（和登录窗不同），结果界面拿着启动器的 token
+        #   请求服务端一律 401「请先登录」（用户反复反馈的就是这个）。
+        try:
+            _tk = str((self.login_data or {}).get("token") or "")
+        except Exception:
+            _tk = ""
+        if _tk:
+            try:
+                session.token = _tk
+            except Exception:
+                pass
+            try:
+                KS._WEB_STATE["token"] = _tk
+            except Exception:
+                pass
+        # ★ 把权威 token 写回会话文件：界面窗口启动时会读它做自愈
+        #   （万一它自己那份 token 不被接受，就改成这份）。
+        try:
+            import json as _json
+            with open(self._session_file(), "w", encoding="utf-8") as f:
+                _json.dump({"mode": getattr(session, "mode", "") or "host",
+                            "base": "http://127.0.0.1:%d" % self._port(),
+                            "token": str(getattr(session, "token", "") or ""),
+                            "name": getattr(session, "name", "") or "",
+                            "role": getattr(session, "role", "") or ""}, f,
+                           ensure_ascii=False)
+        except Exception:
+            pass
         try:
             KS.stop_web_server(clear_login=False)
         except Exception:
@@ -270,15 +346,28 @@ class Host(object):
 
     # ---------- Qt 窗口 ----------
     def start_qt(self, token="", user=""):
-        """起电脑版 Qt 窗口（**同一个进程之外的独立窗口进程**，
-        但它连的是本进程起的服务 —— 服务与业务已经不再依赖老 Tk 主程序）。"""
+        """起电脑版 Qt 窗口（连的是本进程起的服务）。
+
+        ★ token 必须**明确传进去**（--token）：
+          登录窗进程被我们收掉后，新起的界面窗口如果没拿到 token，就会用会话记忆
+          自动登录、拿到一个**服务端已经作废的旧 token** —— 界面手里是坏 token，
+          于是所有按钮都报「请先登录」。真机踩过。
+        """
         here = DESKTOP
         base = "http://127.0.0.1:%d" % self._port()
         if getattr(sys, "frozen", False):
             args = [sys.executable, "--qt-window", "--base", base]
         else:
             args = [sys.executable, "-m", UI_QT_MODULE, "--base", base]
-        args += ["--parent-pid", str(os.getpid()), "--login-out", self._session_file()]
+        args += ["--parent-pid", str(os.getpid())]
+        # ★ 注意：**不传 --login-out**。
+        #   传了它界面就会先弹登录窗（登录已经由启动器那一步做完了），
+        #   而且界面会去删那个文件、把启动器要读的会话搞坏。
+        #   权威会话统一放 km_host_session.json，界面需要时会自己读它自愈。
+        if token:
+            args += ["--token", str(token)]
+        if user:
+            args += ["--user", str(user)]
         try:
             env = dict(os.environ)
             env["PYTHONPATH"] = here + os.pathsep + env.get("PYTHONPATH", "")

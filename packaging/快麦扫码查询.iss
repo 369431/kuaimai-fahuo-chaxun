@@ -54,6 +54,8 @@ Source: "{#StageDir}\快麦扫码查询.exe"; DestDir: "{app}"; Flags: ignorever
 ; v1.73：改成 onedir 打包（启动快 10 倍），依赖都在 _internal 里
 Source: "{#StageDir}\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#StageDir}\客户安装手册.txt"; DestDir: "{app}"; Flags: ignoreversion
+; v2.02：带上「升级说明」（老版本升上来要注意的地方：先退出程序、数据不会丢、可回退）
+Source: "{#StageDir}\升级说明.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\启动全部.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\启动全部.cmd"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\装开机自启.ps1"; DestDir: "{app}"; Flags: ignoreversion

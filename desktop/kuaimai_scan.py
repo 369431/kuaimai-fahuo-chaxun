@@ -4473,12 +4473,22 @@ class _WebHandler(BaseHTTPRequestHandler):
                     _snap = ()
                 _raise_later(skip=_snap)
 
+                def _run_action():
+                    """在主线程里执行动作。失败也让调用方看到（不再静默吞掉）。"""
+                    try:
+                        getattr(self.app, fn)()
+                    except Exception as e:
+                        try:
+                            print_jobs_log("电脑版动作 %s 执行失败：%s" % (fn, str(e)[:200]))
+                        except Exception:
+                            pass
+
                 try:
                     # ★ 必须丢回 Tk 主线程执行，而且**必须走 uikit 这条队列**。
                     # 这里是 HTTP 请求线程，直接创建/操作 Tk 窗口会卡死；
                     # 用 root.after() 也不行 —— after() 同样不是线程安全的，
                     # 实测报 "main thread is not in main loop"，导致菜单全部无效。
-                    uikit.post(self.app.root, getattr(self.app, fn))
+                    uikit.post(self.app.root, _run_action)
                 except Exception as e:
                     return self._json({"error": "执行失败：%s" % str(e)[:180]}, 500)
                 return self._json({"ok": True, "name": name})
@@ -5130,6 +5140,62 @@ def _wave_printed_refresh(codes):
         t.start()
     except Exception:
         pass
+
+
+def ui_thread(fn):
+    """让「从别的线程调用」的界面方法自动回到 Tk 主线程执行。
+
+    ★ 为什么必须有它（真机踩到）：
+      这些设置窗是被 HTTP 请求线程调的（电脑版点按钮 → /api/desktop/action → 这里）。
+      Tk 只能在**创建它的那个线程**里操作，从别的线程建 Toplevel 不会报错，
+      **窗口就是不出现** —— 用户看到的现象就是「点了没反应 / 窗口打不开」。
+      单进程模式（电脑版自己当引擎）下这个问题会 100% 复现。
+
+    做法：装饰器在调用时判断当前线程；不是主线程就通过 uikit.post 抛回主线程，
+    主线程上再原样调用一遍（带一个 _ui_done 标记，避免无限递归）。
+    """
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(self, *a, **kw):
+        if kw.pop("_ui_done", False):
+            return fn(self, *a, **kw)         # 已经在主线程了，直接干
+        try:
+            root = getattr(self, "root", None)
+            if root is None:
+                return fn(self, *a, **kw)
+            import threading as _th
+            if _th.current_thread() is _th.main_thread():
+                return fn(self, *a, **kw)     # 本来就是主线程
+            # 非主线程：抛回主线程执行（返回值拿不到，但这些方法本来就不靠返回值）
+            if uikit is not None:
+                uikit.post(root, lambda: fn(self, *a, _ui_done=True, **kw))
+                return None
+            return fn(self, *a, **kw)
+        except Exception:
+            try:
+                return fn(self, *a, **kw)
+            except Exception:
+                return None
+
+    return wrapper
+
+
+def ui_call(root, fn, *a, **kw):
+    """在别的线程里调用 Tk 界面代码的统一入口（次要场合用）。"""
+    import threading as _th
+    try:
+        if _th.current_thread() is _th.main_thread():
+            return fn(*a, **kw)
+        if uikit is not None and root is not None:
+            uikit.post(root, lambda: fn(*a, **kw))
+            return None
+    except Exception:
+        pass
+    try:
+        return fn(*a, **kw)
+    except Exception:
+        return None
 
 
 def human_browser_err(text, action=""):
@@ -8468,6 +8534,7 @@ class ScanApp:
     # ---------- 扫码浮窗（后台扫码时显示） ----------
     FLOAT_MS = 10000        # 停留时间（毫秒）
 
+    @ui_thread
     def _show_float(self, code, one_piece, multi_piece, bin_txt, shelf, ok, short):
         """置顶浮窗：不抢焦点、10 秒自动消失、点一下立即关。"""
         try:
@@ -8549,6 +8616,7 @@ class ScanApp:
             self._float_after = None
 
     # ---------- 现货可发（在架 / 待发货 / 可发件数） ----------
+    @ui_thread
     def on_stock_dialog(self):
         """现货可发窗口：可发 = min(在架, 待发货件数) − 一单多件件数。
 
@@ -8776,6 +8844,7 @@ class ScanApp:
         messagebox.showinfo("已导出", "%s\n共 %d 行" % (path, len(rows)))
 
     # ---------- 批次查询（按打印批次号） ----------
+    @ui_thread
     def on_adjust_log_dialog(self):
         """改库存操作日志：时间 / 操作账号 / 编码 / 货位 / 原值→新值 / 结果。"""
         win = tk.Toplevel(self.root)
@@ -8820,6 +8889,7 @@ class ScanApp:
         refresh()
         return win
 
+    @ui_thread
     def on_stocktake_dialog(self):
         """（按用户要求）库存盘点只做在网页版，电脑版不再提供入口。"""
         return None
@@ -8938,6 +9008,7 @@ class ScanApp:
         ent.focus()
         return win
 
+    @ui_thread
     def on_batch_dialog(self):
         """输入打印批次号 → 列出该批次订单 + 每单商品编码/货位，并按货位汇总。"""
         old = getattr(self, "_batch_win", None)
@@ -9283,6 +9354,7 @@ class ScanApp:
             messagebox.showerror("打单进度", "打不开进度窗口：%s" % str(e)[:200])
 
     # ---------- API 设置 ----------
+    @ui_thread
     def on_api_settings(self):
         """改 appKey/appSecret/refreshToken/session/网关/版本 —— 换账号不用重新打包。"""
         if self.remote:
@@ -9819,6 +9891,7 @@ class ScanApp:
         except Exception:
             pass
 
+    @ui_thread
     def _toast(self, text, ms=900):
         """屏幕右下角小提示（复制成功之类），自动消失。"""
         try:

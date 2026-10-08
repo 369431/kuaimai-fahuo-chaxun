@@ -16,6 +16,7 @@ import json
 import ctypes
 import os
 import sys
+import tempfile
 import threading
 import time
 from ctypes import wintypes
@@ -3423,10 +3424,11 @@ def main():
         try:
             with open(a.login_out, "r", encoding="utf-8") as f:
                 _sess = json.load(f)
-            try:
-                os.remove(a.login_out)      # 读完了自己收拾（主程序那边不删，避免抢删）
-            except Exception:
-                pass
+            # ★ 千万不要在这里删这个文件！
+            #   单进程模式下「启动器」还要读它才能接着启动业务核心（ScanApp/内置服务）。
+            #   以前这里 os.remove 了，导致启动器永远读不到会话、一直卡在等待，
+            #   服务端就一直是登录阶段的占位对象 → 界面上所有按钮都回「请先登录」。
+            #   删文件交给启动器（它读完会自己收拾）。
         except Exception:
             _sess = {}
         a.token = str(_sess.get("token") or "")
@@ -3437,15 +3439,63 @@ def main():
     # ① 主程序直接给的会话（最常见）：拿来就用，**不再让用户登录第二遍**
     tok = a.token or os.environ.get("KM_QT_TOKEN") or ""
     who = a.user or os.environ.get("KM_QT_USER") or ""
+    # ★ 诊断日志：界面这一侧以前完全是黑盒，出问题（按钮全 401）只能靠猜。
+    #   把 token / 会话校验结果记到 %TEMP%\km_qt_client.log，一眼就能看出是不是
+    #   "界面手里没有有效 token"。
+    try:
+        with open(os.path.join(tempfile.gettempdir(), "km_qt_client.log"), "a",
+                  encoding="utf-8") as _f:
+            _f.write("%s [qt-client] 启动 base=%s token=%s user=%s parent=%s login_out=%s\n"
+                     % (time.strftime("%H:%M:%S"), a.base, (tok or "")[:8], who,
+                        a.parent_pid, a.login_out))
+    except Exception:
+        pass
     if tok:
         api.token = tok
         api.name = who
         st = api.desktop_state()
-        if isinstance(st, dict) and not st.get("error") and not st.get("offline"):
+        _ok = isinstance(st, dict) and not st.get("error") and not st.get("offline")
+        try:
+            with open(os.path.join(tempfile.gettempdir(), "km_qt_client.log"), "a",
+                      encoding="utf-8") as _f:
+                _f.write("%s [qt-client] 会话校验 ok=%s 返回=%s\n"
+                         % (time.strftime("%H:%M:%S"), _ok,
+                            str(st)[:200].replace("\n", " ")))
+        except Exception:
+            pass
+        if _ok:
             api.ver = str(st.get("ver") or "")
         else:
-            # token 不好使了（比如主程序重启过）→ 清掉，退回落登录框
-            api.token = ""
+            # ★ 自愈：服务端不认这个 token 时，去读**权威会话文件**（启动器写的那份）
+            #   再试一次。否则界面手里会一直是一个坏 token，所有按钮都回「请先登录」。
+            _fixed = False
+            try:
+                _sp = os.path.join(tempfile.gettempdir(), "km_host_session.json")
+                if os.path.isfile(_sp):
+                    with open(_sp, "r", encoding="utf-8") as _f:
+                        _d = json.load(_f)
+                    _t2 = str((_d or {}).get("token") or "")
+                    if _t2 and _t2 != tok:
+                        api.token = _t2
+                        st2 = api.desktop_state()
+                        _ok2 = (isinstance(st2, dict) and not st2.get("error")
+                                and not st2.get("offline"))
+                        try:
+                            with open(os.path.join(tempfile.gettempdir(),
+                                                   "km_qt_client.log"), "a",
+                                      encoding="utf-8") as _f:
+                                _f.write("%s [qt-client] 自愈：改用权威会话文件 token=%s ok=%s\n"
+                                         % (time.strftime("%H:%M:%S"), _t2[:8], _ok2))
+                        except Exception:
+                            pass
+                        if _ok2:
+                            _fixed = True
+                            api.ver = str(st2.get("ver") or "")
+            except Exception:
+                pass
+            if not _fixed:
+                # token 真的不好使了 → 清掉，退回落登录框
+                api.token = ""
     # ② 没带会话：命令行给了账号密码就直接登，否则弹登录框
     if not api.token:
         if a.user and a.pw:
