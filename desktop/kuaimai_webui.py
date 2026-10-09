@@ -1368,6 +1368,52 @@ const SID = (function(){
   } catch(e){ return ''; }
 })();
 function withSid(u){ return SID ? (u + (u.indexOf('?') >= 0 ? '&' : '?') + 'sid=' + encodeURIComponent(SID)) : u; }
+/* ★ 成波后刷新这一行的「可发」数字（自包含版）。
+   踩过的坑：以前本页直接调 WAVE_HTML 里定义的 refreshMaxForCodes，
+   但两个页面是各自独立的 <script>，函数不互通 → ReferenceError 被 catch 吞掉 → 完全没生效，
+   表现就是「扫描面板直接成波后数字还是不变」。所以本页放一份只依赖 ROWS + wave/lookup 的版本。 */
+function refreshStockRowAfterWave(code, usedQty){
+  const key = String(code).toUpperCase();
+  const row = ROWS.filter(function(r){ return String(r.c).toUpperCase() === key; })[0];
+  if(!row) return;
+  /* ① 先本地扣掉本次实际成波件数：数字马上变小，不用等网络 */
+  const u = parseInt(usedQty, 10) || 0;
+  if(u > 0){ row.f = Math.max(0, (parseInt(row.f, 10) || 0) - u); render(); }
+  /* ② 再拉 ERP 实时值（权威口径）覆盖 row.wm（ERP 的可生成数）。
+     注意：row.f 是「可发」= min(在架,待发) − 多件预留，row.wm 是 ERP 的可生成数，
+     两者是**两个不同的量**，不能互相覆盖（这里只更新 row.wm）。 */
+  fetch(bust(withSid('/api/wave/lookup?code=' + encodeURIComponent(code))), {cache:'no-store'})
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if(!d || d.error) return;
+      const per = d.carriers || {};
+      const ks = Object.keys(per);
+      const tot = ks.length === 1 ? (parseInt(per[ks[0]], 10) || 0)
+                : ks.reduce(function(a,k){ return a + (parseInt(per[k],10)||0); }, 0);
+      row.wm = tot;
+      render();
+    })
+    .catch(function(){});
+}
+/* ★ 把当前列表里各编码的 ERP 可生成数重算一遍（进页面 / 定时）。
+   避免用户从别处回来时看到的还是旧数字。只更新 row.wm，不动 row.f。 */
+function refreshAllStockMaxQuiet(){
+  if(!ROWS || !ROWS.length) return;
+  ROWS.slice(0, 300).forEach(function(row){
+    const code = row.c;
+    fetch(bust(withSid('/api/wave/lookup?code=' + encodeURIComponent(code))), {cache:'no-store'})
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        if(!d || d.error) return;
+        const per = d.carriers || {};
+        const ks = Object.keys(per);
+        const tot = ks.length === 1 ? (parseInt(per[ks[0]], 10) || 0)
+                  : ks.reduce(function(a,k){ return a + (parseInt(per[k],10)||0); }, 0);
+        row.wm = tot;
+      })
+      .catch(function(){});
+  });
+}
 let ROWS = [];
 let HIDE_SENT = true;
 const CAN = function(k){ return window.KM_CAN ? window.KM_CAN(k) : true; };
@@ -1535,6 +1581,10 @@ function render(){
           if(!keys.length){ keys = Object.keys(per); }
           if(!keys.length){ flash(code + '：没有可成波订单（可能已生成波次 / 已打印 / 是多件单）'); render(); return; }
           let h = '';
+          /* ★ 用 ERP 刚查回来的实时值当作这一行的可生成上限（row.wm），
+             这样「中通 600 件」里的 600 永远是**此刻真实剩余量**，
+             成波后再点开就是 490 左右，不会停在旧数字上。 */
+          try{ row.wm = Math.min(parseInt(f,10)||0, Object.keys(per).reduce(function(a,k){ return a + (parseInt(per[k],10)||0); }, 0)); }catch(e){}
           keys.forEach(function(k){
             const n = parseInt(per[k], 10) || 0;
             const q = Math.min(f, n);
@@ -1585,11 +1635,10 @@ function render(){
                     carrier: carrier, qty: ((w.codes && w.codes[0] && w.codes[0].actual) || qty),
                     code: code, ts: Date.now()}]);
           /* ★ 成波后刷新这个编码的可生成数：立刻减掉实际件数，再以 ERP 实时值为准。
-             （以前不刷新 → 再扫同一个编码还是显示成波前的旧数字，用户反馈过） */
+             （以前调的是 WAVE_HTML 里的函数，跨页面拿不到 → 静默失效，用户反馈过） */
           try{
-            const _imp = {};
-            _imp[code] = ((w.codes && w.codes[0] && w.codes[0].actual) || qty);
-            refreshMaxForCodes([code], _imp);
+            const _act = ((w.codes && w.codes[0] && w.codes[0].actual) || qty);
+            refreshStockRowAfterWave(code, _act);
           }catch(e){}
           flash('✅ ' + code + ' 波次 ' + (w.wave_code || '?') + '（' + carrier + ' ' + ((w.codes && w.codes[0] && w.codes[0].actual) || qty) + ' 件）' + (w.capped_note ? '　' + w.capped_note : ''));
         } else {
@@ -1637,16 +1686,16 @@ function render(){
         }
       });
       if(ws.length){ markWaved(code); saveWbar(ws); }
-      /* ★ 成波后刷新这个编码的「最大可生成」：立刻减掉实际成波件数，再以 ERP 为准 */
+      /* ★ 成波后刷新这个编码的可生成数（本页自包含函数，不再跨页面调用） */
       try{
-        const imp = {};
+        let _used = 0;
         out.forEach(function(o){
           const w = o.w || {};
           if(w.wave_code || w.created){
-            imp[code] = (imp[code] || 0) + (((w.codes && w.codes[0] && w.codes[0].actual)) || o.qty);
+            _used += ((w.codes && w.codes[0] && w.codes[0].actual) || o.qty);
           }
         });
-        if(Object.keys(imp).length) refreshMaxForCodes([code], imp);
+        if(_used > 0) refreshStockRowAfterWave(code, _used);
       }catch(e){}
       flash(code + '：' + parts.join('　'));
       render();
@@ -1742,6 +1791,9 @@ $('hidesent').onchange = function(){
 $('exp').onclick = function(){ location.href = withSid('/api/stock/export?' + params()); };
 loadWbar();                    /* 进页面先显示上次生成的波次号（常驻，直到生成新的） */
 load();
+/* ★ 进页面 / 每 60 秒：把各编码的 ERP 可生成数校一遍（成波后数字不会停在旧值） */
+setTimeout(function(){ try{ refreshAllStockMaxQuiet(); }catch(e){} }, 1500);
+setInterval(function(){ try{ refreshAllStockMaxQuiet(); }catch(e){} }, 60000);
 </script>
 </body></html>
 """
