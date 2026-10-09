@@ -2644,7 +2644,10 @@ def fetch_shelf_stock(progress=None):
                     e["bins"].append([sec, qty])
         total_rows += len(batch)
         if progress:
-            progress(total_rows)
+            try:
+                progress(total_rows, total_expected)   # 总数一起给（进度条算百分比）
+            except TypeError:
+                progress(total_rows)                    # 兼容只收一个参数的调用方
         if not batch:
             break
         # 服务端可能不受 pageSize 控制，用首页返回的 total 作为结束条件
@@ -2722,7 +2725,10 @@ def fetch_lock_stock(progress=None):
                 e["avail"] += avail
         rows_total += len(batch)
         if progress:
-            progress(rows_total)
+            try:
+                progress(rows_total, total)      # 把总数一起给出去（进度条要用）
+            except TypeError:
+                progress(rows_total)             # 兼容只收一个参数的调用方
         if not batch:
             break
         if total is not None and rows_total >= total:
@@ -5314,6 +5320,33 @@ def ui_call(root, fn, *a, **kw):
         return fn(*a, **kw)
     except Exception:
         return None
+
+
+def _write_pull_progress(kind, pulled, page=1, total=None, t0=None):
+    """统一的「拉取进度」写入（电脑版底部那条彩色进度条就读它）。
+
+    以前只有「全量拉取订单」会写这个文件，所以锁定数/货位在刷新时界面拿不到任何进度，
+    进度条自然显示不出来。现在所有刷新类型都往这里写：kind 标明是哪种，
+    界面按 kind 显示对应文字（订单 / 锁定数 / 货位），百分比统一算。
+    """
+    try:
+        pct = None
+        try:
+            if total:
+                pct = round(min(100.0, float(pulled) * 100.0 / float(total)), 1)
+        except Exception:
+            pct = None
+        el = int(max(0.0, time.time() - t0)) if t0 else 0
+        rate = round(float(pulled) / el, 1) if (el > 0 and pulled) else None
+        save_json(PULL_PROGRESS_FILE, {
+            "kind": str(kind or "orders"), "mode": str(kind or "orders"),
+            "pulled": int(pulled or 0), "page": int(page or 1),
+            "total_estimate": int(total or 0), "percent": pct,
+            "elapsed_sec": el, "rate_per_sec": rate,
+            "updated_at": now_gmt8(),
+        })
+    except Exception:
+        pass
 
 
 def human_browser_err(text, action=""):
@@ -8266,11 +8299,21 @@ class ScanApp:
 
     def _worker_shelf(self):
         try:
-            def prog(count):
-                self.q.put(lambda: self.status_text.set("正在拉取货位库存…已拉取 %d 条" % count))
+            def prog(count, total=None):
+                # 同样写统一进度文件：底部彩色进度条对货位刷新也显示百分比
+                _write_pull_progress("shelf", count, 1, total)
+                self.q.put(lambda: self.status_text.set(
+                    "正在拉取货位库存…已拉取 %d 条%s"
+                    % (count, ("（共 %d 条）" % total) if total else "")))
             shelf_map, stat = fetch_shelf_stock(progress=prog)
             loaded_at = now_gmt8()
             save_shelf_db(shelf_map, stat, loaded_at)
+            try:
+                save_json(PULL_PROGRESS_FILE, {"mode": "done",
+                                               "pulled": len(shelf_map or {}),
+                                               "updated_at": now_gmt8()})
+            except Exception:
+                pass
             self.q.put(lambda: self._apply_shelf(shelf_map, stat, loaded_at))
         except Exception as e:
             msg = str(e)[:200]
@@ -8383,11 +8426,22 @@ class ScanApp:
 
     def _worker_lock(self):
         try:
-            def prog(count):
-                self.q.put(lambda: self.status_text.set("正在拉取库存锁定数…已拉取 %d 个 SKU" % count))
+            def prog(count, total=None):
+                # ★ 顺便把进度写进统一进度文件：电脑版底部那条彩色进度条
+                #   对「锁定数 / 货位 / 订单」一视同仁，都能显示 1%→100%。
+                _write_pull_progress("lock", count, 1, total)
+                self.q.put(lambda: self.status_text.set(
+                    "正在拉取库存锁定数…已拉取 %d 个 SKU%s"
+                    % (count, ("（共约 %d 个）" % total) if total else "")))
             lock_map, stat = fetch_lock_stock(progress=prog)
             loaded_at = now_gmt8()
             save_lock_db(lock_map, loaded_at)
+            try:
+                save_json(PULL_PROGRESS_FILE, {"mode": "done",
+                                               "pulled": len(lock_map or {}),
+                                               "updated_at": now_gmt8()})
+            except Exception:
+                pass
             self.q.put(lambda: self._apply_lock(lock_map, loaded_at))
         except Exception as e:
             msg = str(e)[:200]
@@ -8441,16 +8495,8 @@ class ScanApp:
                 count, page, int(el) // 60, int(el) % 60, rate)
         self.status_text.set("正在全量拉取待发货订单…" + body)
         self.root.title("快麦扫码查询 — 拉取 %d / %s 单" % (count, self.total_est or "统计中"))
-        try:      # 同步写进度文件，窗口外也能看
-            save_json(PULL_PROGRESS_FILE, {
-                "mode": "full", "pulled": count, "page": page,
-                "total_estimate": self.total_est,
-                "percent": round(min(100.0, count * 100.0 / self.total_est), 1) if self.total_est else None,
-                "elapsed_sec": int(el), "rate_per_sec": round(rate, 1),
-                "updated_at": now_gmt8(),
-            })
-        except Exception:
-            pass
+        # 进度文件走统一入口（界面底部那条彩色进度条读它）
+        _write_pull_progress("orders", count, page, self.total_est, t0)
 
     def _worker_total_estimate(self):
         """与拉取并行：估算总单数，用于把进度条变成确定值。"""

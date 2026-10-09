@@ -434,8 +434,8 @@ class RgbProgress(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(26)
-        self.setMinimumWidth(220)
+        self.setFixedHeight(30)
+        self.setMinimumWidth(260)
         self.pct = 0.0
         self.known = False
         self.info = ""
@@ -747,10 +747,6 @@ class Desktop(QWidget):
         self.hint = QLabel("正在连接本机服务…")
         self.hint.setObjectName("hint")
         l1.addWidget(self.hint)
-        # ★ 拉取进度条（RGB 流动，1%→100%）：只在真的在拉数据时显示
-        self.p_pull = RgbProgress()
-        self.p_pull.setVisible(False)
-        l1.addWidget(self.p_pull)
         # ★ 状态条（原型里画过、但真程序一直没做）：ERP 登录 / 手机端 / 开放平台接口。
         #   数据全来自接口：/api/auth/state 的 user·owner、/api/desktop/state 的 text、
         #   /api/desktop/api_conf 的 appKey·sessionId。
@@ -871,6 +867,10 @@ class Desktop(QWidget):
         self.st_right.setObjectName("dimmer")
         fl.addWidget(self.st_right)
         fv.addLayout(fl)
+        # ★ 拉取进度条放在**底部状态栏**（用户就在这儿看状态）
+        self.p_pull = RgbProgress()
+        self.p_pull.setVisible(False)
+        fv.addWidget(self.p_pull)
         # 下排：最近操作提示（★ 顶部那条不会掉到屏幕外的提示行更主要，这里只作补充）
         root.addWidget(foot)
         self._nodrag = list(self.tb.dots) + [self.tb.theme_btn] + \
@@ -883,8 +883,10 @@ class Desktop(QWidget):
         c = U.LIGHT if self.theme == "light" else U.DARK
         self.setStyleSheet(U.qss(c))
         try:
-            self.p_pull.light = (self.theme == "light")
-            self.p_pull.update()
+            p = getattr(self, "p_pull", None)
+            if p is not None:
+                p.light = (self.theme == "light")
+                p.update()
         except Exception:
             pass
         self.tb.theme_btn.setText("☀" if self.theme == "dark" else "☾")
@@ -1064,38 +1066,54 @@ class Desktop(QWidget):
                        % (j.get("ver") or "", j.get("orders", "-"), j.get("codes", "-")))
         busy = j.get("syncing") or j.get("shelf_busy")
         txt = str(j.get("text") or "")
-        # ★ 拉取进度条：主程序在拉订单时显示「1%→100%」的 RGB 流动进度
+        # ★ 拉取进度条：**只要主程序在同步数据就显示**（订单 / 锁定数 / 货位 都一样），
+        #   有百分比就画百分比，没有总量就画流光。
+        #   以前只在"全量拉订单"时才显示，所以刷新货位/锁定数时用户只看到一行文字（反馈过）。
         try:
             pl = j.get("pull") or {}
-            mode = str(pl.get("mode") or "")
-            active = bool(busy) and mode in ("full", "inc", "shelf", "lock")
+            kind = str(pl.get("kind") or pl.get("mode") or "")
             pct = pl.get("percent")
             pulled = int(pl.get("pulled") or 0)
             rate = pl.get("rate_per_sec")
+            total = int(pl.get("total_estimate") or 0)
+            kind_cn = {"orders": "订单", "lock": "锁定数", "shelf": "货位"}.get(kind, "数据")
+            active = bool(busy) and kind not in ("", "done")
             if active:
-                info_bits = []
+                bits = ["正在拉取%s" % kind_cn]
                 if pulled:
-                    info_bits.append("已拉 %d 单" % pulled)
+                    bits.append("已拉 %d" % pulled)
+                if total:
+                    bits.append("共约 %d" % total)
                 if rate:
                     try:
-                        info_bits.append("%.0f 单/秒" % float(rate))
+                        bits.append("%.0f/秒" % float(rate))
                     except Exception:
                         pass
-                if pl.get("total_estimate"):
-                    info_bits.append("共约 %d 单" % int(pl["total_estimate"]))
                 self.p_pull.light = (self.theme == "light")
                 if pct is None:
-                    self.p_pull.set_progress(0, "　".join(info_bits), known=False)
+                    self.p_pull.set_progress(0, "　".join(bits), known=False)
                 else:
-                    self.p_pull.set_progress(float(pct), "　".join(info_bits), known=True)
-                self.p_pull.setVisible(True)
-            elif mode == "done" or not busy:
-                # 拉完了：短暂显示 100% 再收起来（让用户看到"到 100% 了"）
-                if self.p_pull.isVisible():
-                    self.p_pull.set_progress(100, "完成", known=True)
-                    QTimer.singleShot(1200, lambda: self.p_pull.setVisible(False))
+                    self.p_pull.set_progress(float(pct), "　".join(bits), known=True)
+                if not self.p_pull.isVisible():
+                    self.p_pull.setVisible(True)
+                    # 进度条一出现就把那行文字藏掉（用进度条代替它）
+                    self.st_left.setVisible(False)
+                self._pull_done = False
             else:
-                self.p_pull.setVisible(False)
+                if self.p_pull.isVisible():
+                    if not getattr(self, "_pull_done", False):
+                        self._pull_done = True
+                        self.p_pull.set_progress(100, "完成", known=True)
+
+                        def _hide_pull():
+                            try:
+                                self.p_pull.setVisible(False)
+                                self.st_left.setVisible(True)
+                                self._pull_done = False
+                            except Exception:
+                                pass
+
+                        QTimer.singleShot(1500, _hide_pull)
         except Exception:
             pass
         # 状态栏直接显示主程序那一行真实状态（"正在增量刷新…" 这类都能看到）
