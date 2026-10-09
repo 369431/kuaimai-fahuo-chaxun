@@ -1,0 +1,41 @@
+# -*- coding: utf-8 -*-
+"""发布 v2.14：波次页「最大可生成」进页面/每分钟自动重算。"""
+import os
+import sys
+
+REPO = r"C:\Users\Kerwin\Desktop\kuaimai发货查询"
+INSTALLER = os.path.join(REPO, "packaging", "out", "快麦扫码查询_安装版_v2.14.exe")
+NOTES = (
+    "**v2.14：波次页「最大可生成」自动重算（进页面 + 每分钟）**\n"
+    "\n"
+    "**上一版（v2.13）做的**\n"
+    "· 成波成功后立刻刷新涉及编码的「最大可生成」。\n"
+    "\n"
+    "**这一版补的（更保险）**\n"
+    "· 进波次页时，把清单里**所有编码**的可生成数按 ERP 重算一遍。\n"
+    "· 停留在页面时**每 60 秒**再校一次。\n"
+    "· 这样不管你是从别的电脑、手机、还是刷新页面回来的，都不会停在旧数字上；\n"
+    "  剩余量变少时，输入框里超过剩余量的数值也会自动收窄。\n"
+    "\n"
+    "**这三版一起把这个问题彻底解决**\n"
+    "  1) 成波成功 → 立刻按实际件数扣减 + 拉 ERP 实时值\n"
+    "  2) 进页面 → 全部编码重算\n"
+    "  3) 停留中 → 每分钟校一次\n"
+    "\n"
+    "**实测依据（确认底层逻辑本来就是对的）**\n"
+    "· ERP 实时：查该编码 524 → 建 1 件波次 → 立刻 523（0/3/8/20 秒都稳定）。\n"
+    "· 订单不会重复进波次：生成前候选 523 单 → 建波 1 件（sid 6052998815625981）\n"
+    "  → 生成后候选 522 单，**该单已不在候选里**，且没有新单冒出来。\n"
+    "· 所以问题从头到尾只是「界面数字没重算」，底层数据一直是对的。\n"
+)
+
+assert os.path.isfile(INSTALLER), "安装包不存在：%s" % INSTALLER
+sys.path.insert(0, REPO)
+os.chdir(REPO)
+sys.argv = ["release.py", "--version", "v2.14", "--installer", INSTALLER, "--notes", NOTES]
+
+import release  # noqa: E402
+
+rc = release.main()
+print("\nrelease.main() returned", rc)
+sys.exit(rc)

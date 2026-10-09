@@ -3068,6 +3068,39 @@ function refreshMaxForCodes(codes, immediate){
   });
 }
 
+/* ★ 把清单里**所有编码**的最大可生成数重算一遍（进页面 / 定时）。
+   为什么需要：成波后如果只靠成波事件去刷新，用户从别处（另一台电脑、手机、
+   或者刷新页面）回来时看到的还是旧数字。这里主动校一遍最稳。 */
+function refreshAllMaxQuiet(){
+  if(!ITEMS || !ITEMS.length) return;
+  ITEMS.slice().forEach(function(it){
+    const code = it.code;
+    const key = String(code).toUpperCase();
+    fetch(bust(withSid('/api/wave/lookup?code=' + encodeURIComponent(code))), {cache:'no-store'})
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        if(!d || d.error) return;
+        const per = d.carriers || {};
+        const cnum = parseInt(per[CARRIER], 10) || 0;
+        const tot = DUAL ? Object.keys(per).reduce(function(a,k){ return a + (parseInt(per[k],10)||0); }, 0) : cnum;
+        let changed = false;
+        ITEMS.forEach(function(x){
+          if(String(x.code).toUpperCase() !== key) return;
+          if((parseInt(x.max, 10) || 0) !== tot){ x.max = tot; changed = true; }
+          /* 只剩下这么多了，输入框别停在超量值上 */
+          if((parseInt(x.qty, 10) || 0) > tot){ x.qty = tot; changed = true; }
+          if(x.info){
+            x.info.shelf_qty = d.shelf_qty;
+            x.info.bins_text = d.bins_text || '';
+            x.info.shelf_index_empty = d.shelf_index_empty;
+          }
+        });
+        if(changed){ saveBags(); render(); }
+      })
+      .catch(function(){});
+  });
+}
+
 function planCard(p){
   const cs = p.codes || [];
   let h = '<div class="card"><h2>本次挑单</h2><table><thead><tr><th>编码</th><th>目标</th><th>实际</th></tr></thead><tbody>';
@@ -3162,6 +3195,8 @@ syncCarrierButtons();
 $('code').focus();
 refreshShelfStatus();                     /* 进页面：读货位时间戳并按需后台刷一次 */
 setInterval(refreshShelfStatus, 30000);   /* 停留时每 30s 校一次新鲜度 */
+try{ refreshAllMaxQuiet(); }catch(e){}    /* ★ 进页面：把清单里各编码的可生成数按 ERP 重算一遍 */
+setInterval(function(){ try{ refreshAllMaxQuiet(); }catch(e){} }, 60000);  /* 停留时每分钟校一次 */
 </script>
 <script src="/km/scan.js?v=8"></script>
 </body></html>
