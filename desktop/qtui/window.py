@@ -22,7 +22,7 @@ import time
 from ctypes import wintypes
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtGui import QColor, QLinearGradient, QPainter
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFileDialog,
                                QFrame, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
                                QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
@@ -424,6 +424,121 @@ class LoginScreen(QDialog):
 
 
 # ---------------- 主窗口 ----------------
+class RgbProgress(QWidget):
+    """拉取数据的 RGB 流动进度条：1% → 100%，整条颜色缓慢流动。
+
+    · 渐变从红到紫，并按相位平移 → 看起来是"活的"。
+    · 总量未知时画流光（来回扫的亮带），知道百分比就切成确定值。
+    · 居中显示百分比，右侧显示「已拉 xx 单 · xx 单/秒」。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(26)
+        self.setMinimumWidth(220)
+        self.pct = 0.0
+        self.known = False
+        self.info = ""
+        self.light = True
+        self._phase = 0.0
+        self._timer = QTimer(self)
+        self._timer.setInterval(40)      # 25 帧/秒：顺滑又不费 CPU
+        self._timer.timeout.connect(self._tick)
+        self._timer.start()
+        self.setToolTip("正在拉取待发货订单")
+
+    def _tick(self):
+        self._phase = (self._phase + 0.012) % 1.0
+        try:
+            if self.isVisible():
+                self.update()
+        except Exception:
+            pass
+
+    def set_progress(self, pct, info="", known=True):
+        try:
+            self.pct = max(0.0, min(100.0, float(pct or 0)))
+        except Exception:
+            self.pct = 0.0
+        self.known = bool(known)
+        self.info = str(info or "")
+        self.update()
+
+    @staticmethod
+    def hue_rgb(h):
+        """h∈[0,1) → (r,g,b)（HSV 里 S=V=1 的彩虹色）。"""
+        h = h % 1.0
+        i = int(h * 6.0)
+        f = h * 6.0 - i
+        p_, q, t = 0.0, 1.0 - f, f
+        r, g, b = ((1, t, p_), (q, 1, p_), (p_, 1, t),
+                   (p_, q, 1), (t, p_, 1), (1, p_, q))[i % 6]
+        return int(r * 255), int(g * 255), int(b * 255)
+
+    def paintEvent(self, e):
+        try:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing, True)
+            r = self.rect().adjusted(0, 3, 0, -3)
+            radius = r.height() / 2.0
+
+            # 底槽
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor("#e8e8ec" if self.light else "#3a3a3f"))
+            p.drawRoundedRect(r, radius, radius)
+
+            w = int(r.width() * self.pct / 100.0) if self.known else r.width()
+            if w > 2:
+                grad = QLinearGradient(0, 0, r.width(), 0)
+                steps = 8
+                for i in range(steps + 1):
+                    t = i / float(steps)
+                    hue = (t * 0.85 + self._phase) % 1.0
+                    grad.setColorAt(t, QColor(*self.hue_rgb(hue)))
+                p.setBrush(grad)
+                clip = r.adjusted(0, 0, -(r.width() - w), 0)
+                p.save()
+                p.setClipRect(clip)
+                p.drawRoundedRect(r, radius, radius)
+                p.restore()
+                if not self.known:
+                    # 未知总量：叠一条来回扫的亮带
+                    band = max(20, int(r.width() * 0.22))
+                    x = int((r.width() + band) * ((self._phase * 2) % 1.0)) - band
+                    g2 = QLinearGradient(x, 0, x + band, 0)
+                    g2.setColorAt(0.0, QColor(255, 255, 255, 0))
+                    g2.setColorAt(0.5, QColor(255, 255, 255, 150))
+                    g2.setColorAt(1.0, QColor(255, 255, 255, 0))
+                    p.setBrush(g2)
+                    p.save()
+                    p.setClipRect(clip)
+                    p.drawRoundedRect(r, radius, radius)
+                    p.restore()
+
+            # 百分比（居中）：先画深色描边再画白字，保证在浅色底槽上也看得清
+            txt = ("%.0f%%" % self.pct) if self.known else "读取中…"
+            f = p.font()
+            f.setBold(True)
+            f.setPointSize(9)
+            p.setFont(f)
+            for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                p.setPen(QColor(0, 0, 0, 110))
+                p.drawText(r.adjusted(dx, dy, dx, dy), Qt.AlignCenter, txt)
+            p.setPen(QColor("#ffffff"))
+            p.drawText(r, Qt.AlignCenter, txt)
+
+            # 右侧信息
+            if self.info:
+                p.setPen(QColor("#4b5563" if self.light else "#d1d5db"))
+                f2 = p.font()
+                f2.setBold(False)
+                p.setFont(f2)
+                p.drawText(r.adjusted(8, 0, -8, 0),
+                           Qt.AlignRight | Qt.AlignVCenter, self.info[:64])
+        except Exception:
+            pass
+
+
 class ClickLabel(QLabel):
     """可点击的 QLabel（状态条用它做「点一下立刻重测」）。"""
 
@@ -632,6 +747,10 @@ class Desktop(QWidget):
         self.hint = QLabel("正在连接本机服务…")
         self.hint.setObjectName("hint")
         l1.addWidget(self.hint)
+        # ★ 拉取进度条（RGB 流动，1%→100%）：只在真的在拉数据时显示
+        self.p_pull = RgbProgress()
+        self.p_pull.setVisible(False)
+        l1.addWidget(self.p_pull)
         # ★ 状态条（原型里画过、但真程序一直没做）：ERP 登录 / 手机端 / 开放平台接口。
         #   数据全来自接口：/api/auth/state 的 user·owner、/api/desktop/state 的 text、
         #   /api/desktop/api_conf 的 appKey·sessionId。
@@ -763,6 +882,11 @@ class Desktop(QWidget):
     def _apply_theme(self):
         c = U.LIGHT if self.theme == "light" else U.DARK
         self.setStyleSheet(U.qss(c))
+        try:
+            self.p_pull.light = (self.theme == "light")
+            self.p_pull.update()
+        except Exception:
+            pass
         self.tb.theme_btn.setText("☀" if self.theme == "dark" else "☾")
         # 发光颜色跟着主题走：浅色=蓝光，深色=青光
         for b in self.findChildren(U.GlowButton):
@@ -940,6 +1064,40 @@ class Desktop(QWidget):
                        % (j.get("ver") or "", j.get("orders", "-"), j.get("codes", "-")))
         busy = j.get("syncing") or j.get("shelf_busy")
         txt = str(j.get("text") or "")
+        # ★ 拉取进度条：主程序在拉订单时显示「1%→100%」的 RGB 流动进度
+        try:
+            pl = j.get("pull") or {}
+            mode = str(pl.get("mode") or "")
+            active = bool(busy) and mode in ("full", "inc", "shelf", "lock")
+            pct = pl.get("percent")
+            pulled = int(pl.get("pulled") or 0)
+            rate = pl.get("rate_per_sec")
+            if active:
+                info_bits = []
+                if pulled:
+                    info_bits.append("已拉 %d 单" % pulled)
+                if rate:
+                    try:
+                        info_bits.append("%.0f 单/秒" % float(rate))
+                    except Exception:
+                        pass
+                if pl.get("total_estimate"):
+                    info_bits.append("共约 %d 单" % int(pl["total_estimate"]))
+                self.p_pull.light = (self.theme == "light")
+                if pct is None:
+                    self.p_pull.set_progress(0, "　".join(info_bits), known=False)
+                else:
+                    self.p_pull.set_progress(float(pct), "　".join(info_bits), known=True)
+                self.p_pull.setVisible(True)
+            elif mode == "done" or not busy:
+                # 拉完了：短暂显示 100% 再收起来（让用户看到"到 100% 了"）
+                if self.p_pull.isVisible():
+                    self.p_pull.set_progress(100, "完成", known=True)
+                    QTimer.singleShot(1200, lambda: self.p_pull.setVisible(False))
+            else:
+                self.p_pull.setVisible(False)
+        except Exception:
+            pass
         # 状态栏直接显示主程序那一行真实状态（"正在增量刷新…" 这类都能看到）
         self.st_left.setText(("⏳ " if busy else "") + (txt or "就绪"))
         self.st_right.setText("上次刷新 %s   ·   货位 %s"

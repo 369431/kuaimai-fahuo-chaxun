@@ -4106,6 +4106,24 @@ class _WebHandler(BaseHTTPRequestHandler):
                     out["shelf_at"] = str(getattr(self.app, "shelf_at", "") or "")
                 except Exception:
                     pass
+                # ★ 拉取进度：电脑版状态条用它画「1%→100%」的进度条。
+                #   数据本来就写在 kuaimai_pull_progress.json（拉取线程每片都更新），
+                #   这里直接读出来给界面，不用动拉取逻辑。
+                try:
+                    _pp = load_json(PULL_PROGRESS_FILE, {})
+                    if isinstance(_pp, dict) and _pp:
+                        out["pull"] = {
+                            "mode": str(_pp.get("mode") or ""),
+                            "pulled": int(_pp.get("pulled") or 0),
+                            "page": int(_pp.get("page") or 0),
+                            "percent": _pp.get("percent"),
+                            "total_estimate": int(_pp.get("total_estimate") or 0),
+                            "elapsed_sec": int(_pp.get("elapsed_sec") or 0),
+                            "rate_per_sec": _pp.get("rate_per_sec"),
+                            "updated_at": str(_pp.get("updated_at") or ""),
+                        }
+                except Exception:
+                    pass
                 # 各开关的当前状态（电脑版菜单里要显示勾没勾）
                 opts = {}
                 for k, attr in (("sound", "sound_on"), ("key", "key_on"),
