@@ -376,7 +376,7 @@ class LoginScreen(QDialog):
         try:
             d = CheckUpdateDialog(getattr(self, "api", None),
                                   getattr(self, "theme", "light"), self, current=cur)
-            d.exec()
+            show_dialog_on_top(d)          # ★ 确保弹在主窗口上面
         except Exception as e:
             QMessageBox.warning(self, "检查更新", "打不开检查更新窗：%s" % str(e)[:200])
 
@@ -421,6 +421,37 @@ class LoginScreen(QDialog):
                 json.dump(data, f, ensure_ascii=False)
         except Exception:
             pass
+
+
+def show_dialog_on_top(d):
+    """把对话框**确保显示在主窗口上面**，然后模态执行并返回结果。
+
+    ★ 为什么需要：这些窗都是 QDialog(parent=主窗口)，正常情况会自己浮在上面；
+      但主窗口是无边框自绘标题栏的，实测有时子窗会被压在下面（用户反馈
+      「检查更新的那个窗口不会在主页面上面」）。所以统一在这里：
+        ① 应用级模态 → 必须处理完才回到主窗
+        ② 加置顶标志（窗口关掉就没了，不是永久置顶）
+        ③ raise_ + activateWindow 明确拉到最前
+        ④ ★ 单独 show() 一次再进模态循环 —— 只调 exec() 时，
+           Windows 偶尔不给新窗前台焦点，看起来就是"没弹在上面"。
+
+    登录页（LoginScreen）和主界面（Desktop）共用这个函数。
+    """
+    try:
+        d.setWindowModality(Qt.ApplicationModal)
+        d.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+    except Exception:
+        pass
+    try:
+        d.show()                 # 先显示，确保拿到前台
+    except Exception:
+        pass
+    try:
+        d.raise_()
+        d.activateWindow()
+    except Exception:
+        pass
+    return d.exec()
 
 
 # ---------------- 主窗口 ----------------
@@ -1472,7 +1503,7 @@ class Desktop(QWidget):
         """打开 Qt 版 API 设置。"""
         try:
             d = ApiSettingsDialog(self.api, self.theme, self)
-            d.exec()
+            self._show_top(d)
         except Exception as e:
             self._say("API 设置", "打不开：%s" % str(e)[:150], "error")
 
@@ -1481,7 +1512,7 @@ class Desktop(QWidget):
         try:
             d = TableDialog(self.api, name, self.theme, self)
             self.statusBar_hint("已打开：%s" % d.windowTitle())
-            d.exec()
+            self._show_top(d)
         except Exception as e:
             self._say("表格", "打不开：%s" % str(e)[:150], "error")
 
@@ -1490,7 +1521,7 @@ class Desktop(QWidget):
         try:
             d = StocktakeDialog(self.api, self.theme, self)
             self.statusBar_hint("已打开：库存盘点（按款号）")
-            d.exec()
+            self._show_top(d)
         except Exception as e:
             self._say("盘点", "打不开：%s" % str(e)[:150], "error")
 
@@ -1499,7 +1530,7 @@ class Desktop(QWidget):
         try:
             d = BatchDialog(self.api, self.theme, self)
             self.statusBar_hint("已打开：批次查询")
-            d.exec()
+            self._show_top(d)
         except Exception as e:
             self._say("批次查询", "打不开：%s" % str(e)[:150], "error")
 
@@ -1508,16 +1539,20 @@ class Desktop(QWidget):
         try:
             d = ShipStatsDialog(self.api, self.theme, self)
             self.statusBar_hint("已打开：每日发货量")
-            d.exec()
+            self._show_top(d)
         except Exception as e:
             self._say("每日发货量", "打不开：%s" % str(e)[:150], "error")
 
+    def _show_top(self, d):
+        """实例方法：转调模块级 show_dialog_on_top（主界面各窗共用）。"""
+        return show_dialog_on_top(d)
+
     def _open_dlg(self, cls, label):
-        """通用的「打开一个 Qt 设置窗」封装（三个设置窗共用）。"""
+        """通用的「打开一个 Qt 设置窗」封装（所有设置窗共用）。"""
         try:
             d = cls(self.api, self.theme, self)
             self.statusBar_hint("已打开：%s" % label)
-            d.exec()
+            self._show_top(d)
         except Exception as e:
             self._say(label, "打不开：%s" % str(e)[:150], "error")
 
@@ -1525,7 +1560,7 @@ class Desktop(QWidget):
         """打开 Qt 版打单进度（老版窗口留了入口，随时切回）。"""
         try:
             d = PrintProgressDialog(self.api, self.theme, self)
-            d.exec()
+            self._show_top(d)
         except Exception as e:
             self._say("打单进度", "打不开：%s" % str(e)[:150], "error")
 
@@ -1564,7 +1599,7 @@ class Desktop(QWidget):
         row.addWidget(b2)
         lay.addLayout(row)
         d.setStyleSheet(U.qss(U.LIGHT if self.theme == "light" else U.DARK))
-        d.exec()
+        self._show_top(d)
 
     def do_about(self):
         self._say("关于", "快麦发货查询 · 电脑版\n\n"
@@ -1601,7 +1636,7 @@ class Desktop(QWidget):
             pass
         d = LoginDialog(self.api, self)
         d.setStyleSheet(U.qss(U.LIGHT if self.theme == "light" else U.DARK))
-        if d.exec() == QDialog.Accepted:
+        if self._show_top(d) == QDialog.Accepted:
             self.tb.badge.setText(" " + (self.api.ver or "电脑版") + " ")
             self.st_left.setText("已重新登录：%s" % (self.api.name or "-"))
 
@@ -2735,7 +2770,7 @@ class StockDialog(QDialog):
     def open_log(self):
         try:
             d = TableDialog(self.api, "adjust_log", self.theme, self)
-            d.exec()
+            self._show_top(d)
         except Exception as e:
             QMessageBox.warning(self, "操作日志", str(e)[:200])
 
