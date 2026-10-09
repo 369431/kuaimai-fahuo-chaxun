@@ -1584,6 +1584,13 @@ function render(){
           saveWbar([{wave_code: w.wave_code || '', wave_id: w.wave_id || '',
                     carrier: carrier, qty: ((w.codes && w.codes[0] && w.codes[0].actual) || qty),
                     code: code, ts: Date.now()}]);
+          /* ★ 成波后刷新这个编码的可生成数：立刻减掉实际件数，再以 ERP 实时值为准。
+             （以前不刷新 → 再扫同一个编码还是显示成波前的旧数字，用户反馈过） */
+          try{
+            const _imp = {};
+            _imp[code] = ((w.codes && w.codes[0] && w.codes[0].actual) || qty);
+            refreshMaxForCodes([code], _imp);
+          }catch(e){}
           flash('✅ ' + code + ' 波次 ' + (w.wave_code || '?') + '（' + carrier + ' ' + ((w.codes && w.codes[0] && w.codes[0].actual) || qty) + ' 件）' + (w.capped_note ? '　' + w.capped_note : ''));
         } else {
           flash('✗ ' + code + '：' + ((w && (w.error || w.verify_error)) || '未生成（详情见「生成波次」页）'));
@@ -1630,6 +1637,17 @@ function render(){
         }
       });
       if(ws.length){ markWaved(code); saveWbar(ws); }
+      /* ★ 成波后刷新这个编码的「最大可生成」：立刻减掉实际成波件数，再以 ERP 为准 */
+      try{
+        const imp = {};
+        out.forEach(function(o){
+          const w = o.w || {};
+          if(w.wave_code || w.created){
+            imp[code] = (imp[code] || 0) + (((w.codes && w.codes[0] && w.codes[0].actual)) || o.qty);
+          }
+        });
+        if(Object.keys(imp).length) refreshMaxForCodes([code], imp);
+      }catch(e){}
       flash(code + '：' + parts.join('　'));
       render();
     });
@@ -2975,6 +2993,14 @@ $('mk').onclick = function(){
     const v = p.verify || {};
     if(p.created === true || v.ok){
       dropFromBag(CARRIER, p, items);   /* 只从「当前快递」清单移除已进波次的编码 */
+      /* ★ 成波成功后刷新「最大可生成」：本次用的编码从清单移除了，
+         但**同一个编码可能还在另一个快递的清单里**（中通/申通两份清单），
+         而且用户会马上再查同一个编码 —— 必须让数字立刻反映剩余量。 */
+      try{
+        const imp = {};
+        (p.codes || []).forEach(function(c){ if(c && c.code) imp[c.code] = c.actual; });
+        refreshMaxForCodes(Object.keys(imp), imp);
+      }catch(e){}
       h += '<div class="card"><h2>成波成功</h2>';
       h += '<div class="big oktext">波次号：' + esc(p.wave_code || v.wave_code || p.wave_id || '-') + '</div>'
          + '<div style="margin-top:6px"><span class="tag">状态 ' + esc(v.status_cn || v.status || '未拣') + '</span>'
@@ -2999,6 +3025,48 @@ $('mk').onclick = function(){
     wireFinishFromCreate();
   }).catch(function(e){ stopQueueWatch(); $('out').innerHTML = '<div class="card"><div class="badtext">成波请求失败：' + esc(e.message) + '</div></div>'; });
 };
+
+/* ★ 成波后刷新「最大可生成」。
+   踩过的坑（用户反馈）：生成 210 件之后，同一个编码还显示成波前的 600 件，
+   应该变成 490 左右 —— 因为 it.max 是**加入清单那一刻**存下的旧值，成波后从不重算。
+   ERP 侧其实是实时的（实测：524 → 生成 1 件 → 立刻变 523），所以只要重新查一次就行。
+
+   immediate：本次已知的实际成波件数 {编码: 件数}，先本地减掉，让数字立刻变小，
+             等实时查询回来再以 ERP 的为准（避免网络慢时看着像"没变"）。 */
+function refreshMaxForCodes(codes, immediate){
+  (codes || []).forEach(function(code){
+    const key = String(code).toUpperCase();
+    const imp = immediate && immediate[code] != null ? parseInt(immediate[code], 10) : null;
+    ITEMS.forEach(function(it){
+      if(String(it.code).toUpperCase() !== key) return;
+      if(imp != null && !isNaN(imp) && imp > 0 && it.info && it.info.mode !== 'multi'){
+        it.max = Math.max(0, (parseInt(it.max, 10) || 0) - imp);
+        it.qty = Math.max(0, (parseInt(it.qty, 10) || 0) - imp);
+      }
+    });
+    fetch(bust(withSid('/api/wave/lookup?code=' + encodeURIComponent(code))), {cache:'no-store'})
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        if(!d || d.error) return;
+        const per = d.carriers || {};
+        const cnum = parseInt(per[CARRIER], 10) || 0;
+        ITEMS.forEach(function(it){
+          if(String(it.code).toUpperCase() !== key) return;
+          /* 单快递模式：以该快递的可生成数为准；双快递：取两个快递之和 */
+          const tot = DUAL ? Object.keys(per).reduce(function(a,k){ return a + (parseInt(per[k],10)||0); }, 0) : cnum;
+          it.max = tot;
+          if((parseInt(it.qty, 10) || 0) > tot) it.qty = tot;
+          if(it.info){
+            it.info.shelf_qty = d.shelf_qty;
+            it.info.bins_text = d.bins_text || '';
+            it.info.shelf_index_empty = d.shelf_index_empty;
+          }
+        });
+        saveBags(); render();
+      })
+      .catch(function(){});
+  });
+}
 
 function planCard(p){
   const cs = p.codes || [];
