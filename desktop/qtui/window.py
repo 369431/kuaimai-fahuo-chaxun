@@ -429,13 +429,22 @@ class RgbProgress(QWidget):
 
     · 渐变从红到紫，并按相位平移 → 看起来是"活的"。
     · 总量未知时画流光（来回扫的亮带），知道百分比就切成确定值。
-    · 居中显示百分比，右侧显示「已拉 xx 单 · xx 单/秒」。
+    · 左边 62% 是进度条本体（百分比白字黑边），右边 38% 是文字信息区。
+    · ★ **鼠标放上去可以直接拉着改大小**：
+        左边/右边  → 拉宽 / 拉窄
+        上边/下边  → 拉高 / 拉矮
+        四个角     → 同时改宽和高
+      改完的尺寸会记住（下次启动还是你拉的大小）。
     """
+
+    MIN_W = 140
+    MIN_H = 14
+    GRIP = 5          # 边缘多少像素内算"抓到了边"
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedHeight(30)
-        self.setMinimumWidth(260)
+        self.setMinimumWidth(self.MIN_W)
         self.pct = 0.0
         self.known = False
         self.info = ""
@@ -445,7 +454,163 @@ class RgbProgress(QWidget):
         self._timer.setInterval(40)      # 25 帧/秒：顺滑又不费 CPU
         self._timer.timeout.connect(self._tick)
         self._timer.start()
-        self.setToolTip("正在拉取待发货订单")
+        self.setMouseTracking(True)
+        self.setToolTip("正在拉取待发货订单\n（鼠标放在边缘可以拉动改大小：左右拉宽窄，上下拉高矮）")
+        # 拖拽状态
+        self._drag = None      # ('l'|'r'|'t'|'b'|组合, 起始鼠标, 起始宽高)
+        self._on_resized = None
+        self._apply_size(self._load_size())
+
+    # ---------- 尺寸：记住用户拉的 ----------
+    def _size_file(self):
+        try:
+            import tempfile
+            return os.path.join(tempfile.gettempdir(), "km_qbar_size.json")
+        except Exception:
+            return ""
+
+    def _load_size(self):
+        try:
+            p = self._size_file()
+            if p and os.path.isfile(p):
+                d = json.loads(open(p, encoding="utf-8").read())
+                w = int(d.get("w") or 0)
+                h = int(d.get("h") or 0)
+                if w >= self.MIN_W and h >= self.MIN_H:
+                    return w, h
+        except Exception:
+            pass
+        return 0, 0
+
+    def _save_size(self):
+        try:
+            p = self._size_file()
+            if p:
+                with open(p, "w", encoding="utf-8") as f:
+                    json.dump({"w": int(self.width()), "h": int(self.height())}, f)
+        except Exception:
+            pass
+
+    def _apply_size(self, wh):
+        w, h = wh
+        try:
+            self.setFixedHeight(max(self.MIN_H, int(h)) if h else 30)
+        except Exception:
+            self.setFixedHeight(30)
+        try:
+            if w:
+                self.setFixedWidth(max(self.MIN_W, int(w)))
+            else:
+                self.setMinimumWidth(self.MIN_W)
+                self.setMaximumWidth(16777215)
+        except Exception:
+            pass
+
+    # ---------- 鼠标：改大小 ----------
+    def _edge_at(self, pos):
+        x, y = pos.x(), pos.y()
+        w, h = self.width(), self.height()
+        left = x <= self.GRIP
+        right = x >= w - self.GRIP
+        top = y <= self.GRIP
+        bot = y >= h - self.GRIP
+        if left and top:
+            return "lt"
+        if right and top:
+            return "rt"
+        if left and bot:
+            return "lb"
+        if right and bot:
+            return "rb"
+        if left:
+            return "l"
+        if right:
+            return "r"
+        if top:
+            return "t"
+        if bot:
+            return "b"
+        return ""
+
+    def mouseMoveEvent(self, e):
+        if self._drag:
+            kind, sx, sy, sw, sh = self._drag
+            dx = e.position().x() - sx if hasattr(e, "position") else e.x() - sx
+            neww, newh = sw, sh
+            if "l" in kind:
+                neww = sw - dx
+            if "r" in kind:
+                neww = sw + dx
+            if "t" in kind:
+                newh = sh - (e.position().y() - sy if hasattr(e, "position") else e.y() - sy)
+            if "b" in kind:
+                newh = sh + (e.position().y() - sy if hasattr(e, "position") else e.y() - sy)
+            self._apply_size((neww, newh))
+            self.update()
+            return
+        edge = self._edge_at(e.position().toPoint() if hasattr(e, "position") else e.pos())
+        cur = {
+            "l": Qt.SizeHorCursor, "r": Qt.SizeHorCursor,
+            "t": Qt.SizeVerCursor, "b": Qt.SizeVerCursor,
+            "lt": Qt.SizeFDiagCursor, "rb": Qt.SizeFDiagCursor,
+            "rt": Qt.SizeBDiagCursor, "lb": Qt.SizeBDiagCursor,
+        }.get(edge, Qt.ArrowCursor)
+        try:
+            self.setCursor(cur)
+        except Exception:
+            pass
+
+    def mousePressEvent(self, e):
+        p = e.position().toPoint() if hasattr(e, "position") else e.pos()
+        if e.button() == Qt.LeftButton:
+            edge = self._edge_at(p)
+            if edge:
+                self._drag = (edge, p.x(), p.y(), self.width(), self.height())
+                return
+        super().mousePressEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if self._drag:
+            self._drag = None
+            self._save_size()
+            try:
+                self.setCursor(Qt.ArrowCursor)
+            except Exception:
+                pass
+            try:
+                if callable(self._on_resized):
+                    self._on_resized()
+            except Exception:
+                pass
+            return
+        super().mouseReleaseEvent(e)
+
+    def reset_size(self):
+        """恢复默认大小（右键菜单用）。宽度也要一起复位，否则只变高度。"""
+        try:
+            os.remove(self._size_file())
+        except Exception:
+            pass
+        try:
+            self.setFixedWidth(self.MIN_W * 2)      # 先定一个默认宽
+            self.setMinimumWidth(self.MIN_W)
+            self.setMaximumWidth(16777215)
+        except Exception:
+            pass
+        self.setFixedHeight(30)
+        try:
+            self.updateGeometry()
+        except Exception:
+            pass
+        self.update()
+
+    def contextMenuEvent(self, e):
+        try:
+            m = QMenu(self)
+            m.addAction("恢复默认大小").triggered.connect(lambda *a: self.reset_size())
+            m.exec(e.globalPos())
+        except Exception:
+            pass
 
     def _tick(self):
         self._phase = (self._phase + 0.012) % 1.0
