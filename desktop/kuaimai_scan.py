@@ -4313,6 +4313,44 @@ class _WebHandler(BaseHTTPRequestHandler):
             if not me:
                 return self._json({"error": "请先登录", "login": True}, 401)
             self._ensure_live_app()      # ★ 同上：POST 也要自愈
+            if path in ("/api/desktop/api_conf", "/api/desktop/api_test"):
+                # 电脑版 Qt「API 设置」：保存 / 测试连接（不再弹旧 Tk 窗）
+                deny = self._need(me, "api.settings")
+                if deny:
+                    return deny
+                if path == "/api/desktop/api_conf":
+                    conf = (body or {}).get("conf")
+                    if not isinstance(conf, dict):
+                        return self._json({"error": "conf 必须是对象"}, 400)
+                    try:
+                        save_api_conf(conf)
+                    except Exception as e:
+                        return self._json({"error": "保存失败：%s" % str(e)[:180]}, 500)
+                    try:
+                        info = {str(k): ("" if v is None else str(v))
+                                for k, v in dict(API_CONF).items()}
+                    except Exception:
+                        info = {}
+                    return self._json({"ok": True, "conf": info, "msg": "已保存并立即生效"})
+                # 测试连接：拿当前配置真的调一次开放平台
+                try:
+                    res = api_call_authed("erp.trade.list.query",
+                                          {"status": "WAIT_SEND_GOODS", "page": 1, "size": 1},
+                                          25)
+                except Exception as e:
+                    return self._json({"ok": False, "error": "调用失败：%s" % str(e)[:180]})
+                if isinstance(res, dict) and res.get("success"):
+                    return self._json({"ok": True,
+                                       "msg": "接口可用（查到 %s 单待发货）"
+                                              % (res.get("total")
+                                                 if res.get("total") is not None else "?")})
+                code = str((res or {}).get("code") or "")
+                msg = str((res or {}).get("msg") or (res or {}).get("message") or "")
+                if code == "20002":
+                    # 参数提示（说明凭证有效、真的连上了）
+                    return self._json({"ok": True,
+                                       "msg": "接口可用（凭证有效；20002 是参数提示，可忽略）"})
+                return self._json({"ok": False, "error": (msg or ("code=%s" % code))[:180]})
             if path in ("/api/desktop/print_clients", "/api/desktop/gateway",
                         "/api/desktop/stock_act"):
                 # 这两个接口 GET 取数、POST 保存/执行动作（共用同一个处理函数）

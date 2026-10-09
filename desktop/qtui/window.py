@@ -547,6 +547,8 @@ class Desktop(QWidget):
         out["子客户端管理"] = (lambda *a: self._open_dlg(AdminPanelDialog, "子客户端管理"))
         out["打印分工"] = (lambda *a: self._open_dlg(PrintClientsDialog, "打印分工"))
         out["对外访问设置"] = (lambda *a: self._open_dlg(GatewayDialog, "对外访问设置"))
+        # ★ API 设置也换成 Qt 窗（以前调主程序弹旧 Tk 窗，用户要求不要看到旧界面）
+        out["API 设置"] = (lambda *a: self._open_dlg(ApiSettingsDialog, "API 设置"))
         for label, key in self._TOGGLES.items():
             out[label] = (lambda *a, k=key: self.do_opt(k))
         return out
