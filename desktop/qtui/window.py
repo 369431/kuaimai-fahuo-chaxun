@@ -21,7 +21,7 @@ import threading
 import time
 from ctypes import wintypes
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QLinearGradient, QPainter
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFileDialog,
                                QFrame, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
@@ -479,7 +479,11 @@ class RgbProgress(QWidget):
         try:
             p = QPainter(self)
             p.setRenderHint(QPainter.Antialiasing, True)
-            r = self.rect().adjusted(0, 3, 0, -3)
+            full = self.rect().adjusted(0, 3, 0, -3)
+            # ★ 布局：左边 62% 是进度条本体，右边 38% 留给文字信息。
+            #   以前进度条占满宽度、信息又叠在上面，72% 时文字就糊在一起了。
+            bar_w = int(full.width() * 0.62)
+            r = QRect(full.left(), full.top(), bar_w, full.height())
             radius = r.height() / 2.0
 
             # 底槽
@@ -502,7 +506,6 @@ class RgbProgress(QWidget):
                 p.drawRoundedRect(r, radius, radius)
                 p.restore()
                 if not self.known:
-                    # 未知总量：叠一条来回扫的亮带
                     band = max(20, int(r.width() * 0.22))
                     x = int((r.width() + band) * ((self._phase * 2) % 1.0)) - band
                     g2 = QLinearGradient(x, 0, x + band, 0)
@@ -515,26 +518,29 @@ class RgbProgress(QWidget):
                     p.drawRoundedRect(r, radius, radius)
                     p.restore()
 
-            # 百分比（居中）：先画深色描边再画白字，保证在浅色底槽上也看得清
+            # 百分比：画在进度条本体中间（白字 + 黑描边）
             txt = ("%.0f%%" % self.pct) if self.known else "读取中…"
             f = p.font()
             f.setBold(True)
-            f.setPointSize(9)
+            f.setPointSize(11)
             p.setFont(f)
-            for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-                p.setPen(QColor(0, 0, 0, 110))
+            for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1)):
+                p.setPen(QColor(0, 0, 0, 150))
                 p.drawText(r.adjusted(dx, dy, dx, dy), Qt.AlignCenter, txt)
             p.setPen(QColor("#ffffff"))
             p.drawText(r, Qt.AlignCenter, txt)
 
-            # 右侧信息
+            # 右侧信息：独立的 38% 区域，不会被进度条压住
             if self.info:
-                p.setPen(QColor("#4b5563" if self.light else "#d1d5db"))
+                p.setPen(QColor("#374151" if self.light else "#e5e7eb"))
                 f2 = p.font()
                 f2.setBold(False)
+                f2.setPointSize(9)
                 p.setFont(f2)
-                p.drawText(r.adjusted(8, 0, -8, 0),
-                           Qt.AlignRight | Qt.AlignVCenter, self.info[:64])
+                right_box = QRect(r.right() + 10, full.top(),
+                                  full.right() - r.right() - 12, full.height())
+                p.drawText(right_box, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextSingleLine,
+                           self.info)
         except Exception:
             pass
 
@@ -1066,9 +1072,11 @@ class Desktop(QWidget):
                        % (j.get("ver") or "", j.get("orders", "-"), j.get("codes", "-")))
         busy = j.get("syncing") or j.get("shelf_busy")
         txt = str(j.get("text") or "")
-        # ★ 拉取进度条：**只要主程序在同步数据就显示**（订单 / 锁定数 / 货位 都一样），
-        #   有百分比就画百分比，没有总量就画流光。
-        #   以前只在"全量拉订单"时才显示，所以刷新货位/锁定数时用户只看到一行文字（反馈过）。
+        # ★ 拉取进度条：**不管是手动点的还是软件自己定时拉的，都显示**。
+        #   两个条件满足其一就显示：
+        #     ① 主程序在忙（syncing / shelf_busy）——手动和自动都会置
+        #     ② 进度数据是"新鲜"的（10 秒内更新过）—— 防止某些自动路径没置忙标志
+        #   以前只在"全量拉订单"时显示，所以自动刷新时用户什么都看不到（反馈过）。
         try:
             pl = j.get("pull") or {}
             kind = str(pl.get("kind") or pl.get("mode") or "")
@@ -1076,14 +1084,26 @@ class Desktop(QWidget):
             pulled = int(pl.get("pulled") or 0)
             rate = pl.get("rate_per_sec")
             total = int(pl.get("total_estimate") or 0)
-            kind_cn = {"orders": "订单", "lock": "锁定数", "shelf": "货位"}.get(kind, "数据")
-            active = bool(busy) and kind not in ("", "done")
+            kind_cn = {"orders": "订单", "lock": "锁定数", "shelf": "货位",
+                       "full": "订单", "inc": "订单"}.get(kind, "数据")
+            fresh = False
+            try:
+                ts = str(pl.get("updated_at") or "")
+                if ts:
+                    fresh = (time.mktime(time.strptime(ts, "%Y-%m-%d %H:%M:%S"))
+                             > time.time() - 10)
+            except Exception:
+                fresh = False
+            active = kind not in ("", "done") and (bool(busy) or fresh)
             if active:
-                bits = ["正在拉取%s" % kind_cn]
-                if pulled:
-                    bits.append("已拉 %d" % pulled)
-                if total:
-                    bits.append("共约 %d" % total)
+                # 信息压短一点，保证能完整显示（原来太长会被裁掉尾巴）
+                kind_short = {"orders": "订单", "lock": "锁定数", "shelf": "货位",
+                              "full": "订单", "inc": "订单"}.get(kind, "数据")
+                bits = ["拉取%s中" % kind_short]
+                if pulled and total:
+                    bits.append("%d/%d" % (pulled, total))
+                elif pulled:
+                    bits.append("已 %d" % pulled)
                 if rate:
                     try:
                         bits.append("%.0f/秒" % float(rate))

@@ -9684,9 +9684,19 @@ class ScanApp:
             if db_orders_total() <= 0:
                 self._worker_full()          # 库里没数据 → 直接走全量
                 return
+            _t0 = time.time()
+
             def prog(c):
+                # ★ 增量刷新也上报进度：这样**自动定时跑的增量**在界面底部也有彩色进度条
+                #   （以前只有全量拉订单才写进度，自动刷新时用户什么都看不到）
+                _write_pull_progress("orders", c, 1, None, _t0)
                 self.q.put(lambda: self.status_text.set("增量刷新中…已处理 %d 单" % c))
             processed, sync_started, ok = incremental_sync_db(self.last_sync_ts, progress=prog)
+            try:
+                save_json(PULL_PROGRESS_FILE, {"mode": "done", "pulled": int(processed or 0),
+                                               "updated_at": now_gmt8()})
+            except Exception:
+                pass
             self.q.put(lambda: self._apply_sync(processed, sync_started, ok))
         except Exception as e:
             msg = str(e)[:200]
