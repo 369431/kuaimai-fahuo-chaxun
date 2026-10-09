@@ -1,10 +1,10 @@
 {
-  "version": "v2.04",
-  "notes": "**v2.04：设置窗全部正常 + 加排查日志**\n\n**实测结果（9 个设置窗全部 0.0 秒弹出）**\n· API 设置 / 对外访问设置 / 子客户端管理 / 打印分工 / 现货可发 /\n  批次查询 / 改库存日志 / 打单进度 —— 全部正常。\n· 库存盘点按设计只在网页版有（电脑版不提供入口）。\n\n**这一版修的根因（v2.03 里已修，这版继续加固）**\n· 电脑版为了不显示旧界面，把后台的 Tk 根窗隐藏了；而 Tk 的规则是\n  **transient(隐藏的父窗) 会让子窗自己也被隐藏**（窗口建出来了但看不见）——\n  这就是「点 API 设置/对外访问/现货可发没反应」的真正原因。已把 transient\n  换成安全版本。\n· 登录会话没交接给业务核心：登录窗把会话文件删了 → 启动器读不到 →\n  业务核心从没启动 → 界面每个请求都被回「请先登录」。已修。\n· 启动器现在**采纳登录窗的 token** 作为权威，并写回权威会话文件，\n  界面 token 不被接受时会自动读它自愈。\n\n**新增排查日志**\n· 如果以后还有点按钮没反应，程序会把异常写进 `%TEMP%\\km_action.log`\n  （以前这类异常被队列静默吞掉，完全查不到原因）。\n",
+  "version": "v2.05",
+  "notes": "**v2.05：API 设置也换成电脑版自己的界面（不再弹旧窗口）**\n\n**① API 设置 → 电脑版自己的窗口**\n· 以前点「API 设置」弹的是旧版窗口；现在跟「对外访问设置 / 子客户端管理 / 打印分工」\n  一样，用电脑版统一的界面。\n· 字段一致：网关地址、API 版本、appKey、appSecret、refreshToken、sessionId、\n  签名方式、签名结果大写（敏感字段可点「显示」核对）。\n· 实测：读取 8 个字段正常；点「保存并应用」→「已保存并生效」；\n  「测试连接」→「接口可用」（真调一次快麦开放平台）。\n\n**② 补上电脑版侧的两个接口**\n· `POST /api/desktop/api_conf`：保存 API 参数（写 kuaimai_api.json 并立即生效）\n· `POST /api/desktop/api_test`：测试连接\n  这两个接口以前主程序里根本没有，所以电脑版那个窗的「保存」点了会报错。\n\n**③ 顺带修掉的**\n· 电脑版里同一个「API 设置」窗定义了两份（后一份把前一份覆盖），已去掉重复。\n· 从别的线程操作界面会统一回到主线程执行（避免偶发「点了没反应」）。\n\n**目前电脑版已全部用新界面（不再弹旧窗口）的按钮**\n  API 设置 / 对外访问设置 / 子客户端管理 / 打印分工 / 现货可发 / 按条件筛选 /\n  改库存日志 / 盘点 / 批次查询 / 每日发货量 / 检查更新 / 打单进度 / 各设置开关\n",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v2.04/kuaimai-scan-setup-v2.04.exe",
-  "sha256": "30ecc3849b2a0ad180e0d42a645665da330b202e69c9fe6ed3ef2ea05ef05e2a",
-  "size": 46334539,
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v2.05/kuaimai-scan-setup-v2.05.exe",
+  "sha256": "056143414e513d558cbfc70a06efae56c6c86243f4a46a1fde9fad0b9fb27197",
+  "size": 46334883,
   "mandatory": false,
-  "published_at": "2026-10-09 03:47"
+  "published_at": "2026-10-09 14:21"
 }
