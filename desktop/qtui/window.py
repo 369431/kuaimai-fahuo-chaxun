@@ -1108,7 +1108,7 @@ class Desktop(QWidget):
         threading.Thread(target=work, daemon=True).start()
 
     def do_api_settings(self):
-        """打开 Qt 版 API 设置（旧版窗口留了入口）。"""
+        """打开 Qt 版 API 设置。"""
         try:
             d = ApiSettingsDialog(self.api, self.theme, self)
             d.exec()
@@ -1125,7 +1125,7 @@ class Desktop(QWidget):
             self._say("表格", "打不开：%s" % str(e)[:150], "error")
 
     def do_stocktake(self):
-        """打开「库存盘点（按款号）」（Qt 本地窗；旧版窗口里面也留了入口）。"""
+        """打开「库存盘点（按款号）」（Qt 本地窗）。"""
         try:
             d = StocktakeDialog(self.api, self.theme, self)
             self.statusBar_hint("已打开：库存盘点（按款号）")
@@ -1134,7 +1134,7 @@ class Desktop(QWidget):
             self._say("盘点", "打不开：%s" % str(e)[:150], "error")
 
     def do_batch(self):
-        """打开「批次查询」（Qt 本地窗；窗内留了「旧版窗口」入口）。"""
+        """打开「批次查询」（Qt 本地窗）。"""
         try:
             d = BatchDialog(self.api, self.theme, self)
             self.statusBar_hint("已打开：批次查询")
@@ -1810,7 +1810,6 @@ class TableDialog(QDialog):
     特性：
       · 数据在后台线程拉，回来走 Dispatcher 回主线程刷表（不卡界面）
       · 列/行/说明全部来自主程序，形状无关（接口自己推列）
-      · 「打开旧版窗口」：调同一个动作让主程序弹老的 Tk 设置窗 —— 保证零功能损失
     """
 
     def __init__(self, api, name, theme="light", parent=None, kw=""):
@@ -1856,9 +1855,6 @@ class TableDialog(QDialog):
         self.status.setObjectName("hint")
         row.addWidget(self.status)
         row.addStretch(1)
-        b_old = U.GlowButton("打开旧版窗口")
-        b_old.clicked.connect(lambda *a: self.api.desktop_action(self.name))
-        row.addWidget(b_old)
         b_re = U.GlowButton("刷 新")
         b_re.clicked.connect(lambda *a: self.reload())
         row.addWidget(b_re)
@@ -2005,10 +2001,6 @@ class BatchDialog(TableDialog):
         self.b_ship.setToolTip("读操作日志：每个订单是哪个打包账号发的、实际发了多少件")
         self.b_ship.clicked.connect(lambda *a: self.ship())
         box.addWidget(self.b_ship)
-        b_old = U.GlowButton("旧版窗口")
-        b_old.setToolTip("打开原来的 Tk 批次窗（有按货位汇总等更多视图）")
-        b_old.clicked.connect(lambda *a: self.api.desktop_action("batch"))
-        box.addWidget(b_old)
         # 插到标题行下面（索引 1）
         self.layout().insertLayout(1, box)
 
@@ -2234,10 +2226,6 @@ class StockDialog(QDialog):
         self.msg.setObjectName("hint")
         foot.addWidget(self.msg)
         foot.addStretch(1)
-        b_old = U.GlowButton("打开旧版窗口")
-        b_old.setToolTip("打开原来的 Tk 现货可发窗（应急用）")
-        b_old.clicked.connect(lambda *a: self.api.desktop_action("stock"))
-        foot.addWidget(b_old)
         b_cl = U.GlowButton("关 闭", primary=True)
         b_cl.clicked.connect(self.accept)
         foot.addWidget(b_cl)
@@ -2427,10 +2415,6 @@ class PrintClientsDialog(QDialog):
         self.msg.setObjectName("hint")
         row.addWidget(self.msg)
         row.addStretch(1)
-        b_old = U.GlowButton("旧版窗口")
-        b_old.setToolTip("打开原来的 Tk 打印分工窗")
-        b_old.clicked.connect(lambda *a: self.api.desktop_action("print_clients"))
-        row.addWidget(b_old)
         b_save = U.GlowButton("保 存", primary=True)
         b_save.clicked.connect(lambda *a: self.save())
         row.addWidget(b_save)
@@ -2598,10 +2582,6 @@ class GatewayDialog(QDialog):
         self.msg.setObjectName("hint")
         row.addWidget(self.msg)
         row.addStretch(1)
-        b_old = U.GlowButton("旧版窗口")
-        b_old.setToolTip("打开原来的 Tk 对外访问设置窗（有装证书等更多操作）")
-        b_old.clicked.connect(lambda *a: self.api.desktop_action("gateway"))
-        row.addWidget(b_old)
         b_re = U.GlowButton("刷 新")
         b_re.setToolTip("重新检查端口 / 进程 / 证书状态")
         b_re.clicked.connect(lambda *a: self.load())
@@ -2798,10 +2778,6 @@ class AdminPanelDialog(QDialog):
             b = U.GlowButton(label)
             b.clicked.connect(lambda *a, f=fn: f())
             row.addWidget(b)
-        b_old = U.GlowButton("旧版窗口")
-        b_old.setToolTip("打开原来的 Tk 子客户端管理窗")
-        b_old.clicked.connect(lambda *a: self.api.desktop_action("admin"))
-        row.addWidget(b_old)
         b_re = U.GlowButton("刷 新")
         b_re.clicked.connect(lambda *a: self.load())
         row.addWidget(b_re)
@@ -3043,7 +3019,7 @@ class PrintProgressDialog(QDialog):
     两个选项卡：
       · 任务  —— printing / queue / done / failed 四组 + 最近记录
       · 日志  —— 打单日志尾部 + 自动上架/审核日志尾部
-    1.5 秒自刷新；底部保留「打开旧版窗口」，复杂操作随时切回去，功能一个不少。
+    1.5 秒自刷新；底部可暂停/恢复自动打单、清空失败任务、删除选中任务。
     """
 
     def __init__(self, api, theme="light", parent=None):
@@ -3080,14 +3056,16 @@ class PrintProgressDialog(QDialog):
         lay.addWidget(self.tabs, 1)
 
         row = QHBoxLayout()
-        self.b_old = U.GlowButton("打开旧版窗口", glow=26)
-        self.b_old.setToolTip("旧版窗口功能最全（暂停自动打单等），打不开的都在那边")
-        self.b_old.clicked.connect(lambda: self._act("open_tk"))
-        row.addWidget(self.b_old)
         b_dir = U.GlowButton("打开数据目录", glow=26)
         b_dir.clicked.connect(lambda: self._act("open_dir"))
         row.addWidget(b_dir)
         row.addStretch(1)
+        # ★ 「暂停 / 恢复自动打单」：以前只有旧版窗口里有，现在搬到电脑版
+        #   （跟主界面勾选框、监听线程同一个 flag 文件，暂停期间不认领新任务）
+        self.b_pause = U.GlowButton("暂停自动打单", glow=26)
+        self.b_pause.setToolTip("暂停后不再认领新任务（正在打的那单会打完）")
+        self.b_pause.clicked.connect(lambda: self._act("toggle_pause"))
+        row.addWidget(self.b_pause)
         b_clr = U.GlowButton("清空失败任务", glow=26)
         b_clr.clicked.connect(lambda: self._act("clear_failed"))
         row.addWidget(b_clr)
@@ -3143,6 +3121,14 @@ class PrintProgressDialog(QDialog):
                             cnt.get("done", len(lv.get("done") or [])),
                             cnt.get("failed", len(lv.get("failed") or [])),
                             str(pg.get("text") or "")[:60]))
+        # 暂停状态同步到按钮文字（在别处改了也能跟着变）
+        try:
+            _p = bool(r.get("paused"))
+            self.b_pause.setText("恢复自动打单" if _p else "暂停自动打单")
+            self.b_pause.setToolTip("已暂停：不再认领新任务（正在打的那单会打完），点一下恢复"
+                                    if _p else "点一下暂停自动认领新任务")
+        except Exception:
+            pass
 
         rows = []
         for key, cn in (("printing", "打印中"), ("queue", "排队"),
@@ -3171,11 +3157,6 @@ class PrintProgressDialog(QDialog):
 
     # ---------- 动作 ----------
     def _act(self, what):
-        if what == "open_tk":
-            # 旧版窗口（功能最全）：让主程序去开
-            self.api.desktop_action("print_progress")
-            return
-
         def work():
             r = self.api.print_action(what)
             self._disp.post(lambda: self._after(what, r))
@@ -3187,6 +3168,15 @@ class PrintProgressDialog(QDialog):
                 self.lbl.setText("已清空失败任务：%s 条" % r.get("deleted", 0))
             elif what == "open_dir":
                 self.lbl.setText("已在主程序那台电脑打开数据目录")
+            elif what in ("pause", "resume", "toggle_pause"):
+                self.lbl.setText(str(r.get("msg") or "已切换"))
+                try:
+                    self.b_pause.setText("恢复自动打单" if r.get("paused") else "暂停自动打单")
+                    self.b_pause.setToolTip("暂停后不再认领新任务（正在打的那单会打完）"
+                                            if r.get("paused")
+                                            else "点一下暂停自动认领新任务")
+                except Exception:
+                    pass
             self.reload()
         else:
             msg = (r or {}).get("error") or "操作失败"
@@ -3224,7 +3214,7 @@ class ApiSettingsDialog(QDialog):
     """API 设置（Qt 版）—— 换账号 / 换网关 / 换版本。
 
     字段跟旧设置窗完全一致，保存走主程序的 save_api_conf（同一套逻辑、同一个文件）。
-    底部保留「打开旧版窗口」：那边还有"测试连接""恢复默认"等。
+    底部有「测试连接」「恢复默认」「保存并应用」。
     """
 
     FIELDS = [
@@ -3288,10 +3278,15 @@ class ApiSettingsDialog(QDialog):
         lay.addStretch(1)
 
         btns = QHBoxLayout()
-        b_old = U.GlowButton("打开旧版窗口", glow=26)
-        b_old.setToolTip("旧版窗口里还有「测试连接」「恢复默认」")
-        b_old.clicked.connect(lambda: self.api.desktop_action("api_settings"))
-        btns.addWidget(b_old)
+        # ★ 「测试连接」和「恢复默认」：以前只有旧版窗口里有，现在搬到电脑版
+        b_t = U.GlowButton("测试连接")
+        b_t.setToolTip("拿当前配置真调一次快麦开放平台")
+        b_t.clicked.connect(self.do_test)
+        btns.addWidget(b_t)
+        b_d = U.GlowButton("恢复默认")
+        b_d.setToolTip("填入程序内置的默认值（还要点「保存并应用」才生效）")
+        b_d.clicked.connect(self.do_restore)
+        btns.addWidget(b_d)
         btns.addStretch(1)
         b_c = U.GlowButton("关 闭")
         b_c.clicked.connect(self.accept)
@@ -3318,10 +3313,44 @@ class ApiSettingsDialog(QDialog):
             self.msg.setText(str(r.get("error"))[:120])
             return
         conf = r.get("conf") or {}
+        # 记下内置默认值，供「恢复默认」用（服务端会一起返回 defaults）
+        self._defaults = r.get("defaults") or {}
         for k, e in self.ents.items():
             e.setText(str(conf.get(k, "")))
         self.msg.setText("已读取当前参数（网关 %s，版本 %s）"
                          % (conf.get("gateway") or "-", conf.get("version") or "-"))
+
+    def do_restore(self):
+        """填入程序内置默认值（不直接写库，跟旧版一样要点「保存并应用」）。"""
+        d = getattr(self, "_defaults", None) or {}
+        if not d:
+            self.msg.setText("拿不到内置默认值（可能主程序版本较旧）")
+            return
+        for k, e in self.ents.items():
+            if k in d:
+                e.setText(str(d.get(k) or ""))
+        self.msg.setText("已填入内置默认值（还没保存）—— 点「保存并应用」生效")
+
+    def do_test(self):
+        """测试连接：让主程序真调一次快麦开放平台，把结果告诉用户。"""
+        self.msg.setText("正在测试连接…")
+
+        def work():
+            try:
+                r = self.api.post("/api/desktop/api_test", {}, timeout=90)
+            except Exception as e:
+                r = {"error": str(e)[:150]}
+            self._disp.post(lambda: self._after_test(r))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _after_test(self, r):
+        r = r if isinstance(r, dict) else {}
+        if r.get("ok"):
+            self.msg.setText("测试连接成功 ✓ %s" % str(r.get("msg") or "")[:100])
+        else:
+            self.msg.setText("测试连接失败：%s" % str(r.get("error") or "未知错误")[:130])
+            QMessageBox.warning(self, "API 设置", str(r.get("error") or "测试失败")[:300])
 
     def do_save(self):
         conf = {k: e.text() for k, e in self.ents.items()}

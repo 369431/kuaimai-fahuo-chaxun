@@ -518,6 +518,11 @@ def print_progress_payload():
            "auto_log": read_auto_ops_tail(8),
            "live": {"printing": [], "queue": [], "done": [], "failed": [], "counts": {}},
            "recent": []}
+    # ★ 暂停状态：电脑版「打单进度」窗的「暂停/恢复自动打单」按钮靠它同步文字
+    try:
+        out["paused"] = bool(os.path.isfile(auto_print_pause_flag()))
+    except Exception:
+        out["paused"] = False
     try:
         import kuaimai_print_jobs as pj
         conn = sqlite3.connect(DB_FILE, timeout=10)
@@ -3937,9 +3942,13 @@ class _WebHandler(BaseHTTPRequestHandler):
                     return deny
                 try:
                     conf = {str(k): ("" if v is None else str(v)) for k, v in dict(API_CONF).items()}
+                    # ★ 把内置默认值一起给电脑版：它那边「恢复默认」按钮要用
+                    #   （以前只在旧 Tk 窗里有这个功能，电脑版拿不到默认值）。
+                    dflt = {str(k): ("" if v is None else str(v))
+                            for k, v in dict(DEFAULT_API).items()}
                 except Exception as e:
                     return self._json({"error": "读取失败：%s" % str(e)[:150]}, 500)
-                return self._json({"ok": True, "conf": conf})
+                return self._json({"ok": True, "conf": conf, "defaults": dflt})
             if parsed.path == "/api/desktop/print_progress":
                 # 电脑版「打单进度」用：直接给 print_progress_payload() 的原始数据。
                 # 那个函数本来就是只读、轻量、不抛异常的，正适合给接口用。
@@ -4439,6 +4448,34 @@ class _WebHandler(BaseHTTPRequestHandler):
                         return self._json({"error": "ids 必须是数字列表"}, 400)
                     n = print_jobs_delete(ids=ids)
                     return self._json({"ok": True, "deleted": int(n)})
+                if what in ("pause", "resume", "toggle_pause"):
+                    # 暂停 / 恢复「网页提交后自动打单」（跟旧窗、主界面勾选框同一个 flag 文件）。
+                    # 暂停期间监听线程不认领新任务（正在打的那单会打完）。
+                    p = auto_print_pause_flag()
+                    try:
+                        if what == "pause":
+                            os.makedirs(os.path.dirname(p), exist_ok=True)
+                            with open(p, "w", encoding="utf-8") as f:
+                                f.write("paused")
+                            paused = True
+                        elif what == "resume":
+                            if os.path.isfile(p):
+                                os.remove(p)
+                            paused = False
+                        else:
+                            paused = not os.path.isfile(p)
+                            if paused:
+                                os.makedirs(os.path.dirname(p), exist_ok=True)
+                                with open(p, "w", encoding="utf-8") as f:
+                                    f.write("paused")
+                            elif os.path.isfile(p):
+                                os.remove(p)
+                    except Exception as e:
+                        return self._json({"error": "切换暂停失败：%s" % str(e)[:150]}, 500)
+                    return self._json({"ok": True, "paused": bool(paused),
+                                       "msg": ("已暂停自动打单：不再认领新任务"
+                                               "（正在打的那单会打完）" if paused
+                                               else "已恢复自动打单：监听会继续认领新任务")})
                 if what == "open_dir":
                     # 在主机上打开数据目录（Qt 窗和主程序在同一台机器）
                     try:
