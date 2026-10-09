@@ -442,35 +442,70 @@ def _search_form(code):
             % (SEARCH_PAGE_SIZE, urllib.parse.quote(code)))
 
 
-def _priority_sids(sids, chunk=200):
+_REM_CACHE = {}          # {sid: (timeoutActionTime 绝对秒, 记下的时刻)}  —— 剩余时间缓存
+_REM_CACHE_TTL = 900     # 15 分钟：超时时刻是订单属性，短时间内不会变
+
+
+def _priority_sids(sids, chunk=1000):
     """只给**这些订单号**查剩余时间 → {sid: 剩余小时}。
 
     ★ 为什么不用 _priority(按编码查)：按编码查会把该编码**全部待发货单**都拉回来
       （实测一个编码几千单、返回体很大），5 个编码要 8.8 秒 —— 而挑单其实只关心
-      候选的那几十单。改成按 sids 精确查（/trade/search 支持 sids=，一次 200 个），
-      返回体小得多，成波能明显变快。
+      候选的那几十单。改成按 sids 精确查（/trade/search 支持 sids=）。
+
+    ★ 每批条数实测（2160 个真实候选）：
+        chunk=200  11 批 14.49s（旧默认）
+        chunk=300   8 批 13.66s
+        chunk=700   4 批 12.36s
+        chunk=1000  3 批 12.10s  ← 默认用这个（服务端处理时间占大头，批次越少越省）
+      几档都是**全部取回**，没有丢数据。
+
+    ★ 缓存：超时时刻是订单的绝对属性（timeoutActionTime），同一单短时间再查结果一样。
+      你反复调数量/换快递来回试时，第二次开始直接命中缓存 —— 这是最省时间的地方。
+      缓存只存"绝对时刻"，每次按当前时间现算剩余小时数，所以不会算错。
+
+    ★★ 必须**串行**发！（实测教训，别再改成并发）
+      试过线程池并发这批请求：串行 2211 条 = 15.4 秒；并发 = 167 秒且只拿回 1211 条。
+      快麦后端对同一账号的并发会互相排队/限流，并发不但更慢还会丢数据。
     """
     import json as _json
     import urllib.parse as _up
     ids = [str(s) for s in (sids or []) if str(s).strip()]
     if not ids:
         return {}
-    c = KP.open_cdp_page()
     now = time.time()
     rem = {}
+    # ① 先吃缓存
+    todo = []
+    for s in ids:
+        hit = _REM_CACHE.get(s)
+        if hit and (now - hit[1]) < _REM_CACHE_TTL:
+            to = hit[0]
+            rem[s] = ((to - now) / 3600.0) if to else None
+        else:
+            todo.append(s)
+    if not todo:
+        return rem
+
+    # ② 剩下的才发请求
+    c = KP.open_cdp_page()
     try:
-        for i in range(0, len(ids), int(chunk)):
-            part = ids[i:i + int(chunk)]
+        for i in range(0, len(todo), int(chunk)):
+            part = todo[i:i + int(chunk)]
             form = ("api_name=trade_search&queryId=77&pageSize=%d&field=timeoutActionTime"
                     "&needOrder=1&useCompress=0&minutesAfterPaidOrderAreNotDisplayed=0"
                     "&sids=%s&page=1" % (int(chunk), _up.quote(",".join(part))))
-            try:
-                r = _post(c, SEARCH_PATH, form, "application/x-www-form-urlencoded")
-                arr = ((_json.loads((r or {}).get("text") or "").get("data") or {})
-                       .get("list")) or []
-            except Exception:
-                arr = []
-            for o in arr:
+            arr = None
+            for _try in range(2):
+                try:
+                    r = _post(c, SEARCH_PATH, form, "application/x-www-form-urlencoded")
+                    arr = ((_json.loads((r or {}).get("text") or "").get("data") or {})
+                           .get("list")) or []
+                    break
+                except Exception:
+                    arr = None
+                    time.sleep(0.4)
+            for o in (arr or []):
                 if not isinstance(o, dict):
                     continue
                 s = str(o.get("sid") or "")
@@ -478,7 +513,9 @@ def _priority_sids(sids, chunk=200):
                     continue
                 try:
                     to = float(o.get("timeoutActionTime") or 0)
-                    rem[s] = ((to / 1000.0 - now) / 3600.0) if to > 1e12 else None
+                    to_s = (to / 1000.0) if to > 1e12 else 0.0
+                    _REM_CACHE[s] = (to_s, now)
+                    rem[s] = ((to_s - now) / 3600.0) if to_s else None
                 except Exception:
                     rem[s] = None
     finally:
@@ -486,6 +523,12 @@ def _priority_sids(sids, chunk=200):
             c.close()
         except Exception:
             pass
+    # ③ 缓存别无限涨
+    try:
+        if len(_REM_CACHE) > 200000:
+            _REM_CACHE.clear()
+    except Exception:
+        pass
     return rem
 
 
