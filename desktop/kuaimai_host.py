@@ -252,6 +252,18 @@ class Host(object):
 
         app = KS.ScanApp(root, session)
         self.app = app
+        # ★ 老 Tk 根窗必须**彻底隐藏**（withdraw），不能只用 alpha=0。
+        #   实测：alpha=0 时 Windows 仍认为窗口"可见"（IsWindowVisible=True），
+        #   于是最小化电脑版窗口后，这层旧界面会露出来（用户截图反馈过）。
+        #   withdraw() 才是 IsWindowVisible=False。
+        #   设置窗是 Toplevel、而且我们给 transient 打了补丁（父窗没映射就跳过），
+        #   所以 withdraw 之后设置窗照样能弹出来。
+        if not show_tk:
+            try:
+                root.withdraw()
+                root.attributes("-alpha", 0.0)
+            except Exception:
+                pass
         # ★ 诊断：ScanApp 造完之后，内置服务手里挂的是谁？
         #   （单进程启动器必须确认服务挂上了真 app，否则接口全打在占位对象上）
         try:
