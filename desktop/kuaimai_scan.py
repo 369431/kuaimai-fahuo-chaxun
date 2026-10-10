@@ -5459,37 +5459,52 @@ def purchase_detail_payload(purchase_order_id):
                 break
 
     # ③ 每张收货单的商品明细
+    #   ★★ 关键口径（试错后确认，别改错）：商品明细里的 **count 不是「已收数量」**，
+    #      而是「这张收货单要求上架的数量」。真正算「已收」要看这张收货单**上架了没有**：
+    #        · SHELVED（已上架）      → count 全额计入
+    #        · NOT_FINISH（未上架）   → 计 0
+    #        · 部分上架              → 按 shelvedQuantity / quantity 比例计入
+    #      实测：这样算出的每个商品之和，**严格等于采购单头的 receiveQuantity**
+    #      （8 个采购单逐个核对全部一致）。以前直接用 count 求和 → 恰好等于采购数量，
+    #      所以「待收」永远是 0（用户反馈过）。
     merge = {}
     for e in my_entries:
         eid = e.get("id")
+        try:
+            _q = int(e.get("quantity") or 0)
+            _sh = int(e.get("shelvedQuantity") or 0)
+        except Exception:
+            _q, _sh = 0, 0
+        ratio = 0.0 if _q <= 0 else max(0.0, min(1.0, float(_sh) / float(_q)))
+        items = []
+        if eid:
+            r3 = _call("warehouse.entry.list.get", {"id": str(eid)})
+            for x in (r3.get("list") or []):
+                cd = str(x.get("outerId") or "")
+                if not cd:
+                    continue
+                try:
+                    cnt = int(x.get("count") or 0)
+                    good = int(x.get("goodNum") or 0)
+                    bad = int(x.get("badNum") or 0)
+                except Exception:
+                    cnt, good, bad = 0, 0, 0
+                got = int(round(cnt * ratio))          # ← 按上架比例计入的「已收」
+                items.append({"outer_id": cd, "count": cnt, "got": got,
+                              "good": good, "bad": bad})
+                m = merge.setdefault(cd, {"received": 0, "good": 0, "bad": 0})
+                m["received"] += got
+                m["good"] += good
+                m["bad"] += bad
         out["entries"].append({
             "code": e.get("code"), "id": eid, "status": e.get("status"),
-            "quantity": int(e.get("quantity") or 0),
+            "quantity": _q,
             "received": int(e.get("receiveQuantity") or 0),
-            "shelved": int(e.get("shelvedQuantity") or 0),
+            "shelved": _sh,
             "wait_shelve": int(e.get("waitShelveQuantity") or 0),
             "created": e.get("created"),
-            "items": [],
+            "items": items,
         })
-        if not eid:
-            continue
-        r3 = _call("warehouse.entry.list.get", {"id": str(eid)})
-        for x in (r3.get("list") or []):
-            cd = str(x.get("outerId") or "")
-            if not cd:
-                continue
-            try:
-                cnt = int(x.get("count") or 0)
-                good = int(x.get("goodNum") or 0)
-                bad = int(x.get("badNum") or 0)
-            except Exception:
-                cnt, good, bad = 0, 0, 0
-            out["entries"][-1]["items"].append({"outer_id": cd, "count": cnt,
-                                                "good": good, "bad": bad})
-            m = merge.setdefault(cd, {"received": 0, "good": 0, "bad": 0})
-            m["received"] += cnt
-            m["good"] += good
-            m["bad"] += bad
 
     # ④ 合并回采购明细
     for it in out["items"]:
@@ -5569,7 +5584,11 @@ def purchase_pending_payload(days=90, cache_sec=120):
                 "warehouse": o.get("receiveWarehouseName"),
                 "quantity": int(o.get("quantity") or 0),
                 "arrived": int(o.get("arrivedQuantity") or 0),
-                # 已收：这两个字段实测一致（receiveQuantity / actualReceiveNum），都带上
+                # ★ 「已收」的口径（试错后确认）：
+                #   单头 receiveQuantity 与收货单「已上架数量」之和**严格相等**（8 单核对一致），
+                #   所以这里直接用单头字段；「待收」= 数量 − 已收。
+                #   注意不能用收货明细的 count 求和 —— 那是「要求上架数」，
+                #   求出来正好等于采购数量，导致待收恒为 0（用户反馈过）。
                 "received": int(o.get("receiveQuantity") or 0),
                 "actual": int(o.get("actualReceiveNum") or 0),
                 "created": (datetime.fromtimestamp((o.get("created") or 0) / 1000.0)

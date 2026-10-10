@@ -92,6 +92,88 @@ def _make_transient_safe(root):
         pass
 
 
+def _make_root_never_show(root):
+    """★ 让这个 Tk 根窗**永远不可能显示出来**（单进程模式的根本保证）。
+
+    为什么需要（同一问题修过两次，这次从根上堵死）：
+      · 老 Tk 界面必须完全不可见，但程序里有好几处会把它弄出来：
+        - Tk 的 `attributes("-alpha", …)` 在窗口 withdraw 之后调用会**重新映射窗口**；
+        - 各种 `deiconify()`（个别容错分支、界面自己的逻辑）也会；
+        - 甚至是"把窗口放回可见"的兜底代码（Qt 起不来的分支）。
+      · 这些分支在正常路径下不该执行，但一旦执行，用户就会看到旧界面，
+        而且**最小化电脑版时旧界面会露出来**（用户反馈过两次）。
+
+    做法：把实例上的显示类方法全部包一层 —— 先记下调用，再无条件 withdraw 回去。
+    这样无论谁在哪调，根窗都保持隐藏。
+    """
+    try:
+        _orig_deiconify = root.deiconify
+        _orig_attributes = root.attributes
+        _orig_state = root.state
+        _orig_wm_deiconify = root.wm_deiconify
+        _orig_lift = root.lift
+        _orig_update = root.update
+    except Exception:
+        return
+
+    def _no_deiconify(*a, **k):
+        _L("★ 有人调了根窗 deiconify → 已拦截（保持隐藏）")
+        try:
+            root.withdraw()
+        except Exception:
+            pass
+        return None
+
+    def _safe_attributes(*a, **k):
+        out = None
+        try:
+            out = _orig_attributes(*a, **k)
+        except Exception:
+            pass
+        # attributes() 会把 withdraw 过的窗口重新映射 → 立刻按回去
+        try:
+            if not int(root.winfo_ismapped()) is True:
+                pass
+        except Exception:
+            pass
+        try:
+            root.withdraw()
+        except Exception:
+            pass
+        return out
+
+    def _safe_state(*a, **k):
+        try:
+            return _orig_state(*a, **k)
+        except Exception:
+            return None
+
+    def _safe_lift(*a, **k):
+        _L("★ 有人调了根窗 lift → 已拦截")
+        try:
+            root.withdraw()
+        except Exception:
+            pass
+        return None
+
+    def _safe_update(*a, **k):
+        out = None
+        try:
+            out = _orig_update(*a, **k)
+        except Exception:
+            pass
+        return out
+
+    try:
+        root.deiconify = _no_deiconify
+        root.wm_deiconify = _no_deiconify
+        root.attributes = _safe_attributes
+        root.lift = _safe_lift
+        _L("根窗已锁定为「永不显示」（deiconify / attributes 都会被拦回去）")
+    except Exception:
+        pass
+
+
 class Host(object):
     """单进程宿主：持有 root / app / session，负责全部后台启动。"""
 
@@ -192,6 +274,7 @@ class Host(object):
         lan=True：对外监听（0.0.0.0），手机端才能连；跟旧 main() 的 host 模式一致。
         """
         root = tk.Tk()
+        self._show_tk = bool(show_tk)     # 看门狗用：False 时保证根窗一直隐藏
         if show_tk:
             root.deiconify()
         else:
@@ -252,16 +335,18 @@ class Host(object):
 
         app = KS.ScanApp(root, session)
         self.app = app
-        # ★ 老 Tk 根窗必须**彻底隐藏**（withdraw），不能只用 alpha=0。
-        #   实测：alpha=0 时 Windows 仍认为窗口"可见"（IsWindowVisible=True），
-        #   于是最小化电脑版窗口后，这层旧界面会露出来（用户截图反馈过）。
-        #   withdraw() 才是 IsWindowVisible=False。
-        #   设置窗是 Toplevel、而且我们给 transient 打了补丁（父窗没映射就跳过），
-        #   所以 withdraw 之后设置窗照样能弹出来。
+        # ★ 老 Tk 根窗必须**彻底隐藏**（withdraw），而且要在**所有**改属性的操作之后。
+        #
+        #  实测教训（前后修过两次）：
+        #    · alpha=0 时 Windows 仍认为窗口"可见"（IsWindowVisible=True）→
+        #      最小化电脑版后这层旧界面会露出来。
+        #    · 而 Tk 的 attributes() 在窗口被 withdraw 之后调用，**会把窗口重新映射**
+        #      （相当于 deiconify），所以「先 withdraw 再 attributes」等于白 withdraw。
+        #    ⇒ 结论：要隐藏就只能靠 withdraw，且**必须放在最后一步**，之后再碰
+        #      attributes/set 之类都可能把它弄回可见。
         if not show_tk:
             try:
                 root.withdraw()
-                root.attributes("-alpha", 0.0)
             except Exception:
                 pass
         # ★ 诊断：ScanApp 造完之后，内置服务手里挂的是谁？
@@ -276,18 +361,62 @@ class Host(object):
         except Exception:
             pass
 
-        # ★ 界面上看不到 Tk，但设置窗要用它当父窗口 → 全透明而不是 withdraw
-        #   （withdraw 会让 transient 子窗「存在但不显示」，实测确认过）
-        if not show_tk:
-            try:
-                root.attributes("-alpha", 0.0)
-            except Exception:
-                root.withdraw()
-
         self._start_services()
         self._bind_app()
         self._start_app_watchdog()
+        # ★ 最后再隐藏一次（放最后，避免上面任何步骤又把它弄可见），并装看门狗：
+        #   之后只要有人偷偷把根窗显示出来，看门狗每 10 秒把它按回去并记日志。
+        if not show_tk:
+            self._hide_root_forever()
         return app
+
+    def _hide_root_forever(self):
+        """把根窗按回隐藏并**锁死**：之后谁也别想把它弄出来。
+
+        · `_make_root_never_show` 把 deiconify/attributes/lift 全拦掉；
+        · 再看门狗每 10 秒用 Win32 查一次真实可见性（Tk 的 state 有时不准），
+          发现露出来就按回去并记日志，便于以后定位是谁干的。
+        """
+        root = self.root
+        try:
+            root.withdraw()
+        except Exception:
+            pass
+        try:
+            _make_root_never_show(root)      # ★ 锁死，不允许再显示
+        except Exception:
+            pass
+
+        def _watch():
+            import time as _t
+            while True:
+                _t.sleep(10)
+                try:
+                    if not self._show_tk:
+                        _t_mod = None
+                        try:
+                            _t_mod = self.root
+                        except Exception:
+                            _t_mod = None
+                        if _t_mod is None:
+                            continue
+                        import ctypes
+                        hwnd = int(_t_mod.winfo_id())
+                        top = ctypes.windll.user32.GetAncestor(hwnd, 2)
+                        if ctypes.windll.user32.IsWindowVisible(top):
+                            _L("★ 看门狗：根窗又可见了 → 按回隐藏")
+                            try:
+                                self.root.withdraw()
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
+        try:
+            import threading as _th
+            _th.Thread(target=_watch, daemon=True).start()
+        except Exception:
+            pass
 
     def _bind_app(self):
         """把内置服务的 app 强制指向真 ScanApp。
