@@ -1,10 +1,10 @@
 {
-  "version": "v2.18",
-  "notes": "**v2.18：你输入编码 → 实时查 ERP，并且让「实时」看得见**\n\n**先说明：那个框本来就在实时查**\n· 生成波次页输入编码后，走的是 /api/wave/lookup，**每次都真去 ERP 查**\n  （代码注释原文：「先**实时查快麦订单**…实时查 ERP，不是本地缓存」）。\n· 只是界面上**没有把「这是刚查的」显示出来**，所以你没法判断它到底查没查。\n\n**这一版做的**\n① 查完明确显示一行：\n     ✓ 已实时查 ERP　37 个候选订单　可成波合计 37 件　查询时间 16:42:18\n   查询中也会显示「正在实时查 ERP：xxx …」，不会让你以为没反应。\n② ERP 查到 0 单时，把真实原因说清楚：\n     · 若本地库快照还有单 → ★ 本地快照还有 N 单，但 ERP 实时已查不到，\n       说明这些单已离开待发货池（进波次/已打单），点「全量重拉」可对齐\n     · 若本地也没有 → 本地库里也没有待发货单，数据一致 ✓\n③ 服务端在 /api/wave/lookup 响应里带上 live / 查询时间 / 本地索引对照数。\n\n**所以你点 9699-加绒黑色S 会看到什么**\n   ✓ 已实时查 ERP　0 个候选订单　查询时间 xx:xx:xx\n   9699-加绒黑色S：没有可成波订单\n   ★ 本地库快照里还有 586 单 —— 但 ERP 实时已经查不到了。……\n   → 一眼就能分清「是我没查到」还是「ERP 里确实没有」。\n",
+  "version": "v2.19",
+  "notes": "**v2.19：新增「采购收货」页（先只查询，不改数据）**\n\n**这一版做了什么**\n· 电脑版新增一个页签「**采购收货**」，自动列出**待收货的采购单**：\n    采购单号 / 供应商 / 收货仓库 / 数量 / 已收 / 明细（几个编码几件）/ 状态\n· 下方一行汇总：待收货采购单几个、共几件、近期收货单多少条、待上架几单、读取时间。\n· **本页只做查询展示，不会改动任何数据** —— 按你的要求，先把真实情况摆出来。\n\n**顺便查明的关键信息（为下一步收货上架铺路）**\n· 开放平台**有**采购收货接口，而且我们这个 appKey **有权限**：\n    warehouse.entry.fast.receive    采购快速收货（编码+仓库+供应商）\n    warehouse.entry.addorupdate     收货单新增/修改（绑采购单）\n    warehouse.entry.receive         收货单收货\n    warehouse.entry.list.query      收货单查询（能查，历史 12035 单）\n    purchase.order.query / get       采购单查询 / 明细\n    erp.purchase.shelf.*            上架（程序里本来就有自动上架）\n· 仓库映射已确认：**A = 火火火服饰仓库（556677）**、G = 茉茉仓、H = 茉茉退货仓。\n  （采购单只给 warehouseId，收货接口要 warehouseCode，这个映射就是补这一环）\n· 采购单明细里正好有收货需要的三个参数：outerId（编码）/ quantity（数量）/ price（单价）。\n\n**当前实测到的数据**\n  待收货采购单 20 个，共 49260 件；近期收货单 100 条；待上架 0 单。\n\n**下一步（等你确认后再做）**\n· 真正执行「收货 → 上架」，让采购单数量减少。\n· 建议先拿 1 个采购单、1 个商品、1 件做验证，核对采购单数量/库存/货位都对，再放开用。\n",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v2.18/kuaimai-scan-setup-v2.18.exe",
-  "sha256": "4bf5974c4f156dac81d34ef66d05a4df0f33c89a1ec871986f25e4b9162e0fd9",
-  "size": 46371415,
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v2.19/kuaimai-scan-setup-v2.19.exe",
+  "sha256": "16134ccab2c9a8e88d900578cd7bf799f0ab5efee7aaa3b40f0438370d690fcc",
+  "size": 46383315,
   "mandatory": false,
-  "published_at": "2026-10-10 16:42"
+  "published_at": "2026-10-10 18:49"
 }
