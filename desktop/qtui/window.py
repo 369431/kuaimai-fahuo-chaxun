@@ -1051,6 +1051,7 @@ class Desktop(QWidget):
         self.t_pur.setHorizontalHeaderLabels(
             ["采购单号", "供应商", "收货仓库", "数量", "已收", "待收", "明细", "状态"])
         self._tbl_setup(self.t_pur, widths=[185, 100, 130, 65, 65, 65, 95, 120])
+        self.t_pur.cellClicked.connect(self.on_purchase_cell)
         self.tabs.addTab(self.t_pur, "采购收货")
         self.lbl_pur_info = QLabel("正在读取采购单…")
         self.lbl_pur_info.setObjectName("hint")
@@ -1786,6 +1787,24 @@ class Desktop(QWidget):
                     t.setTextAlignment(Qt.AlignVCenter | Qt.AlignRight)
                 self.t_scan.setItem(r, c, t)
 
+    def on_purchase_cell(self, row, col):
+        """点「已收」或「待收」列 → 弹出这张采购单的商品明细（只读）。
+
+        点整行其他位置也打开（免得用户以为只有那两列能点）。
+        """
+        try:
+            orders = getattr(self, "_pur_orders", None) or []
+            if row < 0 or row >= len(orders):
+                return
+            o = orders[row]
+            pid = o.get("id")
+            if not pid:
+                return
+            d = PurchaseDetailDialog(self.api, pid, self.theme, self)
+            self._show_top(d)
+        except Exception as e:
+            self._say("采购明细", "打不开：%s" % str(e)[:150], "error")
+
     def on_purchase(self, j):
         """渲染「采购收货」页（只读）。j = /api/purchase/pending 的返回。"""
         j = j if isinstance(j, dict) else {}
@@ -2252,6 +2271,123 @@ class CheckUpdateDialog(QDialog):
             os.startfile(str(path))
         except Exception as e:
             QMessageBox.warning(self, "启动安装失败", "%s\n\n文件在：%s" % (str(e)[:160], path))
+
+
+class PurchaseDetailDialog(QDialog):
+    """采购单的商品收发明细（点「已收 / 待收」打开）—— 只读。
+
+    两层信息：
+      · 商品明细：每个编码的 采购 / 已收 / 待收 / 正品 / 次品
+      · 收货记录：这张采购单下的每张收货单（含已上架 / 待上架）
+    """
+
+    def __init__(self, api, pid, theme="light", parent=None):
+        super().__init__(parent)
+        self.api = api
+        self.pid = str(pid)
+        self._disp = Dispatcher(self)
+        self.setWindowTitle("采购单商品明细")
+        self.resize(900, 640)
+        self.setStyleSheet(U.qss(U.LIGHT if theme == "light" else U.DARK))
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(14, 12, 14, 10)
+        lay.setSpacing(8)
+
+        self.lbl_head = QLabel("正在读取…")
+        self.lbl_head.setObjectName("sect")
+        lay.addWidget(self.lbl_head)
+
+        tabs = QTabWidget()
+        self.t_items = QTableWidget(0, 6)
+        self.t_items.setHorizontalHeaderLabels(
+            ["编码", "采购数量", "已收", "待收", "正品", "次品"])
+        setup_table(self.t_items, widths=[0, 90, 80, 80, 80, 80])
+
+        self.t_ent = QTableWidget(0, 8)
+        self.t_ent.setHorizontalHeaderLabels(
+            ["收货单号", "状态", "收货数量", "已上架", "待上架", "正品", "次品", "创建时间"])
+        setup_table(self.t_ent, widths=[185, 95, 85, 80, 80, 65, 65, 140])
+
+        tabs.addTab(self.t_items, "商品明细（采购/已收/待收）")
+        tabs.addTab(self.t_ent, "收货记录")
+        lay.addWidget(tabs, 1)
+
+        self.lbl_foot = QLabel("")
+        self.lbl_foot.setObjectName("hint")
+        self.lbl_foot.setWordWrap(True)
+        lay.addWidget(self.lbl_foot)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        b_r = U.GlowButton("刷 新")
+        b_r.clicked.connect(self.reload)
+        row.addWidget(b_r)
+        b_c = U.GlowButton("关 闭", primary=True)
+        b_c.clicked.connect(self.accept)
+        row.addWidget(b_c)
+        lay.addLayout(row)
+        QTimer.singleShot(30, self.reload)
+
+    def reload(self):
+        def work():
+            try:
+                r = self.api.purchase_detail(self.pid)
+            except Exception as e:
+                r = {"error": str(e)[:150]}
+            self._disp.post(lambda: self._render(r))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _render(self, r):
+        r = r if isinstance(r, dict) else {}
+        if r.get("error") or r.get("offline"):
+            self.lbl_head.setText("读取失败：%s" % str(r.get("error") or "无响应")[:120])
+            return
+        items = r.get("items") or []
+        ents = r.get("entries") or []
+        self.lbl_head.setText("采购单 %s" % (r.get("purchase_code") or self.pid))
+        self.t_items.setRowCount(len(items))
+        tot_o = tot_r = tot_p = 0
+        for i, it in enumerate(items):
+            o = int(it.get("ordered") or 0)
+            rec = int(it.get("received") or 0)
+            p = int(it.get("pending") or 0)
+            tot_o += o
+            tot_r += rec
+            tot_p += p
+            for c, v in enumerate([str(it.get("outer_id") or ""), str(o), str(rec), str(p),
+                                   str(it.get("good") or 0), str(it.get("bad") or 0)]):
+                cell = QTableWidgetItem(v)
+                if c == 3 and p > 0:
+                    cell.setForeground(QColor("#c62828"))     # 还没收完 → 红
+                elif c == 3 and p == 0:
+                    cell.setForeground(QColor("#1B7F35"))     # 收完了 → 绿
+                self.t_items.setItem(i, c, cell)
+
+        st_cn = {"SHELVED": "已上架", "NOT_FINISH": "未完成", "FINISHED": "已完成",
+                 "CANCEL": "已作废"}
+        self.t_ent.setRowCount(len(ents))
+        for i, e in enumerate(ents):
+            gi = sum(int(x.get("good") or 0) for x in (e.get("items") or []))
+            bi = sum(int(x.get("bad") or 0) for x in (e.get("items") or []))
+            ts = e.get("created")
+            tstr = ""
+            try:
+                if ts:
+                    import datetime as _dt
+                    tstr = _dt.datetime.fromtimestamp(int(ts) / 1000.0).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                tstr = ""
+            vals = [str(e.get("code") or ""),
+                    st_cn.get(str(e.get("status") or ""), str(e.get("status") or "")),
+                    str(e.get("received") or 0), str(e.get("shelved") or 0),
+                    str(e.get("wait_shelve") or 0), str(gi), str(bi), tstr]
+            for c in range(8):
+                self.t_ent.setItem(i, c, QTableWidgetItem(vals[c]))
+        note = r.get("note") or ""
+        self.lbl_foot.setText(
+            "合计：采购 %d 件　已收 %d 件　待收 %d 件　·　收货单 %d 张%s"
+            % (tot_o, tot_r, tot_p, len(ents), ("　·　" + note) if note else ""))
 
 
 class TableDialog(QDialog):

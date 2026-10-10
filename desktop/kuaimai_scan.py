@@ -4096,6 +4096,22 @@ class _WebHandler(BaseHTTPRequestHandler):
                     return self._json({"error": "读日志失败：%s" % str(e)[:150]}, 500)
                 return self._json({"ok": True, "lines": [x.rstrip("\r\n") for x in lines],
                                    "file": "auto_print.log"})
+            if parsed.path == "/api/purchase/detail":
+                # ★ 某张采购单的「商品明细」——只读。
+                #   给「采购收货」页点「已收 / 待收」时弹窗用：
+                #     · 每个商品：采购数量 / 已收数量 / 待收数量
+                #     · 每次收货记录（收货单 + 正品/次品数）
+                deny = self._need(me, "data.refresh")
+                if deny:
+                    return deny
+                _pid = str((qs.get("id") or [""])[0] or "").strip()
+                if not _pid:
+                    return self._json({"error": "缺少 id"}, 400)
+                try:
+                    return self._json(purchase_detail_payload(_pid))
+                except Exception as e:
+                    return self._json({"ok": False,
+                                       "error": "读取采购单明细失败：%s" % str(e)[:180]})
             if parsed.path == "/api/purchase/pending":
                 # ★ 采购待收货 / 待上架 —— **只读**接口，绝不写数据。
                 #   「采购单收货上架」功能的第一阶段：先把真实情况展示出来，
@@ -5389,6 +5405,113 @@ def _write_pull_progress(kind, pulled, page=1, total=None, t0=None):
 
 
 _PURCHASE_CACHE = {"ts": 0.0, "data": None}
+
+
+def purchase_detail_payload(purchase_order_id):
+    """★ 某张采购单的「每个商品收了多少」——只读，给点「已收 / 待收」的弹窗用。
+
+    数据来源：
+      · purchase.order.get              → 采购明细（每个商品采购多少）
+      · warehouse.entry.list.query      → 这张采购单下的**所有收货单**（可能有拆单）
+      · warehouse.entry.list.get(id)    → 每张收货单的**商品明细**（count 收货数、
+                                          goodNum 正品、badNum 次品）
+    合并成「按编码」的：采购 / 已收 / 待收。
+    """
+    def _call(method, biz, timeout=40):
+        try:
+            return api_call_authed(method, biz, timeout) or {}
+        except BaseException as e:
+            return {"success": False, "code": "exc", "msg": str(e)[:110]}
+
+    pid = str(purchase_order_id or "").strip()
+    out = {"ok": True, "id": pid, "items": [], "entries": [], "note": ""}
+
+    # ① 采购明细
+    r = _call("purchase.order.get", {"id": pid})
+    po_code = ""
+    for x in (r.get("list") or []):
+        if not po_code:
+            po_code = str(x.get("code") or "")
+        try:
+            out["items"].append({
+                "outer_id": str(x.get("outerId") or ""),
+                "item_outer": str(x.get("itemOuterId") or ""),
+                "ordered": int(x.get("quantity") or x.get("count") or 0),
+                "received": 0, "good": 0, "bad": 0, "pending": 0,
+                "price": float(x.get("price") or 0),
+            })
+        except Exception:
+            continue
+
+    # ② 这张采购单下的收货单（可能拆成多张：_1 _2 ...）
+    r2 = _call("warehouse.entry.list.query", {"pageNo": 1, "pageSize": 200})
+    my_entries = [e for e in (r2.get("list") or [])
+                  if str(e.get("purchaseOrderId")) == pid
+                  or (po_code and str(e.get("purchaseOrderCode")) == po_code)]
+    # 收货单列表有分页，若本页没找到，再翻几页找
+    if not my_entries:
+        for page in (2, 3):
+            r2b = _call("warehouse.entry.list.query", {"pageNo": page, "pageSize": 200})
+            my_entries = [e for e in (r2b.get("list") or [])
+                          if str(e.get("purchaseOrderId")) == pid
+                          or (po_code and str(e.get("purchaseOrderCode")) == po_code)]
+            if my_entries:
+                break
+
+    # ③ 每张收货单的商品明细
+    merge = {}
+    for e in my_entries:
+        eid = e.get("id")
+        out["entries"].append({
+            "code": e.get("code"), "id": eid, "status": e.get("status"),
+            "quantity": int(e.get("quantity") or 0),
+            "received": int(e.get("receiveQuantity") or 0),
+            "shelved": int(e.get("shelvedQuantity") or 0),
+            "wait_shelve": int(e.get("waitShelveQuantity") or 0),
+            "created": e.get("created"),
+            "items": [],
+        })
+        if not eid:
+            continue
+        r3 = _call("warehouse.entry.list.get", {"id": str(eid)})
+        for x in (r3.get("list") or []):
+            cd = str(x.get("outerId") or "")
+            if not cd:
+                continue
+            try:
+                cnt = int(x.get("count") or 0)
+                good = int(x.get("goodNum") or 0)
+                bad = int(x.get("badNum") or 0)
+            except Exception:
+                cnt, good, bad = 0, 0, 0
+            out["entries"][-1]["items"].append({"outer_id": cd, "count": cnt,
+                                                "good": good, "bad": bad})
+            m = merge.setdefault(cd, {"received": 0, "good": 0, "bad": 0})
+            m["received"] += cnt
+            m["good"] += good
+            m["bad"] += bad
+
+    # ④ 合并回采购明细
+    for it in out["items"]:
+        m = merge.get(it["outer_id"])
+        if m:
+            it["received"] = m["received"]
+            it["good"] = m["good"]
+            it["bad"] = m["bad"]
+        it["pending"] = max(0, it["ordered"] - it["received"])
+    # 收货单里有、采购明细里没有的编码（拆单/补收），也补出来
+    seen = {i["outer_id"] for i in out["items"]}
+    for cd, m in merge.items():
+        if cd not in seen:
+            out["items"].append({"outer_id": cd, "item_outer": "", "ordered": 0,
+                                 "received": m["received"], "good": m["good"],
+                                 "bad": m["bad"], "pending": 0, "price": 0.0})
+    out["purchase_code"] = po_code
+    if not out["items"]:
+        out["note"] = "这个采购单查不到商品明细"
+    elif not merge:
+        out["note"] = "这个采购单还没有任何收货记录"
+    return out
 
 
 def purchase_pending_payload(days=90, cache_sec=120):
