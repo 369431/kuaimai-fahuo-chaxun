@@ -1044,6 +1044,18 @@ class Desktop(QWidget):
             ["时间", "编码", "待发", "货位", "账号", "可打", "状态", "打印"])
         self._tbl_setup(self.t_scan, widths=[120, 0, 60, 90, 80, 60, 100, 60])
         self.tabs.addTab(self.t_scan, "扫码记录")
+
+        # ★ 采购收货（只读展示）：待收货采购单 + 明细 + 预期仓库/上架情况。
+        #   目前**只查询、不写入** —— 等接口用法验证通过后再做收货/上架动作。
+        self.t_pur = QTableWidget(0, 7)
+        self.t_pur.setHorizontalHeaderLabels(
+            ["采购单号", "供应商", "收货仓库", "数量", "已收", "明细", "状态"])
+        self._tbl_setup(self.t_pur, widths=[190, 110, 120, 70, 70, 60, 130])
+        self.tabs.addTab(self.t_pur, "采购收货")
+        self.lbl_pur_info = QLabel("正在读取采购单…")
+        self.lbl_pur_info.setObjectName("hint")
+        self.lbl_pur_info.setWordWrap(True)
+        l3.addWidget(self.lbl_pur_info)
         # ★ 选中波次的详情行（平台不返回具体货位，就把能拿到的都摊开给用户看）
         self.lbl_wave_info = QLabel("")
         self.lbl_wave_info.setObjectName("hint")
@@ -1242,6 +1254,10 @@ class Desktop(QWidget):
         self.p_wave = Poll(self.api.wave_records, 15000, self)
         self.p_wave.got.connect(self.on_waves)
         self.p_wave.start()
+        # 采购收货（只读）：60 秒一次，服务端那边还有 120 秒缓存，不费接口
+        self.p_pur = Poll(self.api.purchase_pending, 60000, self)
+        self.p_pur.got.connect(self.on_purchase)
+        self.p_pur.start()
         # 扫码浮窗：盯最新一条扫码记录，出现新的就弹个大字浮窗
         self._last_scan = None
         self.p_float = Poll(lambda: self.api.scans(1), 2000, self)
@@ -1769,6 +1785,40 @@ class Desktop(QWidget):
                 if c in (2, 5, 7):
                     t.setTextAlignment(Qt.AlignVCenter | Qt.AlignRight)
                 self.t_scan.setItem(r, c, t)
+
+    def on_purchase(self, j):
+        """渲染「采购收货」页（只读）。j = /api/purchase/pending 的返回。"""
+        j = j if isinstance(j, dict) else {}
+        if j.get("offline") or j.get("error"):
+            self.lbl_pur_info.setText("采购数据读取失败：%s"
+                                      % str(j.get("error") or "本机服务未响应")[:120])
+            return
+        orders = j.get("orders") or []
+        t = j.get("totals") or {}
+        self.t_pur.setRowCount(len(orders))
+        for i, o in enumerate(orders):
+            st = str(o.get("status") or "")
+            st_cn = {"GOODS_NOT_ARRIVED": "未到货", "PART_ARRIVED": "部分到货",
+                     "GOODS_ARRIVED": "已到货", "FINISHED": "已完成"}.get(st, st)
+            vals = [str(o.get("code") or ""),
+                    str(o.get("supplier") or ""),
+                    str(o.get("warehouse") or "")
+                    + (("（%s）" % o.get("warehouse_code")) if o.get("warehouse_code") else ""),
+                    str(o.get("quantity") or 0),
+                    str(o.get("received") or 0),
+                    "%d 个 / %d 件" % (o.get("item_count") or 0, o.get("item_qty") or 0),
+                    st_cn]
+            for c in range(7):
+                self.t_pur.setItem(i, c, QTableWidgetItem(vals[c]))
+        ent = j.get("entries") or []
+        sh = j.get("shelves") or []
+        self.lbl_pur_info.setText(
+            "待收货采购单 %s 个（共 %s 件）　·　近期收货单 %s 条　·　待上架 %s 单"
+            "　·　读取时间 %s　·　本页只做查询展示，不会改动任何数据"
+            % (t.get("orders", 0), t.get("orders_qty", 0), t.get("entries", 0),
+               t.get("shelves", 0), str(j.get("checked_at") or "")[-8:]))
+        self._pur_orders = orders
+        self._pur_entries = ent
 
     def on_waves(self, j):
         """波次记录：一行 = 一个波次。

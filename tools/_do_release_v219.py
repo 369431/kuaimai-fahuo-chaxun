@@ -1,0 +1,46 @@
+# -*- coding: utf-8 -*-
+"""发布 v2.19：新增「采购收货」页（只读展示，为后续收货上架做准备）。"""
+import os
+import sys
+
+REPO = r"C:\Users\Kerwin\Desktop\kuaimai发货查询"
+INSTALLER = os.path.join(REPO, "packaging", "out", "快麦扫码查询_安装版_v2.19.exe")
+NOTES = (
+    "**v2.19：新增「采购收货」页（先只查询，不改数据）**\n"
+    "\n"
+    "**这一版做了什么**\n"
+    "· 电脑版新增一个页签「**采购收货**」，自动列出**待收货的采购单**：\n"
+    "    采购单号 / 供应商 / 收货仓库 / 数量 / 已收 / 明细（几个编码几件）/ 状态\n"
+    "· 下方一行汇总：待收货采购单几个、共几件、近期收货单多少条、待上架几单、读取时间。\n"
+    "· **本页只做查询展示，不会改动任何数据** —— 按你的要求，先把真实情况摆出来。\n"
+    "\n"
+    "**顺便查明的关键信息（为下一步收货上架铺路）**\n"
+    "· 开放平台**有**采购收货接口，而且我们这个 appKey **有权限**：\n"
+    "    warehouse.entry.fast.receive    采购快速收货（编码+仓库+供应商）\n"
+    "    warehouse.entry.addorupdate     收货单新增/修改（绑采购单）\n"
+    "    warehouse.entry.receive         收货单收货\n"
+    "    warehouse.entry.list.query      收货单查询（能查，历史 12035 单）\n"
+    "    purchase.order.query / get       采购单查询 / 明细\n"
+    "    erp.purchase.shelf.*            上架（程序里本来就有自动上架）\n"
+    "· 仓库映射已确认：**A = 火火火服饰仓库（556677）**、G = 茉茉仓、H = 茉茉退货仓。\n"
+    "  （采购单只给 warehouseId，收货接口要 warehouseCode，这个映射就是补这一环）\n"
+    "· 采购单明细里正好有收货需要的三个参数：outerId（编码）/ quantity（数量）/ price（单价）。\n"
+    "\n"
+    "**当前实测到的数据**\n"
+    "  待收货采购单 20 个，共 49260 件；近期收货单 100 条；待上架 0 单。\n"
+    "\n"
+    "**下一步（等你确认后再做）**\n"
+    "· 真正执行「收货 → 上架」，让采购单数量减少。\n"
+    "· 建议先拿 1 个采购单、1 个商品、1 件做验证，核对采购单数量/库存/货位都对，再放开用。\n"
+)
+
+assert os.path.isfile(INSTALLER), "安装包不存在：%s" % INSTALLER
+sys.path.insert(0, REPO)
+os.chdir(REPO)
+sys.argv = ["release.py", "--version", "v2.19", "--installer", INSTALLER, "--notes", NOTES]
+
+import release  # noqa: E402
+
+rc = release.main()
+print("\nrelease.main() returned", rc)
+sys.exit(rc)

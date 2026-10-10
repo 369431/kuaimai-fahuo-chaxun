@@ -110,6 +110,10 @@ class Api(object):
     def wave_records(self):
         return self.get("/api/wave/records", timeout=40)
 
+    def purchase_pending(self, days=90):
+        """采购待收货/待上架（**只读**）。服务端有 120 秒缓存，所以可以放心轮询。"""
+        return self.get("/api/purchase/pending?days=%d" % int(days or 90), timeout=60)
+
     # ---------- 电脑版专用（v1.70 新增的三个接口）----------
     def desktop_refresh(self, what):
         """触发数据刷新：what = inc 增量 / full 全量 / shelf 货位 / lock 锁定数。"""

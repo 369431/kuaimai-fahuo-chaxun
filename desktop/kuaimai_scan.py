@@ -4096,6 +4096,19 @@ class _WebHandler(BaseHTTPRequestHandler):
                     return self._json({"error": "读日志失败：%s" % str(e)[:150]}, 500)
                 return self._json({"ok": True, "lines": [x.rstrip("\r\n") for x in lines],
                                    "file": "auto_print.log"})
+            if parsed.path == "/api/purchase/pending":
+                # ★ 采购待收货 / 待上架 —— **只读**接口，绝不写数据。
+                #   「采购单收货上架」功能的第一阶段：先把真实情况展示出来，
+                #   等确认接口用法无误后再做写入。
+                deny = self._need(me, "data.refresh")
+                if deny:
+                    return deny
+                try:
+                    return self._json(purchase_pending_payload(
+                        int((qs.get("days") or ["90"])[0] or 90)))
+                except Exception as e:
+                    return self._json({"ok": False,
+                                       "error": "读取采购数据失败：%s" % str(e)[:180]})
             if parsed.path == "/api/desktop/state":
                 # 电脑版状态栏用：主程序当前那一行状态文字 + 是否正在忙。
                 # （GET 接口，放在 do_GET 里；POST 那边只有 refresh / clearlog 两个写操作。）
@@ -5373,6 +5386,161 @@ def _write_pull_progress(kind, pulled, page=1, total=None, t0=None):
         })
     except Exception:
         pass
+
+
+_PURCHASE_CACHE = {"ts": 0.0, "data": None}
+
+
+def purchase_pending_payload(days=90, cache_sec=120):
+    """★ 采购「待收货 / 待上架」只读快照（给电脑版展示，**不写任何数据**）。
+
+    数据来源（全部是只读接口）：
+      · purchase.order.query        → 采购单（含状态/供应商/收货仓库/数量）
+      · purchase.order.get          → 采购单明细（编码 / 数量 / 单价）
+      · warehouse.entry.list.query  → 收货单（已收 / 待上架 / 已上架数量）
+      · erp.purchase.shelf.query    → 上架单（待上架列表）
+
+    为什么要这么拼：采购单只给 warehouseId（556677），而收货接口要 warehouseCode（A），
+    这个映射从 erp.warehouse.list.query 拿（同一个接口也用于现货可发的仓库识别）。
+    """
+    from datetime import datetime, timedelta
+    # 缓存：界面按时轮询时不至于每次都真去拉（约 1~2 秒），120 秒内直接用上次结果
+    try:
+        _now = time.time()
+        if (cache_sec and _PURCHASE_CACHE.get("data")
+                and (_now - _PURCHASE_CACHE.get("ts", 0)) < int(cache_sec)):
+            return _PURCHASE_CACHE["data"]
+    except Exception:
+        pass
+    out = {"ok": True, "orders": [], "entries": [], "shelves": [],
+           "totals": {}, "checked_at": now_gmt8(), "notes": []}
+    days = int(days or 90)
+    now = datetime.now()
+
+    def _call(method, biz, timeout=40):
+        try:
+            return api_call_authed(method, biz, timeout) or {}
+        except BaseException as e:
+            out["notes"].append("%s 调用失败：%s" % (method, str(e)[:90]))
+            return {}
+
+    # ① 采购单（只取还没收完的：未到货 / 部分到货）
+    orders = []
+    for st in ("GOODS_NOT_ARRIVED", "PART_ARRIVED"):
+        r = _call("purchase.order.query", {"status": st, "pageNo": 1, "pageSize": 100})
+        for o in (r.get("list") or []):
+            orders.append({
+                "id": o.get("id"), "code": o.get("code"),
+                "status": o.get("status") or o.get("receiveStatus"),
+                "supplier_code": o.get("supplierCode"), "supplier": o.get("supplierName"),
+                "warehouse_id": o.get("receiveWarehouseId"),
+                "warehouse": o.get("receiveWarehouseName"),
+                "quantity": int(o.get("quantity") or 0),
+                "arrived": int(o.get("arrivedQuantity") or 0),
+                "received": int(o.get("receiveQuantity") or 0),
+                "actual": int(o.get("actualReceiveNum") or 0),
+                "created": (datetime.fromtimestamp((o.get("created") or 0) / 1000.0)
+                            .strftime("%Y-%m-%d %H:%M")
+                            if o.get("created") else ""),
+                "delivery": (datetime.fromtimestamp((o.get("deliveryDate") or 0) / 1000.0)
+                             .strftime("%Y-%m-%d")
+                             if o.get("deliveryDate") else ""),
+                "auditor": o.get("auditorName"),
+            })
+    # 按创建时间倒序
+    orders.sort(key=lambda x: x.get("created") or "", reverse=True)
+
+    # ② 每个采购单的明细（并发查，20 个单从 10 秒压到 1~2 秒）
+    def _items_of(o):
+        r = _call("purchase.order.get", {"id": str(o["id"])})
+        items = []
+        for x in (r.get("list") or []):
+            try:
+                items.append({"outer_id": str(x.get("outerId") or ""),
+                              "item_outer": str(x.get("itemOuterId") or ""),
+                              "quantity": int(x.get("quantity") or x.get("count") or 0),
+                              "price": float(x.get("price") or 0),
+                              "sys_item_id": x.get("sysItemId")})
+            except Exception:
+                continue
+        return items
+
+    try:
+        import concurrent.futures as _cf
+        todo = orders[:60]
+        with _cf.ThreadPoolExecutor(max_workers=6) as ex:
+            futs = {ex.submit(_items_of, o): o for o in todo}
+            for fu in _cf.as_completed(futs):
+                o = futs[fu]
+                try:
+                    items = fu.result()
+                except Exception:
+                    items = []
+                o["items"] = items
+                o["item_count"] = len(items)
+                o["item_qty"] = sum(i["quantity"] for i in items)
+        for o in orders:
+            o.setdefault("items", [])
+            o.setdefault("item_count", 0)
+            o.setdefault("item_qty", 0)
+    except Exception:
+        # 并发出问题就退回串行，保证功能不挂
+        for o in orders[:60]:
+            items = _items_of(o)
+            o["items"] = items
+            o["item_count"] = len(items)
+            o["item_qty"] = sum(i["quantity"] for i in items)
+    out["orders"] = orders
+
+    # ③ 收货单（近期）—— 看已收/待上架情况
+    r = _call("warehouse.entry.list.query", {"pageNo": 1, "pageSize": 100})
+    for e in (r.get("list") or []):
+        try:
+            out["entries"].append({
+                "id": e.get("id"), "code": e.get("code"),
+                "purchase_code": e.get("purchaseOrderCode"),
+                "supplier": e.get("supplierName"),
+                "status": e.get("status"),
+                "quantity": int(e.get("quantity") or 0),
+                "received": int(e.get("receiveQuantity") or 0),
+                "shelved": int(e.get("shelvedQuantity") or 0),
+                "wait_shelve": int(e.get("waitShelveQuantity") or 0),
+                "created": (datetime.fromtimestamp((e.get("created") or 0) / 1000.0)
+                            .strftime("%Y-%m-%d %H:%M") if e.get("created") else ""),
+            })
+        except Exception:
+            continue
+
+    # ④ 待上架单
+    r = _call("erp.purchase.shelf.query",
+              {"timeType": 1,
+               "startModified": (now - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S"),
+               "endModified": now.strftime("%Y-%m-%d %H:%M:%S"),
+               "status": 0, "pageNo": 1, "pageSize": 100})
+    for s in (r.get("list") or []):
+        out["shelves"].append({"id": s.get("id"), "code": s.get("weOuterCode"),
+                               "status": s.get("status")})
+
+    # ⑤ 仓库映射（收货要 warehouseCode，采购单只给 warehouseId）
+    r = _call("erp.warehouse.list.query", {"pageNo": 1, "pageSize": 50})
+    wh_list = r.get("list") or r.get("warehouses") or []
+    out["warehouses"] = [{"id": w.get("id"), "code": w.get("code"), "name": w.get("name")}
+                         for w in wh_list if isinstance(w, dict)]
+    wh_map = {str(w["id"]): w["code"] for w in out["warehouses"] if w.get("id")}
+    for o in orders:
+        o["warehouse_code"] = wh_map.get(str(o.get("warehouse_id")), "")
+
+    out["totals"] = {
+        "orders": len(orders),
+        "orders_qty": sum(o.get("quantity") or 0 for o in orders),
+        "entries": len(out["entries"]),
+        "shelves": len(out["shelves"]),
+    }
+    try:
+        _PURCHASE_CACHE.update({"ts": time.time(), "data": out})
+    except Exception:
+        pass
+    return out
 
 
 def human_browser_err(text, action=""):
