@@ -2791,7 +2791,7 @@ function render(){
 function addCode(code){
   code = (code || '').trim();
   if(!code){ $('hint').textContent = '请先输入商家编码'; return; }
-  $('hint').textContent = '正在查 ' + code + ' 的最大可生成件数…';
+  $('hint').textContent = '正在实时查 ERP：' + code + ' …';
   fetch(bust(withSid('/api/wave/lookup?code=' + encodeURIComponent(code))), {cache:'no-store'})
     .then(function(r){ if(r.status === 401){ location.href = '/login'; throw new Error('请重新登录'); } return r.json(); })
     .then(function(d){
@@ -2803,19 +2803,28 @@ function addCode(code){
       const info = {shelf_index_empty: !!d.shelf_index_empty, shelf_qty: d.shelf_qty,
                     bins_text: d.bins_text || '', multi_qty: mq};
       const extra = '<div class="muted" style="margin-top:6px;line-height:1.7">' + shelfBits(d) + '</div>';
+      /* ★ 明确标出「这次是几点实时查的 ERP、查到几个候选」，让"实时"看得见 */
+      const _tot = Object.keys(per).reduce(function(a,k){ return a + (parseInt(per[k],10)||0); }, 0);
+      const _at = String(d.at || '').slice(-8) || '';
+      const liveBar = '<div class="muted" style="margin-top:4px">'
+        + '<span style="color:#1B7F35;font-weight:700">✓ 已实时查 ERP</span>'
+        + '　' + (d.orders != null ? (d.orders + ' 个候选订单') : (''))
+        + (_tot ? ('　可成波合计 ' + _tot + ' 件') : '')
+        + (_at ? ('　查询时间 ' + esc(_at)) : '')
+        + '</div>';
       /* 旧模式（单快递）：只处理当前快递，没有就提示可切到另一个快递 */
       if(!DUAL){
         const cnum = parseInt(per[CARRIER], 10) || 0;
         const cname0 = String(d.code || code).toUpperCase();
         if(cnum > 0){
           if(ITEMS.some(function(x){ return String(x.code).toUpperCase() === cname0; })){
-            $('hint').innerHTML = esc(d.code || code) + ' 已在清单里' + extra; return;
+            $('hint').innerHTML = esc(d.code || code) + ' 已在清单里' + liveBar + extra; return;
           }
           ITEMS.push({code: d.code || code, qty: cnum, max: cnum, info: info});
           saveBags(); render(); syncCarrierButtons();
           $('hint').innerHTML = '<span class="qcode">' + esc(d.code || code) + '</span>：快递 <b>' + esc(CARRIER)
             + '</b> 最大可生成 <b>' + cnum + ' 件</b>'
-            + (all ? '（全部：<span class="cex">' + esc(all) + '</span>）' : '') + extra;
+            + (all ? '（全部：<span class="cex">' + esc(all) + '</span>）' : '') + liveBar + extra;
           return;
         }
         const oth = Object.keys(per).filter(function(k){
@@ -2832,8 +2841,19 @@ function addCode(code){
           return;
         }
         $('hint').innerHTML = '<span class="badtext">' + esc(d.code || code) + '：没有可成波订单</span>'
+          + liveBar
           + '<div class="muted">该编码在火火火仓库没有「待发货 + 未成波 + 一单一件」的订单'
-          + '（可能已生成波次 / 已打印 / 是多件单）。</div>' + extra;
+          + '（可能已生成波次 / 已打印 / 是多件单）。</div>'
+          + (function(){
+              const L = d.local || {};
+              const lo = parseInt(L.ones, 10) || 0;
+              if(lo > 0){
+                return '<div class="muted" style="color:#c62828">★ 本地库快照里还有 <b>' + lo
+                  + '</b> 单 —— 但 ERP 实时已经查不到了。说明这些单已离开待发货池'
+                  + '（进波次/已打单）。点「全量重拉」可把本地也刷新到一致。</div>';
+              }
+              return '<div class="muted">本地库里这个编码也没有待发货单，数据一致 ✓</div>';
+            })() + extra;
         return;
       }
       /* 双快递模式：按快递分别入清单：有中通就进中通那份，有申通就进申通那份（两边都进也没问题） */

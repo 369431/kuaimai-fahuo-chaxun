@@ -3646,7 +3646,21 @@ class _WebHandler(BaseHTTPRequestHandler):
                     return self._json({"error": "缺少 code"}, 400)
                 try:
                     import kuaimai_wave as wv
-                    return self._json(wv.lookup(code))
+                    _out = wv.lookup(code)
+                    # ★ 让界面能明确显示「这是几点的 ERP 实时数据」，
+                    #   顺便把本地索引里的待发货数带上：ERP 查到 0 时用来解释原因
+                    try:
+                        if isinstance(_out, dict):
+                            _out["live"] = True
+                            _out["at"] = now_gmt8()
+                            _idx = (self.web_index_payload().get("items") or {}).get(code)
+                            if isinstance(_idx, dict):
+                                _out["local"] = {"ones": int(_idx.get("n") or 0),
+                                                 "orders": int(_idx.get("o") or 0),
+                                                 "shelf": int(_idx.get("s") or 0)}
+                    except Exception:
+                        pass
+                    return self._json(_out)
                 except SystemExit:
                     return self._json({"error": "打单浏览器没开（Edge 9222 不通）："
                                                 "请先打开自动化浏览器并登录 ERP 后再试"}, 503)
