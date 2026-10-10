@@ -1569,7 +1569,9 @@ function render(){
       const code = b.dataset.w;
       const row = ROWS.filter(function(r){ return r.c === code; })[0] || {};
       const f = parseInt(row.f, 10) || 0;
-      if(f <= 0){ flash(code + '：可发 ' + f + ' 件，没有可成波的「一单一件」'); return; }
+      /* ★ 不再因为「本地可发 = 0」就直接拦下！
+         以前这里 if(f<=0){...return;} —— 本地快照为 0 时压根不去问 ERP，
+         结果 ERP 明明有可成波订单也点不出来。成波一律以 ERP 实时为准。 */
       const cell = b.parentNode;
       b.disabled = true; b.textContent = '查询中…';
       fetch(withSid('/api/wave/lookup?code=' + encodeURIComponent(code)), {cache:'no-store'})
@@ -1579,17 +1581,31 @@ function render(){
           const per = (d && d.carriers) || {};
           let keys = ['中通', '申通'].filter(function(k){ return per[k] != null; });
           if(!keys.length){ keys = Object.keys(per); }
-          if(!keys.length){ flash(code + '：没有可成波订单（可能已生成波次 / 已打印 / 是多件单）'); render(); return; }
+          /* ★ 本地快照 vs ERP 实时 可能不一致，必须讲清楚，别让人以为程序坏了：
+             · 成波只看 ERP 实时值（下面的 n），不再和本地行数字取 min（以前混用是错的）
+             · 若 ERP 查到的明显少于本地显示，提示「本地数据可能是旧的，建议全量重拉」 */
+          const _liveTot = Object.keys(per).reduce(function(a,k){ return a + (parseInt(per[k],10)||0); }, 0);
+          const _localN = parseInt((row && row.n) || 0, 10) || 0;
+          const _stale = (_localN > 0 && _liveTot < _localN * 0.5);
+          const _staleHint = _stale
+            ? ('　<span class="badtext">本地快照显示 ' + _localN + ' 单，ERP 实时只查到 ' + _liveTot
+               + ' 单 —— 本地数据偏旧，建议先「全量重拉」</span>')
+            : '';
+          if(!keys.length || _liveTot <= 0){
+            flash(code + '：ERP 实时查不到可成波订单（可能已进波次 / 已打单 / 是多件单）'
+                  + (_localN > 0
+                     ? ('　★ 本地快照还显示 ' + _localN + ' 单 —— 这份数据是旧的，请先「全量重拉」再看')
+                     : ''));
+            render();
+            return;
+          }
           let h = '';
-          /* ★ 用 ERP 刚查回来的实时值当作这一行的可生成上限（row.wm），
-             这样「中通 600 件」里的 600 永远是**此刻真实剩余量**，
-             成波后再点开就是 490 左右，不会停在旧数字上。 */
-          try{ row.wm = Math.min(parseInt(f,10)||0, Object.keys(per).reduce(function(a,k){ return a + (parseInt(per[k],10)||0); }, 0)); }catch(e){}
           keys.forEach(function(k){
             const n = parseInt(per[k], 10) || 0;
-            const q = Math.min(f, n);
+            /* ★ 上限只用 ERP 实时值（该快递可生成数）。本地行数字不参与，避免混用。 */
+            const q = n;
             h += '<input class="qin" data-k="' + esc(k) + '" type="number" min="1" max="' + (n > 0 ? q : 1)
-               + '" value="' + (n > 0 ? q : 1) + '" style="width:56px;margin-left:6px" title="要生成多少件（最多 '
+               + '" value="' + (n > 0 ? q : 1) + '" style="width:56px;margin-left:6px" title="要生成多少件（ERP 实时最多 '
                + q + ' 件）">'
                + '<button class="sbtn wave-go" data-k="' + esc(k) + '" data-q="' + (n > 0 ? q : 0) + '"'
                + (n > 0 ? '' : ' disabled') + '>' + esc(k) + ' ' + (n > 0 ? (q + ' 件') : '0') + '</button>';
@@ -1600,14 +1616,17 @@ function render(){
           }
           h += '<button class="sbtn wave-cancel">取消</button>';
           cell.innerHTML = h;
+          if(_staleHint){ flash(code + '：' + _staleHint); }
           cell.querySelectorAll('.sbtn.wave-go').forEach(function(g){
-            g.onclick = function(){ waveGo(g, code, f); };
+            g.onclick = function(){ waveGo(g, code, _liveTot); };
           });
           cell.querySelectorAll('.sbtn.wave-go2').forEach(function(g){
-            g.onclick = function(){ waveGoBoth(cell, code, f, per, keys); };
+            g.onclick = function(){ waveGoBoth(cell, code, _liveTot, per, keys); };
           });
           const cb = cell.querySelector('.sbtn.wave-cancel');
           if(cb){ cb.onclick = function(){ render(); }; }
+        })
+        .catch(function(e){ flash('✗ ' + code + '：' + e.message); render(); });
         })
         .catch(function(e){ flash('✗ ' + code + '：' + e.message); render(); });
     };
