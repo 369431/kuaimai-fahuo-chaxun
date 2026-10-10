@@ -5425,6 +5425,7 @@ def purchase_detail_payload(purchase_order_id):
 
     pid = str(purchase_order_id or "").strip()
     out = {"ok": True, "id": pid, "items": [], "entries": [], "note": ""}
+    head_recv = 0
 
     # ① 采购明细
     r = _call("purchase.order.get", {"id": pid})
@@ -5437,7 +5438,7 @@ def purchase_detail_payload(purchase_order_id):
                 "outer_id": str(x.get("outerId") or ""),
                 "item_outer": str(x.get("itemOuterId") or ""),
                 "ordered": int(x.get("quantity") or x.get("count") or 0),
-                "received": 0, "good": 0, "bad": 0, "pending": 0,
+                "received": 0, "arrived": 0, "good": 0, "bad": 0, "pending": 0,
                 "price": float(x.get("price") or 0),
             })
         except Exception:
@@ -5489,11 +5490,12 @@ def purchase_detail_payload(purchase_order_id):
                     bad = int(x.get("badNum") or 0)
                 except Exception:
                     cnt, good, bad = 0, 0, 0
-                got = int(round(cnt * ratio))          # ← 按上架比例计入的「已收」
+                got = int(round(cnt * ratio))          # ← 已上架（= ERP 的「已收」口径）
                 items.append({"outer_id": cd, "count": cnt, "got": got,
                               "good": good, "bad": bad})
-                m = merge.setdefault(cd, {"received": 0, "good": 0, "bad": 0})
+                m = merge.setdefault(cd, {"received": 0, "arrived": 0, "good": 0, "bad": 0})
                 m["received"] += got
+                m["arrived"] += cnt                # 已到货登记数（含还没上架的）
                 m["good"] += good
                 m["bad"] += bad
         out["entries"].append({
@@ -5510,18 +5512,32 @@ def purchase_detail_payload(purchase_order_id):
     for it in out["items"]:
         m = merge.get(it["outer_id"])
         if m:
-            it["received"] = m["received"]
+            it["received"] = m["received"]      # 已收（= ERP 口径：已上架数）
+            it["arrived"] = m["arrived"]        # 已到货登记数（含还没上架的）
             it["good"] = m["good"]
             it["bad"] = m["bad"]
+        else:
+            it["arrived"] = 0
         it["pending"] = max(0, it["ordered"] - it["received"])
     # 收货单里有、采购明细里没有的编码（拆单/补收），也补出来
     seen = {i["outer_id"] for i in out["items"]}
     for cd, m in merge.items():
         if cd not in seen:
             out["items"].append({"outer_id": cd, "item_outer": "", "ordered": 0,
-                                 "received": m["received"], "good": m["good"],
-                                 "bad": m["bad"], "pending": 0, "price": 0.0})
+                                 "received": m["received"], "arrived": m["arrived"],
+                                 "good": m["good"], "bad": m["bad"], "pending": 0,
+                                 "price": 0.0})
     out["purchase_code"] = po_code
+    # 汇总，给界面显示「已收=已上架 / 已到货登记」的区别
+    out["totals"] = {
+        "ordered": sum(i["ordered"] for i in out["items"]),
+        "received": sum(i["received"] for i in out["items"]),
+        "arrived": sum(i.get("arrived") or 0 for i in out["items"]),
+        "pending": sum(i["pending"] for i in out["items"]),
+        "entries": len(out["entries"]),
+        "shelved_entries": sum(1 for e in out["entries"]
+                               if str(e.get("status")) == "SHELVED"),
+    }
     if not out["items"]:
         out["note"] = "这个采购单查不到商品明细"
     elif not merge:

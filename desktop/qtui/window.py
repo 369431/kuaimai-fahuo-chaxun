@@ -2298,10 +2298,10 @@ class PurchaseDetailDialog(QDialog):
         lay.addWidget(self.lbl_head)
 
         tabs = QTabWidget()
-        self.t_items = QTableWidget(0, 6)
+        self.t_items = QTableWidget(0, 7)
         self.t_items.setHorizontalHeaderLabels(
-            ["编码", "采购数量", "已收", "待收", "正品", "次品"])
-        setup_table(self.t_items, widths=[0, 90, 80, 80, 80, 80])
+            ["编码", "采购数量", "已到货登记", "已收(已上架)", "待收", "正品", "次品"])
+        setup_table(self.t_items, widths=[0, 90, 105, 105, 80, 75, 75])
 
         self.t_ent = QTableWidget(0, 8)
         self.t_ent.setHorizontalHeaderLabels(
@@ -2347,24 +2347,27 @@ class PurchaseDetailDialog(QDialog):
         ents = r.get("entries") or []
         self.lbl_head.setText("采购单 %s" % (r.get("purchase_code") or self.pid))
         self.t_items.setRowCount(len(items))
-        tot_o = tot_r = tot_p = 0
+        tot_o = tot_r = tot_p = tot_a = 0
         for i, it in enumerate(items):
             o = int(it.get("ordered") or 0)
             rec = int(it.get("received") or 0)
+            arr = int(it.get("arrived") or 0)
             p = int(it.get("pending") or 0)
             tot_o += o
             tot_r += rec
             tot_p += p
-            for c, v in enumerate([str(it.get("outer_id") or ""), str(o), str(rec), str(p),
+            tot_a += arr
+            for c, v in enumerate([str(it.get("outer_id") or ""), str(o), str(arr),
+                                   str(rec), str(p),
                                    str(it.get("good") or 0), str(it.get("bad") or 0)]):
                 cell = QTableWidgetItem(v)
-                if c == 3 and p > 0:
-                    cell.setForeground(QColor("#c62828"))     # 还没收完 → 红
-                elif c == 3 and p == 0:
-                    cell.setForeground(QColor("#1B7F35"))     # 收完了 → 绿
+                if c == 4:            # 待收
+                    cell.setForeground(QColor("#c62828" if p > 0 else "#1B7F35"))
+                if c == 3:            # 已收（= 已上架）
+                    cell.setForeground(QColor("#1B7F35" if rec > 0 else "#8a8a8f"))
                 self.t_items.setItem(i, c, cell)
 
-        st_cn = {"SHELVED": "已上架", "NOT_FINISH": "未完成", "FINISHED": "已完成",
+        st_cn = {"SHELVED": "已上架", "NOT_FINISH": "未上架", "FINISHED": "已完成",
                  "CANCEL": "已作废"}
         self.t_ent.setRowCount(len(ents))
         for i, e in enumerate(ents):
@@ -2386,8 +2389,11 @@ class PurchaseDetailDialog(QDialog):
                 self.t_ent.setItem(i, c, QTableWidgetItem(vals[c]))
         note = r.get("note") or ""
         self.lbl_foot.setText(
-            "合计：采购 %d 件　已收 %d 件　待收 %d 件　·　收货单 %d 张%s"
-            % (tot_o, tot_r, tot_p, len(ents), ("　·　" + note) if note else ""))
+            "合计：采购 %d 件　已到货登记 %d 件　已收(已上架) %d 件　待收 %d 件　·　收货单 %d 张"
+            "（其中已上架 %d 张）%s"
+            % (tot_o, tot_a, tot_r, tot_p, len(ents),
+               (r.get("totals") or {}).get("shelved_entries", 0),
+               ("　·　" + note) if note else ""))
 
 
 class TableDialog(QDialog):
