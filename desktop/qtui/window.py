@@ -1047,10 +1047,10 @@ class Desktop(QWidget):
 
         # ★ 采购收货（只读展示）：待收货采购单 + 明细 + 预期仓库/上架情况。
         #   目前**只查询、不写入** —— 等接口用法验证通过后再做收货/上架动作。
-        self.t_pur = QTableWidget(0, 7)
+        self.t_pur = QTableWidget(0, 8)
         self.t_pur.setHorizontalHeaderLabels(
-            ["采购单号", "供应商", "收货仓库", "数量", "已收", "明细", "状态"])
-        self._tbl_setup(self.t_pur, widths=[190, 110, 120, 70, 70, 60, 130])
+            ["采购单号", "供应商", "收货仓库", "数量", "已收", "待收", "明细", "状态"])
+        self._tbl_setup(self.t_pur, widths=[185, 100, 130, 65, 65, 65, 95, 120])
         self.tabs.addTab(self.t_pur, "采购收货")
         self.lbl_pur_info = QLabel("正在读取采购单…")
         self.lbl_pur_info.setObjectName("hint")
@@ -1798,18 +1798,27 @@ class Desktop(QWidget):
         self.t_pur.setRowCount(len(orders))
         for i, o in enumerate(orders):
             st = str(o.get("status") or "")
-            st_cn = {"GOODS_NOT_ARRIVED": "未到货", "PART_ARRIVED": "部分到货",
-                     "GOODS_ARRIVED": "已到货", "FINISHED": "已完成"}.get(st, st)
+            st_cn = {"GOODS_NOT_ARRIVED": "未到货", "GOODS_PART_ARRIVED": "部分到货",
+                     "PART_ARRIVED": "部分到货", "GOODS_ARRIVED": "已到货",
+                     "FINISHED": "已完成"}.get(st, st)
+            qty = int(o.get("quantity") or 0)
+            recv = int(o.get("received") or o.get("actual") or 0)
+            left = max(0, qty - recv)
             vals = [str(o.get("code") or ""),
                     str(o.get("supplier") or ""),
                     str(o.get("warehouse") or "")
                     + (("（%s）" % o.get("warehouse_code")) if o.get("warehouse_code") else ""),
-                    str(o.get("quantity") or 0),
-                    str(o.get("received") or 0),
+                    str(qty),
+                    str(recv),
+                    str(left),
                     "%d 个 / %d 件" % (o.get("item_count") or 0, o.get("item_qty") or 0),
                     st_cn]
-            for c in range(7):
-                self.t_pur.setItem(i, c, QTableWidgetItem(vals[c]))
+            for c in range(8):
+                it = QTableWidgetItem(vals[c])
+                # 已到货过一部分的，把「已收/待收」标红，一眼能看出来
+                if c in (4, 5) and recv > 0 and left > 0:
+                    it.setForeground(QColor("#c62828"))
+                self.t_pur.setItem(i, c, it)
         ent = j.get("entries") or []
         sh = j.get("shelves") or []
         self.lbl_pur_info.setText(

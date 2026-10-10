@@ -5425,10 +5425,19 @@ def purchase_pending_payload(days=90, cache_sec=120):
             return {}
 
     # ① 采购单（只取还没收完的：未到货 / 部分到货）
+    #   ★ 踩过的坑：部分到货的状态值是 **GOODS_PART_ARRIVED**，不是 PART_ARRIVED。
+    #     写成 PART_ARRIVED 接口返回 0 条，于是「已收」列永远是 0（用户反馈过）。
+    #     这里两个都试一遍（旧值也留着，兼容不同环境），并去重。
     orders = []
-    for st in ("GOODS_NOT_ARRIVED", "PART_ARRIVED"):
-        r = _call("purchase.order.query", {"status": st, "pageNo": 1, "pageSize": 100})
+    _seen_ids = set()
+    for st in ("GOODS_NOT_ARRIVED", "GOODS_PART_ARRIVED", "PART_ARRIVED"):
+        r = _call("purchase.order.query", {"status": st, "pageNo": 1, "pageSize": 200})
         for o in (r.get("list") or []):
+            oid = str(o.get("id") or "")
+            if oid and oid in _seen_ids:
+                continue
+            if oid:
+                _seen_ids.add(oid)
             orders.append({
                 "id": o.get("id"), "code": o.get("code"),
                 "status": o.get("status") or o.get("receiveStatus"),
@@ -5437,6 +5446,7 @@ def purchase_pending_payload(days=90, cache_sec=120):
                 "warehouse": o.get("receiveWarehouseName"),
                 "quantity": int(o.get("quantity") or 0),
                 "arrived": int(o.get("arrivedQuantity") or 0),
+                # 已收：这两个字段实测一致（receiveQuantity / actualReceiveNum），都带上
                 "received": int(o.get("receiveQuantity") or 0),
                 "actual": int(o.get("actualReceiveNum") or 0),
                 "created": (datetime.fromtimestamp((o.get("created") or 0) / 1000.0)
