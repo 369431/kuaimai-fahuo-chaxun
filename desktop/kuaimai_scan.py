@@ -5020,6 +5020,18 @@ class _WebHandler(BaseHTTPRequestHandler):
                         print_jobs_log("删除任务 %d 条%s（%s 删的）"
                                        % (n, ("，状态 %s" % status) if status else "", who))
                 return self._json({"ok": True, "deleted": int(n)})
+            if path == "/api/stock/relive":
+                # 强制丢掉「ERP 可成波清单」缓存，立刻重新拉一次（现货可发的成波列用它）
+                deny = self._need_any(me, ("stock.view", "stocktake.view"))
+                if deny:
+                    return deny
+                try:
+                    import kuaimai_wave as _wv
+                    m = _wv.live_wave_map(force=True) or {}
+                    return self._json({"ok": True, "skus": len(m)})
+                except Exception as e:
+                    return self._json({"ok": False,
+                                       "error": human_browser_err(e, "拉取可成波清单")})
             if path == "/api/stock/sent":
                 # 现货可发：标记/撤回「已发」（存在程序里，所有账号共用；拉新数据后自动清空）
                 deny = self._need(me, "stock.canprint")
@@ -7108,6 +7120,17 @@ class ScanApp:
         except Exception:
             waved = set()
         kw = str(kw or "").strip().upper()
+        # ★ v2.17：把「还能成波多少」换成 **ERP 实时值**（本地索引只是上次拉取的快照）。
+        #   来源于 ERP 生成波次页同一份清单（一次请求拿全部 SKU，缓存 60 秒）。
+        #   拿不到（ERP/浏览器没开）就回退到本地数字，并把 live 标成 False 让界面提示。
+        live_map, live_ok = {}, False
+        try:
+            import kuaimai_wave as _wv
+            live_map = _wv.live_wave_map() or {}
+            live_ok = bool(live_map)
+        except Exception:
+            live_map, live_ok = {}, False
+        self._stock_live = bool(live_ok)          # 给 web_stock() 报给界面
         rows = []
         for code, v in items.items():
             shelf = int(v.get("s") or 0)
@@ -7121,6 +7144,19 @@ class ScanApp:
                 continue
             if _pick_group_excluded(code):        # 1166 / 买家秀 / 圆虹包 等占位、补偿商品：不显示
                 continue
+            # ★ 成波相关数字优先用 ERP 实时值；E**不在清单里 = 现在没有任何可成波订单**（不是"没有这个编码"）
+            if live_ok:
+                lv = live_map.get(str(code))
+                if lv:
+                    ones = int(lv.get("num") or 0)
+                    _multi_ord = int(lv.get("nums") or 0)
+                else:
+                    ones, _multi_ord = 0, 0
+                pieces = max(0, ones + _multi_ord)      # 可发只用于「一单一件」，多件只占 1 件/单
+                orders = max(0, ones + _multi_ord)
+                # 加急数仍来自本地（ERP 清单没有加急字段）；订单没了就按 0 计
+                if ones <= 0 and _multi_ord <= 0:
+                    uo = up = 0
             multi_pieces = max(0, pieces - ones)   # 多件单需要的件数（一单一件每单恰好 1 件）
             # 可发 = 能发出去的件数：订单要的和库存取小的，再扣掉留给多件单的部分
             # 等价于 min(在架 − 多件件数, 一单一件件数)
@@ -7158,6 +7194,8 @@ class ScanApp:
     def web_stock(self, kw="", only="all", sort="free"):
         rows = self.stock_rows(kw, only, sort)
         return {"total": len(rows), "rows": rows,
+                # ★ live=True 表示成波相关列来自 ERP 实时；False 表示回退到本地快照
+                "live": bool(getattr(self, "_stock_live", False)),
                 "totals": {"shelf": sum(r["s"] for r in rows),
                            "pieces": sum(r["p"] for r in rows),
                            "ones": sum(r["n"] for r in rows),

@@ -1520,7 +1520,13 @@ function load(){
       $('sum').innerHTML = '共 <b>' + (d.total||0) + '</b> 个　可发合计 <b>' + (t.free||0) + '</b> 件'
         + ((t.up || t.uo) ? ('　<b style="color:#c62828">加急 ' + (t.up||0) + ' 件</b>') : '')
         + ((t.prio) ? ('　<b style="color:#FF3B30">加急有货 ' + t.prio + '</b>') : '')
-        + ((t.sent) ? ('　<b style="color:#1B7F35">已发 ' + t.sent + '</b>') : '');
+        + ((t.sent) ? ('　<b style="color:#1B7F35">已发 ' + t.sent + '</b>') : '')
+        /* ★ 明确标出「还能成波多少」来自 ERP 实时还是本地快照，避免再被旧数字误导 */
+        + (d.live
+            ? '　<span style="color:#1B7F35;font-weight:700">可成波数据：ERP 实时</span>'
+              + '<button class="sbtn" id="relive" style="margin-left:6px;padding:2px 8px;font-size:12px">'
+              + '刷新实时</button>'
+            : '　<span style="color:#c62828;font-weight:700">可成波数据：本地快照（ERP 没连上）</span>');
       const rec = $('rec');
       if(rec){
         if((t.free||0) >= 0){
@@ -1534,6 +1540,22 @@ function load(){
         }
       }
       render();
+      /* 「刷新实时」：强制丢掉 ERP 清单缓存，重新拉一次（60 秒内默认用缓存） */
+      const rb = $('relive');
+      if(rb){
+        rb.onclick = function(){
+          rb.disabled = true; rb.textContent = '刷新中…';
+          fetch(withSid('/api/stock/relive'), {method:'POST', cache:'no-store',
+                headers:{'Content-Type':'application/json'}, body:'{}'})
+            .then(function(r){ return r.json(); })
+            .then(function(j){
+              if(j && j.ok){ flash('已重新拉取 ERP 可成波清单（' + (j.skus||0) + ' 个 SKU）'); }
+              else { flash('刷新失败：' + ((j && j.error) || '未知')); }
+              load();
+            })
+            .catch(function(e){ flash('刷新失败：' + e.message); rb.disabled = false; rb.textContent = '刷新实时'; });
+        };
+      }
     })
     .catch(function(e){ $('sum').textContent = '载入失败：' + e.message; });
 }

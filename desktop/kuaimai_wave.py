@@ -1413,6 +1413,63 @@ def append_record(rec):
         pass
 
 
+_SKU_LIVE_CACHE = {"ts": 0.0, "map": {}, "err": ""}
+_SKU_LIVE_TTL = 60        # ERP 可成波清单缓存 60 秒（一次请求约 3~5 秒，不能每次行都拉）
+
+
+def live_wave_map(cache_sec=None, force=False):
+    """★ 从 ERP 拉「当前还能成波」的 SKU 清单 → {编码: {"num":件数, "nums":多件单数,
+    "pickStock":拣货位在架}}。
+
+    为什么需要：本地订单索引是**上次拉取时的快照**，订单进了波次/打了单之后本地还留着旧数字，
+    而 ERP 已经不认了 —— 于是「现货可发」显示 586 单，点成波却说没有（用户反馈过）。
+    这个清单是 ERP 生成波次页用的同一份数据（/trade/wave/checked/sku/list），
+    一次请求返回全部可成波 SKU，所以用它覆盖现货可发的成波相关列，就能和 ERP 完全一致。
+
+    字段含义（已用已知答案反推确认）：
+      num       = 可成波的一单一件件数（实测 9699-加绒黑色M 精确候选 11 单 ↔ num=11）
+      nums      = 一单多件单数
+      pickStock = 拣货位在架数
+    失败时返回上一次的缓存（或空表），绝不抛异常影响现货可发页面。
+    """
+    ttl = int(cache_sec if cache_sec is not None else _SKU_LIVE_TTL)
+    now = time.time()
+    if (not force) and _SKU_LIVE_CACHE.get("map") and (now - _SKU_LIVE_CACHE.get("ts", 0)) < ttl:
+        return _SKU_LIVE_CACHE["map"]
+    body = {"warehouseId": WAREHOUSE_ID, "conditionId": "", "itemNumUp": "",
+            "itemNumDown": "", "sysSkuRemark": "", "sysItemRemark": "",
+            "bindGoodsSectionCode": "", "titles": "", "skuPropertiesNames": "",
+            "outerIdStr": "", "mainOuterId": "", "isAccurate": 0,
+            "specifyShipperIds": "", "pageSize": 2000}
+    out = {}
+    try:
+        c = KP.open_cdp_page()
+        try:
+            res = _post(c, SKU_LIST_PATH, json.dumps(body), "application/json")
+            d = json.loads((res or {}).get("text") or "{}").get("data") or []
+            if isinstance(d, dict):
+                d = d.get("list") or []
+            for r in (d or []):
+                if not isinstance(r, dict):
+                    continue
+                cd = str(r.get("outerId") or "").strip()
+                if not cd:
+                    continue
+                out[cd] = {"num": int(r.get("num") or 0),
+                           "nums": int(r.get("nums") or 0),
+                           "pickStock": int(r.get("pickStock") or 0)}
+        finally:
+            try:
+                c.close()
+            except Exception:
+                pass
+        _SKU_LIVE_CACHE.update({"ts": now, "map": out, "err": ""})
+        return out
+    except Exception as e:
+        _SKU_LIVE_CACHE["err"] = str(e)[:150]
+        return _SKU_LIVE_CACHE.get("map") or {}
+
+
 # ---------- v1.46b 货位库存预检 ----------
 SKU_LIST_PATH = "/trade/wave/checked/sku/list"
 
