@@ -588,11 +588,21 @@ def _pkey(sid, rem, urg):
     return (0 if h < 0 else 1, 0 if sid in urg else 1, h, str(sid))
 
 
-def plan(items, carrier=""):
+def plan(items, carrier="", on_step=None):
     """干跑：按 {code, qty} 目标挑单。返回每码 target/max/actual + 将成波的 sids + 明细。不建波。
 
     carrier（必填）：只挑该快递（中通/申通）的候选单 —— 用户要求**一个波次只能是同一种快递**。
+
+    on_step(text)：可选进度回调，挑单过程中每一步报一句人话（前端实时显示"正在挑单…"）。
+                   回调里的异常一律吞掉 —— 进度显示不能影响成波本身。
     """
+    def _step(txt):
+        if on_step:
+            try:
+                on_step(txt)
+            except Exception:
+                pass
+
     carrier = str(carrier or "").strip()
     if not carrier:
         return {"error": "请先选择快递（中通 / 申通）：一个波次只能同一种快递"}
@@ -622,6 +632,7 @@ def plan(items, carrier=""):
         # 并发查：所有编码一次全发出去（浏览器自己并发），不再逐个串行
         _ts = list(targets)
         _codes = [orig.get(t, t) for t in _ts]
+        _step("正在查「%s」的最大可生成…（共 %d 个编码）" % (str(_codes[0])[:20], len(_ts)))
         _resps = _post_many(c, QUERY_PATH, [_query_form(cd) for cd in _codes])
         for _i, t in enumerate(_ts):
             # 契约：_split_raw 返回 {"one": [一单一件候选], "multi_qty": 多件预留件数}
@@ -646,16 +657,19 @@ def plan(items, carrier=""):
 
     maxs = {t: sum(o["qty"].get(t, 0) for o in raw_by_code.get(t, [])) for t in targets}
     eff = {t: min(targets[t], maxs[t]) for t in targets}
+    _step("正在挑单：候选 %d 单，按「超时→加急」排序…" % len(cand))
 
     # ★ 只查候选单的剩余时间（按 sids 精确查），不再按编码全量查 ——
     #   实测这一步从 8.8 秒降到 1 秒上下，成波明显更快。
     rem = _priority_sids(list(cand.keys()))
+    _step("正在核对加急/超时标记…")
     try:
         urg = KP.load_urgent_sids(fresh=True)
     except BaseException:
         urg = set()
 
     sids = sorted(cand.keys(), key=lambda s: _pkey(s, rem, urg))
+    _step("正在挑单：从 %d 个候选里挑出要成波的单…" % len(sids))
     selected, covered = [], {}
     for sid in sids:
         q = cand[sid]
@@ -943,13 +957,22 @@ def readback_new_wave(since_ms, item_count=None, page_no=1, page_size=20, c=None
     return {"ok": False, "error": "波次列表里未找到本次新建的波次（created>=%s）" % since}
 
 
-def create(items, carrier=""):
+def create(items, carrier="", on_step=None):
     """真正成波：先算挑单，再把全部 sids 一次 save（一个波次，只含选定的那一种快递）。
 
     save 后用**同一个 CDP 页**在「波次管理」列表回读新波次号（最多 3 次，等 2s/3s）；
     不回读开放平台 erp.trade.waves.query（只返回已拣选波次，新波次永远读不到）。
+
+    on_step(text)：可选进度回调（前端实时显示"正在挑单 / 正在提交 / 正在回读波次号"）。
     """
-    p = plan(items, carrier)
+    def _step(txt):
+        if on_step:
+            try:
+                on_step(txt)
+            except Exception:
+                pass
+
+    p = plan(items, carrier, on_step=on_step)
     if p.get("error"):
         return p
     sids = p.get("sids") or []
@@ -998,6 +1021,7 @@ def create(items, carrier=""):
         except Exception:
             pass
         t0 = time.time() * 1000                  # save 前记时点：只认这之后新建的波次
+        _step("正在提交成波：%d 个订单…" % len(sids))
         body = json.dumps({"warehouseId": WAREHOUSE_ID, "ruleId": "", "sids": sids,
                            "hasFilter": False})
         res = _post(c, SAVE_PATH, body, "application/json")
@@ -1019,6 +1043,7 @@ def create(items, carrier=""):
             out["save_msg"] = text[:300]
             return out
         # save 返回 success ≠ ERP 真的建出波次 → 必须在「波次管理」列表回读核对（最多 3 次）
+        _step("已提交，正在回读波次号…")
         rb = {}
         for _wait in (0, 2, 3):
             if _wait:

@@ -1728,7 +1728,7 @@ _WAVE_CREATE_LOCK = threading.Lock()
 
 # v1.61：成波闸门的「看得见」状态 —— 现在是不是有人在成波 / 前面还有几个在排队。
 # 前端在等成波结果期间轮询 GET /api/wave/queue，用来显示「前面还有 N 个波次，已等 X 秒」。
-_WAVE_STAT = {"running": False, "waiting": 0}
+_WAVE_STAT = {"running": False, "waiting": 0, "who": "", "step": "", "started": 0.0}
 _WAVE_STAT_LK = threading.Lock()
 
 # ★ v2.26：成波结果**存在服务端**，断了也能回来看。
@@ -1737,11 +1737,12 @@ _WAVE_STAT_LK = threading.Lock()
 #     fetch 就会 reject → 前端只显示一句「Failed to fetch」，
 #     而**ERP 那边其实已经建出波次了**，用户却不知道，以为失败又点一次 → 重复建波。
 #   做法：每次成波把结果连同一个 req 号存下来；前端断了就拿 req 号回来取结果。
-_WAVE_LAST = {"req": "", "at": 0.0, "out": None, "running": False, "phase": ""}
+_WAVE_LAST = {"req": "", "at": 0.0, "out": None, "running": False, "phase": "",
+              "step": "", "step_at": 0.0, "who": ""}
 _WAVE_LAST_LK = threading.Lock()
 
 
-def _wave_last_put(req, out=None, running=None, phase=None):
+def _wave_last_put(req, out=None, running=None, phase=None, step=None, who=None):
     with _WAVE_LAST_LK:
         if req:
             _WAVE_LAST["req"] = str(req)
@@ -1752,13 +1753,33 @@ def _wave_last_put(req, out=None, running=None, phase=None):
             _WAVE_LAST["running"] = bool(running)
         if phase is not None:
             _WAVE_LAST["phase"] = str(phase)
+        if step is not None:
+            _WAVE_LAST["step"] = str(step)
+            _WAVE_LAST["step_at"] = time.time()
+        if who is not None:
+            _WAVE_LAST["who"] = str(who)
 
 
 def _wave_last_get(req=""):
+    now = time.time()
     with _WAVE_LAST_LK:
         d = {"req": _WAVE_LAST["req"], "at": _WAVE_LAST["at"],
              "out": _WAVE_LAST["out"], "running": bool(_WAVE_LAST["running"]),
-             "phase": _WAVE_LAST["phase"]}
+             "phase": _WAVE_LAST["phase"], "step": _WAVE_LAST["step"],
+             "who": _WAVE_LAST["who"],
+             "step_age_s": (round(now - _WAVE_LAST["step_at"], 1)
+                            if _WAVE_LAST["step_at"] else 0),
+             "queued_s": (round(now - _WAVE_LAST["step_at"], 1)
+                          if _WAVE_LAST["step_at"] else 0)}
+    # ★ 排队状态实时算：闸门里能直接看到"前面还有几个/什么阶段"，
+    #   比只回报上一次的静态 phase 准确（多账号并发时尤其明显）。
+    try:
+        st = _wave_stat()
+        d["queue_running"] = bool(st.get("running"))
+        d["queue_waiting"] = int(st.get("waiting") or 0)
+    except Exception:
+        d["queue_running"] = False
+        d["queue_waiting"] = 0
     d["ok"] = bool(d["out"])
     d["matched"] = (not req) or (str(req) == d["req"])
     if not d["matched"]:
@@ -1770,10 +1791,25 @@ def _wave_last_get(req=""):
 
 def _wave_stat():
     with _WAVE_STAT_LK:
-        return {"running": bool(_WAVE_STAT["running"]), "waiting": int(_WAVE_STAT["waiting"])}
+        d = {"running": bool(_WAVE_STAT["running"]),
+             "waiting": int(_WAVE_STAT["waiting"]),
+             "who": str(_WAVE_STAT.get("who") or ""),
+             "step": str(_WAVE_STAT.get("step") or ""),
+             "started": float(_WAVE_STAT.get("started") or 0.0)}
+    d["elapsed_s"] = round(time.time() - d["started"], 1) if d["started"] else 0
+    return d
 
 
-def _wave_enter(timeout=180):
+def _wave_set_step(step, who=None):
+    """更新「此刻在干什么」—— 前端轮询 /api/wave/queue 就能实时显示阶段。"""
+    with _WAVE_STAT_LK:
+        if step is not None:
+            _WAVE_STAT["step"] = str(step)[:120]
+        if who is not None:
+            _WAVE_STAT["who"] = str(who)
+
+
+def _wave_enter(timeout=180, who=""):
     """进成波闸门：先登记「我在排队」，再抢锁；抢到就把 running 置真。返回是否抢到。"""
     with _WAVE_STAT_LK:
         _WAVE_STAT["waiting"] += 1
@@ -1785,12 +1821,18 @@ def _wave_enter(timeout=180):
             _WAVE_STAT["waiting"] = max(0, _WAVE_STAT["waiting"] - 1)
             if got:
                 _WAVE_STAT["running"] = True
+                _WAVE_STAT["who"] = str(who or "")
+                _WAVE_STAT["step"] = "已轮到，开始挑单…"
+                _WAVE_STAT["started"] = time.time()
     return got
 
 
 def _wave_leave():
     with _WAVE_STAT_LK:
         _WAVE_STAT["running"] = False
+        _WAVE_STAT["step"] = ""
+        _WAVE_STAT["who"] = ""
+        _WAVE_STAT["started"] = 0.0
     try:
         _WAVE_CREATE_LOCK.release()
     except Exception:
@@ -5018,7 +5060,22 @@ class _WebHandler(BaseHTTPRequestHandler):
                 # v1.46c 多账号并发：成波都走同一个 ERP 自动化浏览器，必须串行。
                 # 后来者**排队等待**（最多 180 秒）而不是被直接挡掉；真的等太久才让重试。
                 _t_wait = time.time()
-                if not _wave_enter(180):
+                _who = str((me or {}).get("name") or "")
+                # 前端给的请求号（断线回来靠它认领结果）。优先取自定义头 ——
+                # 万一 POST body 被中途截断，头一般还是完整的。
+                # ★ 必须放在最前面：下面登记"排队中"就要用它。
+                _wreq = ""
+                try:
+                    _wreq = str(self.headers.get("X-KM-Wave-Req") or "").strip()
+                except Exception:
+                    _wreq = ""
+                if not _wreq:
+                    _wreq = str(body.get("req") or "").strip()
+                # 先登记「排队中」—— 让别人（和自己）在页面上看到"有人正在排队/在跑"，
+                # 而不是以为没反应又点一次。
+                _wave_last_put(_wreq, running=True, phase="排队中",
+                               step="正在排队等待成波…", who=_who)
+                if not _wave_enter(180, who=_who):
                     try:
                         print_jobs_log("生成波次：排队超时（等了 %.1fs 仍没轮到），已让用户重试"
                                        % (time.time() - _t_wait))
@@ -5027,19 +5084,18 @@ class _WebHandler(BaseHTTPRequestHandler):
                     return self._json({"error": "前面还有波次在生成（排队超过 3 分钟），请稍后再试",
                                        "busy": True})
                 _waited = time.time() - _t_wait
-                # 前端给的请求号（断线回来靠它认领结果）。优先取自定义头 ——
-                # 万一 POST body 被中途截断，头一般还是完整的。
-                _wreq = ""
-                try:
-                    _wreq = str(self.headers.get("X-KM-Wave-Req") or "").strip()
-                except Exception:
-                    _wreq = ""
-                if not _wreq:
-                    _wreq = str(body.get("req") or "").strip()
-                _wave_last_put(_wreq, running=True, phase="正在挑单成波")
+                _wave_last_put(_wreq, running=True, phase="进行中",
+                               step="已轮到，开始挑单…", who=_who)
                 try:
                     import kuaimai_wave as wv
-                    out = wv.create(items, str(body.get("carrier") or ""))
+
+                    def _on_step(txt):
+                        """把挑单/提交/回读的每一步实时写进状态，前端轮询就能看到。"""
+                        _wave_set_step(str(txt)[:120])
+                        _wave_last_put(_wreq, phase="进行中", step=str(txt)[:120])
+
+                    out = wv.create(items, str(body.get("carrier") or ""),
+                                    on_step=_on_step)
                     if _waited > 1:
                         out["waited_s"] = round(_waited, 1)   # 排队等了多久（多账号并发的交代）
                     # v1.46：波次号由 wv.create 在 ERP「波次管理」列表回读（含未拣选波次，最多重试 3 次）。

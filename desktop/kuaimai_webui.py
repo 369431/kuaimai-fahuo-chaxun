@@ -2925,27 +2925,66 @@ function qTick(){
   fetch(bust(withSid('/api/wave/queue')), {cache:'no-store'})
     .then(function(r){ return r.json(); })
     .then(function(d){
-      if(!d || !d.ok){ qMsg('正在挑单并成波…已等 <b>' + s + '</b> 秒'); return; }
-      if(d.running && d.waiting > 0){
-        qMsg('<b>排队中</b>：前面还有 <b>' + d.waiting + '</b> 个波次在生成，已等 <b>' + s + '</b> 秒…');
-      } else if(d.running){
-        qMsg('正在挑单并成波…已等 <b>' + s + '</b> 秒（一个波次通常十几秒）');
-      } else {
+      if(!d || !d.ok){
         qMsg('正在挑单并成波…已等 <b>' + s + '</b> 秒');
+        return;
       }
+      /* ★ 实时阶段：服务端会报"此刻在干什么"（查最大可生成 / 挑单 / 提交 / 回读波次号）。
+         以前这里只显示一句"正在挑单并成波"，等久了就像卡死 → 用户以为出错又点一次，
+         结果重复建波。所以现在把阶段、已等秒数、以及"别重复点"的话都写清楚。 */
+      const step = String(d.step || '').trim();
+      const who  = String(d.who || '').trim();
+      let head;
+      if(d.running && d.waiting > 0){
+        head = '<b>排队成波中</b>：前面还有 <b>' + d.waiting + '</b> 个波次在生成';
+      } else if(d.running){
+        head = '<b>正在成波</b>' + (who ? '（账号 ' + esc(who) + '）' : '');
+      } else if(step){
+        head = '<b>正在成波</b>';
+      } else {
+        head = '<b>正在成波</b>';
+      }
+      let body = step ? ('<div style="margin-top:4px">' + esc(step) + '</div>') : '';
+      qMsg(head + '　已等 <b>' + s + '</b> 秒'
+           + body
+           + '<div class="muted" style="margin-top:4px">'
+           + '★ 正在处理中，<b>请不要重复点「生成波次」</b>（重复点会建出两个波次）。'
+           + '网络断了也没关系，页面会自动把结果取回来。</div>');
     })
-    .catch(function(){ qMsg('正在挑单并成波…已等 <b>' + s + '</b> 秒'); });
+    .catch(function(){
+      qMsg('正在挑单并成波…已等 <b>' + s + '</b> 秒'
+           + '<div class="muted" style="margin-top:4px">★ 正在处理中，请不要重复点「生成波次」。</div>');
+    });
 }
+/* ★ 成波期间把「生成波次」按钮**禁用**：用户看不到按钮就不会重复点。
+   这是防重复建波最直接的一招（提示文字再明显，也不如按钮点不动管用）。
+   注意：这页只有 mk 一个按钮（实测 id=dry 不存在，别写不存在的 id）。 */
+function lockWaveButtons(on){
+  const b = $('mk');
+  if(!b) return;
+  try{
+    if(on && b.dataset.origText == null) b.dataset.origText = b.textContent;
+    b.disabled = !!on;
+    b.style.opacity = on ? '0.5' : '';
+    b.style.cursor = on ? 'not-allowed' : '';
+    b.title = on ? '正在成波中，请不要重复点（重复点会建出两个波次）' : '';
+    b.textContent = on ? '成波中…（请勿重复点）' : (b.dataset.origText || '生成波次');
+  }catch(e){}
+}
+/* 页面被关掉/刷新时也把按钮恢复，避免下次进来还是禁用状态（浏览器一般不执行，双保险）。 */
+window.addEventListener('beforeunload', function(){ try{ lockWaveButtons(false); }catch(e){} });
 function startQueueWatch(){
   stopQueueWatch();
   _qBox = document.querySelector('#out .wq');
   _qT0 = Date.now();
+  lockWaveButtons(true);
   qTick();
   _qTimer = setInterval(qTick, 1500);
 }
 function stopQueueWatch(){
   if(_qTimer){ clearInterval(_qTimer); _qTimer = null; }
   _qBox = null;
+  lockWaveButtons(false);
 }
 
 function renderPlan(p){
