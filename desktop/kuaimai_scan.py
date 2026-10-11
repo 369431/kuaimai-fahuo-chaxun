@@ -1731,6 +1731,42 @@ _WAVE_CREATE_LOCK = threading.Lock()
 _WAVE_STAT = {"running": False, "waiting": 0}
 _WAVE_STAT_LK = threading.Lock()
 
+# ★ v2.26：成波结果**存在服务端**，断了也能回来看。
+#   为什么需要（用户反馈「成波请求失败：Failed to fetch」）：
+#     成波要 30~180 秒（含排队），这段时间里浏览器/中转只要抖一下，
+#     fetch 就会 reject → 前端只显示一句「Failed to fetch」，
+#     而**ERP 那边其实已经建出波次了**，用户却不知道，以为失败又点一次 → 重复建波。
+#   做法：每次成波把结果连同一个 req 号存下来；前端断了就拿 req 号回来取结果。
+_WAVE_LAST = {"req": "", "at": 0.0, "out": None, "running": False, "phase": ""}
+_WAVE_LAST_LK = threading.Lock()
+
+
+def _wave_last_put(req, out=None, running=None, phase=None):
+    with _WAVE_LAST_LK:
+        if req:
+            _WAVE_LAST["req"] = str(req)
+        if out is not None:
+            _WAVE_LAST["out"] = out
+            _WAVE_LAST["at"] = time.time()
+        if running is not None:
+            _WAVE_LAST["running"] = bool(running)
+        if phase is not None:
+            _WAVE_LAST["phase"] = str(phase)
+
+
+def _wave_last_get(req=""):
+    with _WAVE_LAST_LK:
+        d = {"req": _WAVE_LAST["req"], "at": _WAVE_LAST["at"],
+             "out": _WAVE_LAST["out"], "running": bool(_WAVE_LAST["running"]),
+             "phase": _WAVE_LAST["phase"]}
+    d["ok"] = bool(d["out"])
+    d["matched"] = (not req) or (str(req) == d["req"])
+    if not d["matched"]:
+        # 问的不是最后一次 → 不把别人的结果混给他
+        d["out"] = None
+        d["ok"] = False
+    return d
+
 
 def _wave_stat():
     with _WAVE_STAT_LK:
@@ -3534,6 +3570,23 @@ class _WebHandler(BaseHTTPRequestHandler):
                 if not self._can(me, "wave.view"):
                     return self._forbidden_page("这个账号没有生成波次权限")
                 return self._send(self._page(WAVE_RECORDS_HTML, me), "text/html; charset=utf-8")
+            # ★ 成波排队状态 / 最近一次成波结果 —— **GET 也要能取**。
+            #   踩过的坑：这两条原来只注册在 do_POST 里，而前端是用 GET 调的
+            #   （fetch(withSid('/api/wave/queue'))），结果一直 404，
+            #   「前面还有 N 个波次」的排队提示从来没显示出来过。
+            #   注册式的东西一旦落错方法就会静默失效，所以这里显式两条都注册。
+            if parsed.path == "/api/wave/queue":
+                if not self._can(me, "wave.view"):
+                    return self._deny("wave.view")
+                out = _wave_stat()
+                out["ok"] = True
+                return self._json(out)
+            if parsed.path == "/api/wave/last":
+                # v2.26：取最近一次成波结果（fetch 断线 Failed to fetch 时的兜底）
+                if not self._can(me, "wave.view"):
+                    return self._deny("wave.view")
+                return self._json(_wave_last_get((qs.get("req") or [""])[0]))
+
             if parsed.path == "/api/wave/records":
                 # 波次记录：以本机自有记录为索引，每条的「状态/件数/订单数」一律实时回读 ERP。
                 if not self._can(me, "wave.view"):
@@ -4941,6 +4994,14 @@ class _WebHandler(BaseHTTPRequestHandler):
                 out["ok"] = True
                 return self._json(out)
 
+            if path == "/api/wave/last":
+                # ★ v2.26：取「最近一次成波的结果」—— 给 fetch 断线（Failed to fetch）兜底。
+                #   前端带着自己的 req 号来问：对上了就把结果给它（含波次号），
+                #   对不上说明是别人的请求/还没完成，只告诉它"在跑/没有"。
+                if not self._can(me, "wave.view"):
+                    return self._deny("wave.view")
+                return self._json(_wave_last_get((qs.get("req") or [""])[0]))
+
             if path == "/api/wave/create":
                 # ★ 成波走浏览器 CDP：先把浏览器准备好（自动拉起 + 自愈），
                 #   否则用户会看到「<urlopen error [WinError 10061] …积极拒绝…>」这种天书。
@@ -4966,6 +5027,16 @@ class _WebHandler(BaseHTTPRequestHandler):
                     return self._json({"error": "前面还有波次在生成（排队超过 3 分钟），请稍后再试",
                                        "busy": True})
                 _waited = time.time() - _t_wait
+                # 前端给的请求号（断线回来靠它认领结果）。优先取自定义头 ——
+                # 万一 POST body 被中途截断，头一般还是完整的。
+                _wreq = ""
+                try:
+                    _wreq = str(self.headers.get("X-KM-Wave-Req") or "").strip()
+                except Exception:
+                    _wreq = ""
+                if not _wreq:
+                    _wreq = str(body.get("req") or "").strip()
+                _wave_last_put(_wreq, running=True, phase="正在挑单成波")
                 try:
                     import kuaimai_wave as wv
                     out = wv.create(items, str(body.get("carrier") or ""))
@@ -5018,11 +5089,19 @@ class _WebHandler(BaseHTTPRequestHandler):
                             (" 排队等待=%.1fs" % _waited) if _waited > 1 else ""))
                     except Exception:
                         pass
+                    # ★ 结果先存服务端：即使这个 HTTP 连接已经断了取不到响应，
+                    #   用户重新打开页面也能用 req 号把结果取回来（不会白等、不会重复建波）。
+                    _wave_last_put(_wreq, out=out, running=False, phase="已完成")
                     return self._json(out)
                 except SystemExit:
+                    _wave_last_put(_wreq, out={"error": "打单浏览器没开（Edge 9222 不通）："
+                                                        "请先打开自动化浏览器并登录 ERP"},
+                                   running=False, phase="失败")
                     return self._json({"error": "打单浏览器没开（Edge 9222 不通）："
                                                 "请先打开自动化浏览器并登录 ERP"}, 503)
                 except Exception as e:
+                    _wave_last_put(_wreq, out={"error": "成波失败：%s" % str(e)[:200]},
+                                   running=False, phase="失败")
                     return self._json({"error": "成波失败：%s" % str(e)[:200]}, 500)
                 finally:
                     _wave_leave()

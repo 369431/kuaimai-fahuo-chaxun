@@ -2902,9 +2902,11 @@ function bodyItems(){
               .map(function(x){ return {code:x.code, qty:parseInt(x.qty,10)}; });
 }
 
-function post(path, obj){
+function post(path, obj, extraHeaders){
+  var hd = {'Content-Type':'application/json'};
+  if(extraHeaders){ for(var k in extraHeaders){ if(extraHeaders.hasOwnProperty(k)) hd[k] = extraHeaders[k]; } }
   return fetch(bust(withSid(path)), {method:'POST', cache:'no-store',
-      headers:{'Content-Type':'application/json'}, body:JSON.stringify(obj)})
+      headers:hd, body:JSON.stringify(obj)})
     .then(function(r){ if(r.status === 401){ location.href = '/login'; throw new Error('请重新登录'); } return r.json(); });
 }
 
@@ -3092,10 +3094,57 @@ $('mk').onclick = function(){
   if(!confirm('将用「' + CARRIER + '」生成 1 个波次（清单里所有编码合并成一个波次，只含该快递）。真要建波吗？')) return;
   $('out').innerHTML = '<div class="card"><div class="muted wq">正在挑单并成波…（请稍候）</div></div>';
   startQueueWatch();
-  /* v1.46：波次号由 ERP「波次管理」列表回读（含未拣选波次）。created=true 才显示成功样式；
-     save 返回 success 但回读不到 → 显示「ERP 未建出波次（未确认），请重试」，不冒充成功。 */
-  post('/api/wave/create', {items:items, carrier:CARRIER, confirm:true}).then(function(p){
+  /* ★ v2.26：断线兜底。成波要 30~180 秒，中途网络抖一下 fetch 就会失败（Failed to fetch），
+     但 ERP 那边可能**已经建出波次了**。所以：请求带一个自定义头 X-KM-Wave-Req，
+     前端 catch 到网络错误时不直接报错，而是隔几秒去 /api/wave/last?req=… 把结果取回来。 */
+  const WREQ = 'w' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+  post('/api/wave/create', {items:items, carrier:CARRIER, confirm:true, req:WREQ},
+       {'X-KM-Wave-Req': WREQ}).then(function(p){
     stopQueueWatch();
+    handleCreateResult(p, items);          /* 正常拿到结果 → 统一渲染 */
+  }).catch(function(e){
+    /* 网络断了：不退化成一句「Failed to fetch」，改成"回头去取结果" */
+    $('out').innerHTML = '<div class="card"><h2>连接中断，正在取回结果…</h2>'
+      + '<div class="muted">网络断了（' + esc(e.message || 'Failed to fetch') + '），'
+      + '但成波可能已经完成，正在回头查询结果，请稍候（最多等 3 分钟）。</div></div>';
+    recoverWaveResult(WREQ, 0, items);
+  });
+};
+
+/* 断线后把成波结果取回来：每 4 秒问一次 /api/wave/last?req=…，最多问 45 次（约 3 分钟）。
+   注意 persist：结果取回来就照常渲染（含波次号），用户不会白等、也不会重复建波。 */
+function recoverWaveResult(req, tries, items){
+  fetch(bust(withSid('/api/wave/last?req=' + encodeURIComponent(req))), {cache:'no-store'})
+    .then(function(r){ if(r.status === 401){ location.href = '/login'; throw new Error('请重新登录'); } return r.json(); })
+    .then(function(d){
+      stopQueueWatch();
+      if(d && d.out && d.matched){
+        handleCreateResult(d.out, items);          /* ✓ 取到了，当正常结果渲染 */
+        return;
+      }
+      if(tries >= 45){
+        $('out').innerHTML = '<div class="card"><h2>没能取回结果</h2>'
+          + '<div class="badtext">连接一直没恢复。</div>'
+          + '<div class="muted" style="margin-top:6px">请不要急着重复建波 —— 先到'
+          + '电脑版的「波次记录」或 ERP「波次管理」看一眼有没有新建出的波次；'
+          + '确认没有，再重新生成。</div></div>';
+        return;
+      }
+      startQueueWatch();
+      setTimeout(function(){ recoverWaveResult(req, tries + 1, items); }, 4000);
+    })
+    .catch(function(){
+      if(tries >= 45){
+        $('out').innerHTML = '<div class="card"><h2>没能取回结果</h2>'
+          + '<div class="badtext">连接一直没恢复，请稍后到「波次记录」确认。</div></div>';
+        return;
+      }
+      setTimeout(function(){ recoverWaveResult(req, tries + 1); }, 4000);
+    });
+}
+
+/* 统一的成波结果渲染（正常返回 和 断线取回 都走这里，保证两边一致）。 */
+function handleCreateResult(p, items){
     let h = '';
     if(p.busy){
       h += '<div class="card"><h2>正在生成波次</h2><div class="badtext">'
@@ -3113,9 +3162,6 @@ $('mk').onclick = function(){
     const v = p.verify || {};
     if(p.created === true || v.ok){
       dropFromBag(CARRIER, p, items);   /* 只从「当前快递」清单移除已进波次的编码 */
-      /* ★ 成波成功后刷新「最大可生成」：本次用的编码从清单移除了，
-         但**同一个编码可能还在另一个快递的清单里**（中通/申通两份清单），
-         而且用户会马上再查同一个编码 —— 必须让数字立刻反映剩余量。 */
       try{
         const imp = {};
         (p.codes || []).forEach(function(c){ if(c && c.code) imp[c.code] = c.actual; });
@@ -3143,8 +3189,7 @@ $('mk').onclick = function(){
     }
     $('out').innerHTML = h + planCard(p);
     wireFinishFromCreate();
-  }).catch(function(e){ stopQueueWatch(); $('out').innerHTML = '<div class="card"><div class="badtext">成波请求失败：' + esc(e.message) + '</div></div>'; });
-};
+}
 
 /* ★ 成波后刷新「最大可生成」。
    踩过的坑（用户反馈）：生成 210 件之后，同一个编码还显示成波前的 600 件，
