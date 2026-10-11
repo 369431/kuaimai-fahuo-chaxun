@@ -1,10 +1,10 @@
 {
-  "version": "v2.25",
-  "notes": "**v2.25：修「订单查询看不到订单图」**\n\n**原因**\n· 订单图片是程序**代理转发**的（避免把本机变成任意请求转发器），只放行白名单里的图片域名。\n· 但白名单里**缺了微信小店 / 腾讯系**（`tc.qq.com` 等）和**快手 CDN**（`kwimgs.com`）等域名，\n  这些平台的订单图片被直接拒掉 → 页面上就是没有图。\n· 实测复现：\n    抖音图  p9-aio.ecombdimg.com   → 代理 200 ✓\n    微信图  wst.wxapp.tc.qq.com    → 代理 **400 拒绝** ✗（白名单没有它）\n\n**这一版修的**\n① 图片域名白名单补全（13 个 → 36 个）：微信小店/腾讯系（tc.qq.com、qq.com、gtimg.com、\n   qpic.cn…）、快手 CDN（kwimgs.com）、有赞/微店、阿里云 OSS、京东、拼多多等。\n② Referer 不再写死抖音：按图片域名给对应平台的 Referer，取不到再**去掉 Referer 重试一次**\n   （实测有些 CDN 反而不接受外来 Referer）。\n③ 图片取不到时显示「图片取不到/无图」占位块，不再是个破图或空白。\n④ 顺手修掉一个隐患：白名单原来写成逗号分隔的字符串形式，容易被误改成字符串\n   （那样会当成「单个超长域名」、所有图全挂），现在明确是**元组**并加了注释。\n\n**实测（6 个真实订单图片全部成功）**\n  6045797692651684  wst.wxapp.tc.qq.com   → ✓ 329610 字节（**之前失败的微信图**）\n  6044406448699849  p9-aio.ecombdimg.com  → ✓ 372156 字节\n  6046571777792016  p9-aio.ecombdimg.com  → ✓ 428375 字节\n  …共 6 个全过；恶意域名 / 非 https 仍然拒绝 ✓\n",
+  "version": "v2.26",
+  "notes": "**v2.26：修「成波请求失败：Failed to fetch」**\n\n**这是什么错**\n· `Failed to fetch` 是浏览器报的**网络层**错误 —— 请求没到达服务器，或中途连接断了。\n  **不是成波本身失败**（这点很关键：ERP 那边可能已经把波次建出来了）。\n· 实测后台接口一切正常：ERP 已登录、成波接口正常响应。所以问题在「连接」不在「成波」。\n· 成波要 **30~180 秒**（含多账号排队），这段时间里网络/中转只要抖一下就会断，\n  而旧版一断就只给你看一句「Failed to fetch」，你既不知道结果，也没法续看。\n\n**这一版做的（断了也不丢结果）**\n· 成波结果**存在服务端**：每次成波带一个请求号，结果（含波次号）在服务端留底。\n· 前端遇到网络中断时，**不再直接报错**，而是自动回头去问「刚才那次成波结果出来了吗」，\n  每 4 秒问一次、最多问 3 分钟；取到了就照常显示波次号和配货明细。\n· 3 分钟仍取不到 → 明确提示「不要急着重复建波，先到波次记录/ERP 波次管理确认」，\n  避免网络抖动导致**重复建波**。\n\n**顺手修掉一个大 bug：排队提示从来没显示过**\n· 「前面还有 N 个波次，已等 X 秒」这个提示依赖 `/api/wave/queue`，\n  但这条路由**只注册在 POST 里**，前端却是用 GET 调的 → 一直 404 →\n  这个功能从上线起就没工作过（等 3 分钟时看着像卡死）。\n· 现在 GET / POST 都注册了，实测：\n    GET /api/wave/queue       → 200 {\"running\": false, \"waiting\": 0} ✓\n    GET /api/wave/last        → 200 ✓\n\n**给用户的话**\n· 以后再看到「连接中断，正在取回结果…」**请不要急着重新点成波**，等它自动取回来。\n· 如果提示「没能取回结果」，先去「波次记录」或 ERP「波次管理」看一眼有没有新波次，\n  确认没有再造，避免一个波次建两遍。\n",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v2.25/kuaimai-scan-setup-v2.25.exe",
-  "sha256": "a78188c454a84ef77bb235fb4870225af9e59fad07e384fb0901d36ec50fa574",
-  "size": 46403416,
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v2.26/kuaimai-scan-setup-v2.26.exe",
+  "sha256": "c8f78d9ffb7d908ad43dbbbd0790bd6757b75956245d7dd4dae4f0d855d0cd7e",
+  "size": 46405183,
   "mandatory": false,
-  "published_at": "2026-10-11 16:32"
+  "published_at": "2026-10-11 20:42"
 }
