@@ -3163,6 +3163,25 @@ class GatewayDialog(QDialog):
             r.addWidget(e, 1)
             fl.addLayout(r)
             self.edits[key] = e
+        # ★ HTTP（80 端口）映射开关：以前没有它，frpc 配置里就不写 80 端口隧道，
+        #   于是「http://域名」打不开（用户反馈）。勾上后 80 会转到本机 web_port，
+        #   由本机自动 302 跳到 HTTPS（证书/登录仍只走 HTTPS）。
+        r2 = QHBoxLayout()
+        lb2 = QLabel("开放 HTTP 端口 80（自动跳 HTTPS）")
+        lb2.setMinimumWidth(220)
+        lb2.setObjectName("hint")
+        r2.addWidget(lb2)
+        self.ck_http = QCheckBox("勾上 = frpc 里加一条 80→本机端口 的映射")
+        r2.addWidget(self.ck_http, 1)
+        fl.addLayout(r2)
+        r3 = QHBoxLayout()
+        lb3 = QLabel("开放 HTTPS 端口 443")
+        lb3.setMinimumWidth(220)
+        lb3.setObjectName("hint")
+        r3.addWidget(lb3)
+        self.ck_443 = QCheckBox("勾上 = 无需输端口，直接用 https://域名 访问")
+        r3.addWidget(self.ck_443, 1)
+        fl.addLayout(r3)
         lay.addWidget(form)
 
         self.st = QLabel("")
@@ -3221,6 +3240,15 @@ class GatewayDialog(QDialog):
                 e.setText("" if conf.get(k) is None else str(conf.get(k)))
             except Exception:
                 pass
+        # 两个开关（缺省都算开，跟后端 default 一致）
+        try:
+            self.ck_http.setChecked(bool(conf.get("expose_http", True)))
+        except Exception:
+            pass
+        try:
+            self.ck_443.setChecked(bool(conf.get("expose_443", True)))
+        except Exception:
+            pass
         st = r.get("status") or {}
         cfg = st.get("cfg") or conf or {}
         # ★ 跟旧 Tk 窗同一个口径，做成人话（用户要的就是这几行）
@@ -3269,6 +3297,12 @@ class GatewayDialog(QDialog):
             v = (e.text() or "").strip()
             if v:
                 conf[k] = v
+        # 两个开关一定要带上（即使没填任何文本框）——否则「勾了 80 端口」存不下去
+        try:
+            conf["expose_http"] = bool(self.ck_http.isChecked())
+            conf["expose_443"] = bool(self.ck_443.isChecked())
+        except Exception:
+            pass
 
         def work():
             try:

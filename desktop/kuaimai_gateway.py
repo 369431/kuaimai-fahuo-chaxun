@@ -102,7 +102,10 @@ def load_config():
            "https_port": int(d.get("https_port") or DEFAULT_HTTPS_PORT),
            "web_port": int(d.get("web_port") or DEFAULT_WEB_PORT),
            "serv_root": str(d.get("serv_root") or "").strip(),
-           "expose_443": bool(d.get("expose_443", True))}
+           "expose_443": bool(d.get("expose_443", True)),
+           # ★ HTTP（80 端口）映射：默认开。老配置没有这个键 → 默认 True，
+           #   这样升级后第一次写配置就会自动补上 80 端口（修「http 打不开」）。
+           "expose_http": bool(d.get("expose_http", True))}
     return out
 
 
@@ -137,6 +140,18 @@ def frpc_toml(cfg):
                  'localIP = "127.0.0.1"' + crlf +
                  "localPort = %d" % int(cfg.get("https_port") or DEFAULT_HTTPS_PORT) + crlf +
                  "remotePort = 443")
+    # ★ HTTP（80 端口）映射：把远程 80 转到本机的**明文**服务端口。
+    #   为什么以前 http 打不开：老模板只写了两个 HTTPS 映射（9443 / 443），
+    #   80 端口根本没隧道 → 浏览器访问 http://域名 自然连不上（用户反馈过）。
+    #   本机的明文服务会把 HTTP 请求 302 跳到 HTTPS（见 kuaimai_scan._should_upgrade_to_https），
+    #   所以这里只需要把 80 接进来即可，证书/登录仍只走 HTTPS。
+    if cfg.get("expose_http", True):
+        toml += (crlf + crlf + "[[proxies]]" + crlf +
+                 'name = "kuaimai-http-80"' + crlf +
+                 'type = "tcp"' + crlf +
+                 'localIP = "127.0.0.1"' + crlf +
+                 "localPort = %d" % int(cfg.get("web_port") or DEFAULT_WEB_PORT) + crlf +
+                 "remotePort = 80")
     return toml + crlf
 
 

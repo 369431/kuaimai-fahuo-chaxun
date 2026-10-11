@@ -940,7 +940,8 @@ ORDER_HTML = r"""<!doctype html>
   .kv span { flex:1; word-break:break-all; }
   .item { display:flex; gap:10px; padding:10px 0; border-top:1px solid rgba(60,60,67,.10); }
   .item:first-of-type { border-top:0; }
-  .item img { width:92px; height:92px; object-fit:cover; border-radius:10px; background:#ececf0; flex:0 0 auto; }
+  .noimg { width:74px; height:74px; border-radius:10px; background:rgba(120,120,128,.14); color:#8a8a8f; font-size:12px; display:flex; align-items:center; justify-content:center; text-align:center; flex:0 0 auto; }
+.item img { width:92px; height:92px; object-fit:cover; border-radius:10px; background:#ececf0; flex:0 0 auto; }
   .t { font-size:14.5px; font-weight:600; line-height:1.4; }
   .s { font-size:12.5px; color:var(--sub); line-height:1.75; margin-top:2px; word-break:break-all; }
   .amt { font-size:14px; font-weight:700; color:#c62828; margin-top:4px; }
@@ -1023,7 +1024,10 @@ function render(d){
     h += '<div class="card"><h2>订单信息</h2><div class="kv">' + kvHtml(d.head) + '</div></div>';
     h += '<div class="card"><h2>商品信息</h2>';
     (d.items || []).forEach(function(it){
-      h += '<div class="item">' + (it.pic ? '<img src="' + imgUrl(it.pic) + '" loading="lazy">' : '<img>')
+      h += '<div class="item">' + (it.pic
+        ? '<img src="' + imgUrl(it.pic) + '" loading="lazy" '
+          + 'onerror="this.outerHTML=\'<div class=&quot;noimg&quot;>图片取不到/无图</div>\'">'
+        : '<div class="noimg">无图</div>')
         + '<div><div class="t">' + esc(it.title) + '</div>'
         + '<div class="s">规格别名：' + esc(it.spec || '—') + '</div>'
         + '<div class="s">编码：' + esc(it.code) + '</div>'
@@ -1053,7 +1057,10 @@ function render(d){
         + (w.shopName ? '<span class="tag">' + esc(w.shopName) + '</span>' : '')
         + '</div><div class="kv">' + kvHtml(w.kv) + '</div>';
       (w.items || []).forEach(function(it){
-        h += '<div class="item">' + (it.pic ? '<img src="' + imgUrl(it.pic) + '" loading="lazy">' : '<img>')
+        h += '<div class="item">' + (it.pic
+        ? '<img src="' + imgUrl(it.pic) + '" loading="lazy" '
+          + 'onerror="this.outerHTML=\'<div class=&quot;noimg&quot;>图片取不到/无图</div>\'">'
+        : '<div class="noimg">无图</div>')
           + '<div><div class="t">' + esc(it.title) + '</div><div class="s">' + esc(it.spec) + '</div>'
           + '<div class="s">编码 ' + esc(it.code) + '　申请 ' + esc(it.count) + ' 件　实退 ' + esc(it.realQty) + ' 件　单价 ' + esc(it.price) + '</div></div></div>';
       });

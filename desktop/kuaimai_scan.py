@@ -2990,6 +2990,74 @@ class _WebHandler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
+    # ---------- HTTP → HTTPS ----------
+    def _http_host(self):
+        """请求里的 Host 头（去掉端口）。拿不到返回空。"""
+        try:
+            h = str(self.headers.get("Host") or "").strip()
+        except Exception:
+            return ""
+        if not h:
+            return ""
+        # 去掉 :port
+        if h.startswith("["):                 # IPv6 形如 [::1]:8790
+            i = h.find("]")
+            return h[:i + 1] if i > 0 else h
+        return h.split(":")[0]
+
+    def _should_upgrade_to_https(self):
+        """这个请求要不要跳到 HTTPS。
+
+        不跳的情况（避免死循环 / 影响本地调试）：
+          · 请求头里已经有 X-Forwarded-Proto: https（说明本来就是 HTTPS 转过来的）
+          · 目标 Host 是域名、但域名是 localhost / 127.0.0.1 / 内网 IP
+          · 配置里没设置对外域名（没开 frp）→ 没啥可跳的
+        其余（走域名、明文进来的）一律跳到 HTTPS。
+        """
+        try:
+            hdrs = {str(k).lower(): (v or "") for k, v in self.headers.items()}
+        except Exception:
+            hdrs = {}
+        if str(hdrs.get("x-forwarded-proto") or "").lower() == "https":
+            return False
+        host = self._http_host()
+        if not host:
+            return False
+        low = host.lower()
+        if low in ("localhost", "127.0.0.1", "::1", "[::1]"):
+            return False
+        # 内网 IP 不跳（办公室内直连用 http 更方便）
+        try:
+            if _ip_is_private(low):
+                return False
+        except Exception:
+            pass
+        # 只有配了对外域名才跳（域名对得上、或者是访问者用的域名）
+        try:
+            import kuaimai_gateway as _gw
+            cfg = _gw.load_config() or {}
+            dom = str(cfg.get("domain") or "").strip().lower()
+        except Exception:
+            dom = ""
+        if not dom:
+            return False
+        return True
+
+    def _https_url_for(self):
+        """拼出对应的 HTTPS 地址（保留原路径和查询串）。"""
+        host = self._http_host()
+        try:
+            import kuaimai_gateway as _gw
+            cfg = _gw.load_config() or {}
+            port = int(cfg.get("https_port") or 9443)
+        except Exception:
+            port = 9443
+        path = self.path or "/"
+        # 443 时不用带端口，否则要带（跟现有 public_url 的风格一致）
+        if port in (443,):
+            return "https://%s%s" % (host, path)
+        return "https://%s:%d%s" % (host, port, path)
+
     def _set_cookie(self, tok):
         self._cookie_out = (("kmsid=%s; Path=/; Max-Age=%d; SameSite=Lax" % (tok, 30 * 86400))
                             if tok else "kmsid=; Path=/; Max-Age=0; SameSite=Lax")
@@ -3407,6 +3475,12 @@ class _WebHandler(BaseHTTPRequestHandler):
             parsed = urllib.parse.urlparse(self.path)
             qs = urllib.parse.parse_qs(parsed.query)
             path = parsed.path
+            # ★ HTTP → HTTPS 自动跳转。
+            #   为什么需要：frp 的 80 端口映射（HTTP）会把请求转到本机的 8790（明文服务），
+            #   而手机扫码、摄像头这些功能需要 HTTPS 才给权限；同时明文端口也不该承载登录。
+            #   所以只要是走 HTTP 进来的（不是本机回环直连、且不是内网 IP），就 302 到 HTTPS。
+            if self._should_upgrade_to_https():
+                return self._redirect(self._https_url_for())
             if path in ("/login", "/login.html"):
                 return self._send(LOGIN_HTML.encode("utf-8"), "text/html; charset=utf-8")
             if path == "/api/auth/state":
@@ -5711,6 +5785,19 @@ def purchase_pending_payload(days=90, cache_sec=120):
     return out
 
 
+def _ip_is_private(host):
+    """是不是内网/本机地址（用来决定「HTTP 要不要跳 HTTPS」）。"""
+    try:
+        s = str(host or "").strip().strip("[]")
+        if not s or s.lower() in ("localhost",):
+            return True
+        import ipaddress
+        ip = ipaddress.ip_address(s)
+        return bool(ip.is_private or ip.is_loopback or ip.is_link_local)
+    except Exception:
+        return False          # 不是 IP（是个域名）→ 不算内网
+
+
 def human_browser_err(text, action=""):
     """把浏览器/CDP 的原始报错翻译成人话。
 
@@ -7031,9 +7118,30 @@ class ScanApp:
         return {"ok": True}
 
     # ---------- 网页端：订单查询（订单号 / 快递单号 → 图文 + 退款状态） ----------
-    ORDER_IMG_HOSTS = ("ecombdimg.com", "ecombd.com", "pstatp.com", "ttcdn.com", "byteimg.com",
-                       "tbcdn.cn", "alicdn.com", "360buyimg.com", "yangkeduo.com", "pddpic.com",
-                       "kwaishop.com", "kuaishou.com", "douyinpic.com")
+    # ★ 订单图片允许的来源域名（白名单，防止被当成任意请求转发器）。
+    #   注意用 **元组** 写，别用逗号分隔的字符串 —— 字符串会被当成"单个超长域名"，
+    #   所有域名都匹配不上，图片就全挂（踩过这个坑）。
+    #   清单来源：实测各平台订单里的 picPath 域名（抖音/微店/淘宝/京东/拼多多/快手/微信小店）。
+    ORDER_IMG_HOSTS = (
+        # 抖音 / 字节系
+        "ecombdimg.com", "ecombd.com", "pstatp.com", "ttcdn.com", "byteimg.com",
+        "douyinpic.com", "ibyteimg.com", "snssdk.com",
+        # 淘宝 / 天猫 / 阿里系
+        "tbcdn.cn", "alicdn.com", "taobaocdn.com", "alibaba.com", "aliyuncs.com",
+        # 京东
+        "360buyimg.com", "jd.com", "3.cn",
+        # 拼多多
+        "yangkeduo.com", "pddpic.com", "pinimg.com",
+        # 快手
+        "kwaishop.com", "kuaishou.com", "kwimgs.com",
+        # 微信小店 / 腾讯系（★ 之前缺这些，导致微店订单看不到图）
+        "tc.qq.com", "qq.com", "weixin.qq.com", "wxapp.tc.qq.com",
+        "gtimg.com", "qpic.cn", "weixinbridge.com",
+        # 微店 / 有赞等
+        "wdcdn.com", "vip.com", "youzan.com", "yzcdn.cn",
+        # 其他常见
+        "sinaimg.cn", "zhimg.com", "alicdn.net",
+    )
     OD_STATUS_CN = {"WAIT_SEND_GOODS": "待发货", "WAIT_AUDIT": "待审核", "WAIT_EXPRESS_PRINT": "待打印快递单",
                     "FINISHED_AUDIT": "审核完成", "SELLER_SEND_GOODS": "已发货", "CLOSED": "已关闭",
                     "FINISHED": "交易成功", "TRADE_SUCCESS": "交易成功"}
@@ -7221,14 +7329,44 @@ class ScanApp:
         if parts.scheme != "https" or not any(host == d or host.endswith("." + d)
                                               for d in self.ORDER_IMG_HOSTS):
             return None, None
-        try:
-            req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0",
-                                                     "Referer": "https://www.douyin.com/"})
+        # ★ Referer 不要硬编码成抖音：不同平台的图片 CDN 归属不同，
+        #   发一个"外来"平台的 Referer 反而可能被对方拒（实测过 400）。
+        #   这里按图片域名给一个"自己平台"的 Referer，取不到的再退回不带 Referer 重试一次。
+        ref = "https://www.douyin.com/"
+        for d, r2 in (("tc.qq.com", "https://mp.weixin.qq.com/"),
+                      ("qpic.cn", "https://mp.weixin.qq.com/"),
+                      ("gtimg.com", "https://mp.weixin.qq.com/"),
+                      ("alicdn", "https://www.taobao.com/"),
+                      ("tbcdn", "https://www.taobao.com/"),
+                      ("360buyimg", "https://www.jd.com/"),
+                      ("jd.com", "https://www.jd.com/"),
+                      ("yangkeduo", "https://mobile.yangkeduo.com/"),
+                      ("pddpic", "https://mobile.yangkeduo.com/"),
+                      ("kuaishou", "https://www.kuaishou.com/"),
+                      ("kwimgs", "https://www.kuaishou.com/")):
+            if d in host:
+                ref = r2
+                break
+
+        def _fetch(with_ref):
+            hd = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                "Chrome/120.0.0.0 Safari/537.36",
+                  "Accept": "image/avif,image/webp,image/*,*/*;q=0.8"}
+            if with_ref:
+                hd["Referer"] = ref
+            req = urllib.request.Request(u, headers=hd)
             with urllib.request.urlopen(req, timeout=20) as r:
-                ctype = (r.headers.get("Content-Type") or "image/jpeg").split(";")[0]
-                data = r.read(4 * 1024 * 1024)
+                ct = (r.headers.get("Content-Type") or "image/jpeg").split(";")[0]
+                return ct, r.read(4 * 1024 * 1024)
+
+        try:
+            ctype, data = _fetch(True)
         except Exception:
-            return None, None
+            try:
+                ctype, data = _fetch(False)     # 带 Referer 被拒 → 不带再试
+            except Exception:
+                return None, None
         if len(data) < 100:
             return None, None
         return ctype, data
