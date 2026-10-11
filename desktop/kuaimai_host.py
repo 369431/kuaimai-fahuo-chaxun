@@ -92,6 +92,41 @@ def _make_transient_safe(root):
         pass
 
 
+def _watch_root_from_tk(root, keep_hidden=True):
+    """★ 在主线程的 Tk 事件循环里**持续强制隐藏根窗** —— 这是最可靠的一招。
+
+    为什么后台线程看门狗不够（实测踩到）：
+      · Tk 的窗口操作**必须在主线程**做，后台线程调 withdraw() 有时不生效（Tk 会忽略）；
+      · 后台线程只在 Host.start() 最后才启动，中途任何一步失败就没人管了。
+    为什么"拦截 deiconify/attributes"也不够：
+      · 真正把窗口弄出来的是 `wm_geometry` / `wm_minsize` / `wm_deiconify` 等
+        **另一批** wm_* 方法（ScanApp 初始化里就在调 geometry/minsize），
+        还有 Tk 内部自己的映射逻辑 —— 挨个拦是拦不完的。
+    所以改成：挂在 Tk 的 after 循环里，每秒检查一次，只要根窗处于 mapped 就立刻 withdraw。
+    这是在同一个事件循环里执行，**一定能把它按回去**，谁弄出来的都能压住。
+    """
+    if not keep_hidden:
+        return
+
+    def _tick():
+        try:
+            if root.winfo_exists() and int(root.winfo_ismapped()):
+                _L("★ Tk 主循环看门狗：根窗被映射了 → 立刻 withdraw 按回去")
+                root.withdraw()
+        except Exception:
+            pass
+        try:
+            root.after(1000, _tick)          # 每秒一次
+        except Exception:
+            pass
+
+    try:
+        root.after(300, _tick)               # 300ms 后开始，避免和初始化抢
+        _L("已挂上 Tk 主循环看门狗（每秒强制隐藏根窗）")
+    except Exception:
+        pass
+
+
 def _make_root_never_show(root):
     """★ 让这个 Tk 根窗**永远不可能显示出来**（单进程模式的根本保证）。
 
@@ -279,6 +314,15 @@ class Host(object):
             root.deiconify()
         else:
             root.withdraw()
+            # ★ 立刻挂上「主循环看门狗」——**趁早**。
+            #   以前放在 start() 最后，中途任何一步失败（或登录流程回退）就没人保护根窗了，
+            #   于是旧界面会露出来（用户反复反馈"更新后又出现旧版窗口"）。
+            #   现在建完根窗马上就挂，早点把口子堵上。
+            try:
+                _watch_root_from_tk(root, keep_hidden=True)
+                _L("根窗建好即挂看门狗：不显示旧 Tk 界面")
+            except Exception:
+                pass
         KS._RAISE_ROOT["root"] = root
         self.root = root
         try:
@@ -371,11 +415,18 @@ class Host(object):
         return app
 
     def _hide_root_forever(self):
-        """把根窗按回隐藏并**锁死**：之后谁也别想把它弄出来。
+        """把根窗按回隐藏并**锁死** —— 三层保险，谁弄出来都能压住。
 
-        · `_make_root_never_show` 把 deiconify/attributes/lift 全拦掉；
-        · 再看门狗每 10 秒用 Win32 查一次真实可见性（Tk 的 state 有时不准），
-          发现露出来就按回去并记日志，便于以后定位是谁干的。
+        为什么搞这么狠：用户的反馈是「每次更新后又出现旧版窗口」。
+        实测抓到过：根窗（Windows 窗口类 TkTopLevel）真的处于可见状态。
+        靠单一手段按不住，原因各不相同：
+          · Tk 的 withdraw() 在同一时刻能被别处再 deiconify 回去；
+          · 后台线程调 Tk 的 withdraw() **有时被 Tk 忽略**（Tk 不是线程安全的）；
+          · Tk 的根窗是主线程对象，后台线程不一定能操作它。
+        所以三层一起上：
+          ① Tk 主循环 after 看门狗（主线程操作，最符合 Tk 规矩）
+          ② Win32 ShowWindow(SW_HIDE) 后台看门狗（**不需要 Tk 配合**，绕开线程问题）
+          ③ 拦截 deiconify/attributes/lift（防止被显式调出来）
         """
         root = self.root
         try:
@@ -383,32 +434,40 @@ class Host(object):
         except Exception:
             pass
         try:
-            _make_root_never_show(root)      # ★ 锁死，不允许再显示
+            _make_root_never_show(root)      # ③ 拦截显式调用
+        except Exception:
+            pass
+        try:
+            _watch_root_from_tk(root, keep_hidden=not self._show_tk)   # ① 主循环看门狗
         except Exception:
             pass
 
+        # ② Win32 后台看门狗：拿到顶层 hwnd 后用 ShowWindow 强制隐藏。
+        #    这一步完全不碰 Tk API，所以在后台线程里是安全有效的。
         def _watch():
             import time as _t
+            import ctypes
+            u32 = ctypes.windll.user32
+            hwnd = None
             while True:
-                _t.sleep(10)
+                _t.sleep(3)
                 try:
-                    if not self._show_tk:
-                        _t_mod = None
+                    if self._show_tk:
+                        continue
+                    if hwnd is None:
                         try:
-                            _t_mod = self.root
+                            h = int(self.root.winfo_id())
+                            top = u32.GetAncestor(h, 2)     # GA_ROOT
+                            hwnd = int(top) if top else int(h)
+                            _L("Win32 看门狗已锁定根窗 hwnd=%d" % hwnd)
                         except Exception:
-                            _t_mod = None
-                        if _t_mod is None:
                             continue
-                        import ctypes
-                        hwnd = int(_t_mod.winfo_id())
-                        top = ctypes.windll.user32.GetAncestor(hwnd, 2)
-                        if ctypes.windll.user32.IsWindowVisible(top):
-                            _L("★ 看门狗：根窗又可见了 → 按回隐藏")
-                            try:
-                                self.root.withdraw()
-                            except Exception:
-                                pass
+                    try:
+                        if u32.IsWindowVisible(hwnd):
+                            _L("★ Win32 看门狗：根窗可见了 → ShowWindow(SW_HIDE) 隐藏")
+                            u32.ShowWindow(hwnd, 0)          # SW_HIDE
+                    except Exception:
+                        hwnd = None                          # 句柄失效就重新取
                 except Exception:
                     pass
 
