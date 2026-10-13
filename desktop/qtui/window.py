@@ -3401,12 +3401,15 @@ class AdminPanelDialog(QDialog):
         self.who = QComboBox()
         self.who.setMinimumWidth(160)
         row.addWidget(self.who)
-        for label, fn in (("踢下线", lambda: self.user_act("kick")),
-                          ("加入", lambda: self.user_act("add")),
-                          ("改密码", lambda: self.user_act("passwd")),
-                          ("删除", lambda: self.user_act("del")),
-                          ("保存权限", lambda: self.save_perms())):
-            b = U.GlowButton(label)
+        for label, fn, tip in (
+                ("新增子账号", self.add_account,
+                 "新建一个子账号（账号名 + 密码），建完在「权限」页勾权限"),
+                ("踢下线", lambda: self.user_act("kick"), "把选中的账号踢下线"),
+                ("改密码", lambda: self.user_act("passwd"), "给选中的账号改密码"),
+                ("删除", lambda: self.user_act("del"), "删除选中的账号"),
+                ("保存权限", lambda: self.save_perms(), "保存当前账号的权限勾选")):
+            b = U.GlowButton(label, primary=(label == "新增子账号"))
+            b.setToolTip(tip)
             b.clicked.connect(lambda *a, f=fn: f())
             row.addWidget(b)
         b_re = U.GlowButton("刷 新")
@@ -3437,6 +3440,7 @@ class AdminPanelDialog(QDialog):
             self.msg.setText("读取失败：%s" % str(d.get("error"))[:120])
             return
         host = d.get("host") or {}
+        self._me = host          # 当前登录账号（用来判断"我是不是主账号"）
         self.host.setText("本机：%s（%s / %s）　·　服务端口 %s　·　IP %s"
                           % (host.get("pc") or "-", host.get("name") or "-",
                              host.get("role") or "-", d.get("port") or "-",
@@ -3508,6 +3512,92 @@ class AdminPanelDialog(QDialog):
         except Exception:
             pass
         self.lbl_perm_info.setText("账号 %d 个　·　权限项 %d 个" % (len(devs), len(keys)))
+
+    def add_account(self):
+        """★ 新增子账号（电脑端）。
+
+        踩过的坑：以前这个功能挂在下面的「加入」按钮上，而那个按钮第一行就要求
+        「先选一个账号」—— 可下拉框里只有**已有**账号，新账号根本选不到，
+        于是永远提示「先选一个账号」，**电脑端等于没法加子账号**（用户反馈）。
+        新增账号必须自己弹框输入账号名，不能依赖"先选中"。
+        """
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, "新增子账号",
+                                        "账号名（例如 zhangsan、picker02）：")
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        # 账号名基本校验（后端还会再校验一次，这里先拦住明显不对的）
+        if len(name) < 2:
+            self.msg.setText("账号名至少 2 个字符")
+            return
+        if any(c in name for c in " \t/\\:;,*?\"'<>|"):
+            self.msg.setText("账号名不能含空格或 / \\ : ; , * ? \" ' < > | 等符号")
+            return
+        exist = []
+        try:
+            exist = [str(u.get("name") or "") for u in (self._perm_users or {}).values()]
+        except Exception:
+            pass
+        if name in exist:
+            self.msg.setText("账号「%s」已存在 —— 改名或用「改密码」" % name)
+            return
+        pw, ok2 = QInputDialog.getText(self, "新增子账号",
+                                       "给「%s」设密码（至少 4 位）：" % name,
+                                       QLineEdit.Password)
+        if not ok2 or not pw:
+            return
+        if len(str(pw)) < 4:
+            self.msg.setText("密码至少 4 位")
+            return
+        # 主账号可以选角色：管理员 / 子账号（后端也会校验只有主账号能建管理员）
+        # ★ 要判断的是「**我自己**是不是主账号」—— 别看成"选中的账号是不是主账号"，
+        #   那判断的是别人，跟"我能不能建管理员"没关系。
+        is_owner = False
+        try:
+            _myname = str((getattr(self, "_me", None) or {}).get("name") or "").strip()
+            if not _myname:
+                _myname = str(getattr(self.api, "name", "") or "").strip()
+            is_owner = bool((self._perm_users or {}).get(_myname, {}).get("owner"))
+        except Exception:
+            is_owner = False
+        role = "user"
+        try:
+            if is_owner:
+                role, ok3 = QInputDialog.getItem(
+                    self, "新增子账号", "角色：", ["子账号（默认，权限随后勾选）", "管理员"],
+                    0, False)
+                if not ok3:
+                    return
+                role = "admin" if "管理员" in role else "user"
+        except Exception:
+            role = "user"
+
+        self.msg.setText("正在新增 %s…" % name)
+
+        def work():
+            try:
+                r = self.api.users_action("add", name=name, pw=str(pw), role=role)
+            except Exception as e:
+                r = {"error": str(e)[:150]}
+            self._disp.post(lambda: self._add_done(name, r))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _add_done(self, name, r):
+        if isinstance(r, dict) and r.get("ok"):
+            self.msg.setText("已新增子账号「%s」✓ —— 到「权限」页勾选它能用的功能"
+                             % name)
+            self.load()
+            # 尽量把新账号选中，方便马上去勾权限
+            try:
+                i = self.who.findText(name)
+                if i >= 0:
+                    self.who.setCurrentIndex(i)
+            except Exception:
+                pass
+        else:
+            self.msg.setText("新增失败：%s" % str((r or {}).get("error") or "未知错误")[:140])
 
     def user_act(self, action):
         name = (self.who.currentText() or "").strip()
