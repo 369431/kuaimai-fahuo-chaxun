@@ -5519,15 +5519,43 @@ def _wave_printed_refresh(codes):
             except Exception:
                 _WAVE_PRINTED[code] = {"n": None, "total": 0, "t": time.time(),
                                        "reachable": False}
+        # ★ 顺手清掉已经不在列表里的旧波次，别让缓存无限长（也让界面不会拿到过期数据）
+        try:
+            keep = set(codes)
+            for k in list(_WAVE_PRINTED.keys()):
+                if k not in keep and (time.time()
+                                      - float((_WAVE_PRINTED.get(k) or {}).get("t") or 0)
+                                      ) > 3600:
+                    _WAVE_PRINTED.pop(k, None)
+        except Exception:
+            pass
 
     try:
-        if _WEB_STATE.get("wave_printed_thread") is not None:
-            return
-        t = threading.Thread(target=loop, daemon=True)
+        # ★★ 关键修复（血泪教训）：
+        #   以前这里是「线程对象存在就直接 return」，而**跑完从不清空** →
+        #   第一次抓完之后，后面每次调用都直接返回，**永远不会再抓**。
+        #   现象：实发订单数一直显示「…」——因为缓存里全是第一批波次，
+        #   新波次的 key 根本不存在（用户反馈「新版本又看不到实发数量」就是这个）。
+        #   现在改成「只在线程还活着时跳过」，跑完自动解除防重入。
+        _th = _WEB_STATE.get("wave_printed_thread")
+        if _th is not None and getattr(_th, "is_alive", lambda: False)():
+            return                              # 正在抓 → 不重复起线程
+
+        def _run():
+            try:
+                loop()
+            finally:
+                # 跑完一定解除，下一轮刷新才能再抓（以前漏了这一步）
+                _WEB_STATE["wave_printed_thread"] = None
+
+        t = threading.Thread(target=_run, daemon=True)
         _WEB_STATE["wave_printed_thread"] = t
         t.start()
     except Exception:
-        pass
+        try:
+            _WEB_STATE["wave_printed_thread"] = None
+        except Exception:
+            pass
 
 
 def ui_thread(fn):
