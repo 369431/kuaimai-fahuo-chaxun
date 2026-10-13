@@ -3485,13 +3485,17 @@ button:active{box-shadow:var(--neu-in-sm)}
 <div class="card">
   <div class="muted">状态 / 件数 / 订单数 <b>实时来自快麦 ERP</b>（每次打开/刷新都重新回读，近 24 小时）。
     「<b>生成账号</b>」是<b>本系统</b>里点「生成波次」的那个账号 —— ERP 那边只有同一个登录，
-    分不出是谁在本系统操作的，所以这一列取自本机记录（只存「波次号 → 账号」）。</div>
+    分不出是谁在本系统操作的，所以这一列取自本机记录（只存「波次号 → 账号」）。
+    「<b>实发/订单</b>」= 该波次<b>已打印的订单数 / 属于本波次的订单数</b>：
+    <b>…</b> = 还在读取（后台逐单回读打印状态，稍等或点「刷新」）；
+    <b>—</b> = 读了但读不到（自动化浏览器没就绪 / 波次已完成 ERP 清了关联）；
+    数字 = 正常，例如 <b>179 / 180</b>。</div>
 </div>
 <div class="card">
   <h2>最近 ERP 波次</h2>
   <div class="tw">
-  <table><thead><tr><th>波次号</th><th>状态</th><th>订单数</th><th>件数</th><th>生成账号</th><th>操作</th></tr></thead>
-  <tbody id="recentBody"><tr><td colspan="6" class="muted">载入中…</td></tr></tbody></table>
+  <table><thead><tr><th>波次号</th><th>状态</th><th>订单数</th><th>件数</th><th>实发/订单</th><th>生成账号</th><th>操作</th></tr></thead>
+  <tbody id="recentBody"><tr><td colspan="7" class="muted">载入中…</td></tr></tbody></table>
   </div>
 </div>
 <script>
@@ -3533,16 +3537,31 @@ function load(){
     .then(function(d){
       if(!d || d.error && !d.records){ $('upd').innerHTML = '<span class="badtext">' + esc((d&&d.error)||'读取失败') + '</span>'; return; }
       const recent = d.recent || [];
+      /* ★ 「实发/订单」= 该波次已打印订单数 / 属于本波次的订单数。
+         数据在返回的 d.printed 里（按波次号索引），**不在每条记录上**，
+         所以这里要自己取 —— 以前网页版压根没渲染这一列（用户反馈"看不到实发数据"）。
+         口径与电脑版完全一致：
+           还没抓到 → …（后台马上补）   抓了读不到 → —   有数据 → 179 / 180 */
+      const printed = d.printed || {};
+      function shipCell(code){
+        const rec = printed[String(code||'')];
+        if(!rec || typeof rec !== 'object') return '…';
+        const n = rec.n, total = rec.total;
+        if(n === null || n === undefined) return '—';
+        return (total ? (n + ' / ' + total) : String(n));
+      }
       if(recent.length){
         let h = '';
         recent.forEach(function(w){
           const who = w.who ? esc(w.who)
               : (w.known ? '<span class="muted">（旧记录无账号）</span>'
                          : '<span class="muted">（非本系统）</span>');
+          const sc = shipCell(w.wave_code);
           h += '<tr><td class="code">' + esc(w.wave_code || '-') + '</td>'
              + '<td>' + pill(w.status, w.status_cn) + '</td>'
              + '<td class="num">' + esc(w.tradesCount == null ? '-' : w.tradesCount) + '</td>'
              + '<td class="num">' + esc(w.itemCount == null ? '-' : w.itemCount) + '</td>'
+             + '<td class="num' + (sc === '…' ? ' muted' : '') + '">' + esc(sc) + '</td>'
              + '<td class="who">' + who + '</td>'
              + '<td class="act">' + (w.wave_id
                  ? ('<button class="fin" data-fw="' + esc(w.wave_id) + '" data-fwc="' + esc(w.wave_code || '') + '">一键拣完</button>')
@@ -3550,7 +3569,7 @@ function load(){
         });
         $('recentBody').innerHTML = h;
       } else {
-        $('recentBody').innerHTML = '<tr><td colspan="6" class="muted">近 24h 无波次</td></tr>';
+        $('recentBody').innerHTML = '<tr><td colspan="7" class="muted">近 24h 无波次</td></tr>';
       }
       $('upd').innerHTML = (d.live ? '实时已更新 ' : '实时回读失败：')
         + '<b>' + new Date().toLocaleTimeString() + '</b>'
