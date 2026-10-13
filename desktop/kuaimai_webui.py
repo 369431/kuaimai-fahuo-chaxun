@@ -1656,8 +1656,6 @@ function render(){
           if(cb){ cb.onclick = function(){ render(); }; }
         })
         .catch(function(e){ flash('✗ ' + code + '：' + e.message); render(); });
-        })
-        .catch(function(e){ flash('✗ ' + code + '：' + e.message); render(); });
     };
   });
 
