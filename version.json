@@ -1,10 +1,10 @@
 {
-  "version": "v2.28",
-  "notes": "**v2.28：彻底修「更新后又出现旧版窗口」**\n\n**这次抓到真凶了**\n· 用 Win32 枚举所有顶层窗口，实测抓到：\n    pid=32952  hwnd=2692536  窗口类=TkTopLevel  可见=True\n    标题=「快麦扫码查待发货 + 货架在架数」   ← 旧 Tk 界面真的处于可见状态\n· 也就是说之前几次没修干净：旧的 Tk 根窗确实会被重新显示出来。\n\n**为什么前几次按不住（三个原因，各修各的）**\n· Tk 的窗口操作**必须在主线程**做；后台线程调 withdraw() 有时被 Tk 直接忽略\n  → 之前那个后台看门狗就是因此失效的。\n· 真正把窗口弄出来的是 `wm_geometry` / `wm_minsize` 等**另一批** wm_* 方法\n  （ScanApp 初始化里就在调 geometry/minsize），只拦 deiconify/attributes 拦不完。\n· 看门狗原来挂在 start() 最后，中途任何一步失败就没人保护根窗了\n  （更新重启时正好容易走到这种路径）。\n\n**这一版的三层保险**\n① **Tk 主循环看门狗**：挂在 Tk 的 after 事件循环里，每秒检查，只要根窗处于 mapped\n   就立刻 withdraw（主线程操作，符合 Tk 规矩）。\n② **Win32 看门狗**：后台线程用 `ShowWindow(hwnd, SW_HIDE)` 强制隐藏\n   —— **完全不碰 Tk API**，绕开线程不安全的问题，这是最硬的一层。\n③ 拦截 deiconify / wm_deiconify / attributes / lift（防止被显式调出来）。\n另外：根窗一建好就挂防护（不再等到最后），把口子提前堵上。\n\n**实测（都通过）**\n· 修复前：可见的 Tk 窗口 1 个（标题=快麦扫码查待发货+货架在架数）\n· 修复后：可见的 Tk 窗口 **0 个**（根窗 标题=快麦扫码查询 v2.28，可见=False）\n· 重启后连续观察 120 秒：出现可见 Tk 窗口 **0 次**\n· 最小化/还原各 3 轮：旧界面出现 **0 次**\n· 8 个设置窗仍能正常弹出（锁死根窗不影响弹窗）\n",
+  "version": "v2.29",
+  "notes": "**v2.29：修「现货可发一直载入中，没法用」**\n\n**原因（非常隐蔽）**\n· 现货可发页的 JS 里多了**一个多余的括号/catch 块** → 整段脚本有语法错误 →\n  **整页 JS 一行都不执行** → 列表永远停在「正在载入…」。\n· 最坑的是：**页面不报任何错**，用户只看到一直转圈；\n  而 Python 语法检查也发现不了（页面是「Python 字符串里嵌 JS」）。\n· 注意：**后端一直是好的** —— /api/stock 实测 2 秒返回 7242 行数据，\n  纯前端的问题。\n\n**这一版修的**\n· 删掉多余的括号/catch 块，STOCK_HTML 的 JS 语法恢复正常。\n· 用**真实浏览器**做了端到端验证（真开页面读内容），确认不再是「正在载入…」：\n    修复前：#sum 文本 = 「正在载入…」（脚本没跑）\n    修复后：#sum 文本 = 「共 1482 个　可发合计 17941 件　加急 16924 件\n                       加急有货 658　可成波数据：ERP 实时刷新实时」\n    JS 异常 0 条 ✓\n\n**新增两个自检脚本（以后不会再犯这种错）**\n· `tools\\check_page_js.py`    —— 用 node 检查**所有页面**的 JS 语法，\n  有语法错就退出码 1（拦在发布前）。实测 9 个页面 9 段 JS 全部通过。\n· `tools\\check_pages_live.py` —— 用**真实浏览器**打开页面，\n  读关键元素 + 抓 JS 异常，验证「页面到底能不能用」。\n  实测：/stock、/wave、/order、/pick、/wave-records 全部 ✓ 正常\n  （按页面特性配判据：自动加载的必须出内容，要输入才出结果的只要求无报错+控件在）\n",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v2.28/kuaimai-scan-setup-v2.28.exe",
-  "sha256": "34f54a23ad3e061db5f7cc5eaa047c9ecd0448799bfa9e3c717ce77b25aadd51",
-  "size": 46416137,
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v2.29/kuaimai-scan-setup-v2.29.exe",
+  "sha256": "0af47bfc0f9d0370647c27538c34ccb9ef21fc3538ee04d8f44b8382367fc6c8",
+  "size": 46411152,
   "mandatory": false,
-  "published_at": "2026-10-11 22:47"
+  "published_at": "2026-10-13 16:33"
 }
