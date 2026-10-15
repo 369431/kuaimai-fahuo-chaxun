@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""km_https.py - 快麦扫码「手机网页版」的 HTTPS 入口（TLS 终止 + 透明转发 + 扫码增强）。
+"""km_https.py - km 发货查询系统「手机网页版」的 HTTPS 入口（TLS 终止 + 透明转发 + 扫码增强）。
 
 为什么需要：浏览器只在安全上下文（https:// 或 localhost）下提供 navigator.mediaDevices，
 所以 http://shsp.pw:8790/ 上的「摄像头扫码」必然失败。

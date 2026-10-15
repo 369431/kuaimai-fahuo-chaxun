@@ -281,7 +281,7 @@ def report_progress(reset=False, **fields):
     for p in _progress_paths():
         _write_json_atomic(p, snap)
 
-MAX_BATCH = 500                     # 快麦单次上限
+MAX_BATCH = 500                     # ERP 单次上限
 CODE_BATCH = 20                     # 每次取号调用最多带多少个 sids
 EXCLUDE_CODE_HEADS = ("1166",)      # 与 kuaimai_scan 保持一致
 EXCLUDE_NAME_KEYWORDS = ("买家秀", "圆虹包")
@@ -3072,7 +3072,7 @@ def ensure_browser(auto_start=True):
     if last:
         return "need_login", "打单浏览器未就绪：%s（已重试 3 次，可再点一次）" % last
     if "login" in href.lower() or not href:
-        return "need_login", "请在打单浏览器里登录快麦 ERP（只需一次，以后会记住）"
+        return "need_login", "请在打单浏览器里登录 ERP（只需一次，以后会记住）"
     _cache_put("browser_ok", True)          # 缓存命中用
     return "ok", "已登录"                  # 注意：必须返回字符串 'ok'（不要把 _cache_put 的返回值直接 return）
 

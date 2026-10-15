@@ -10,7 +10,7 @@ WEB_INDEX_HTML = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0b5394">
-<title>快麦扫码查询</title>
+<title>杨乾坤的发货查询系统</title>
 <style>
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body { margin:0; font-family:-apple-system,"Microsoft YaHei","PingFang SC",sans-serif; background:#f5f6f8; color:#222; }
@@ -435,7 +435,7 @@ PICK_HTML = r"""<!doctype html>
 <html lang="zh-CN"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>拣货 · 快麦发货查询</title>
+<title>拣货 · 杨乾坤的发货查询系统</title>
 <style>
   body { margin:0; font-family:system-ui,-apple-system,"Microsoft YaHei",sans-serif; background:#f5f6f8; padding:10px 10px 78px; }
   h1 { font-size:17px; margin:2px 0 8px; color:#0b5394; }
@@ -913,7 +913,7 @@ ORDER_HTML = r"""<!doctype html>
 <html lang="zh-CN"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>订单查询 · 快麦</title>
+<title>订单查询 · 杨乾坤的发货查询系统</title>
 <style>
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   :root { --blue:#007AFF; --green:#34C759; --red:#FF3B30; --ink:#1d1d1f; --sub:#6e6e73;
@@ -1087,7 +1087,7 @@ STOCKTAKE_HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-<title>库存盘点 · 快麦扫码</title>
+<title>库存盘点 · 杨乾坤的发货查询系统</title>
 <style>
   :root { --bg:#e0e5ec; --card:#e0e5ec; --sub:#6b7280; --line:rgba(60,60,67,.10); }
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
@@ -1224,7 +1224,7 @@ function bind(){
       if(v === null) return;
       const q = parseInt(v, 10);
       if(isNaN(q) || q < 0){ alert('数量要填 0 或正整数'); return; }
-      if(!confirm('确认改库存？\n\n' + code + '\n货位 ' + bin + '：' + cur + ' → ' + q + ' 件\n\n【真实修改快麦库存，不可撤销】')) return;
+      if(!confirm('确认改库存？\n\n' + code + '\n货位 ' + bin + '：' + cur + ' → ' + q + ' 件\n\n【真实修改 ERP 库存，不可撤销】')) return;
       flash('正在改库存…');
       post(code, bin, q).then(function(j){
         alert((j.ok ? '✓ 已改：' : '✗ 失败：') + (j.msg || ''));
@@ -1237,7 +1237,7 @@ function bind(){
     b.onclick = function(){
       const code = b.dataset.c, bin = b.dataset.b, cur = Number(b.dataset.n || 0);
       if(cur === 0){ alert('这个货位本来就是在架 0，不用盘'); return; }
-      if(!confirm('确认盘0？\n\n' + code + '\n货位 ' + bin + '：' + cur + ' → 0 件\n\n【真实修改快麦库存，不可撤销】')) return;
+      if(!confirm('确认盘0？\n\n' + code + '\n货位 ' + bin + '：' + cur + ' → 0 件\n\n【真实修改 ERP 库存，不可撤销】')) return;
       if(!confirm('再确认一次：真的要把 ' + code + ' @ ' + bin + ' 盘成 0 吗？')) return;
       flash('正在盘0…');
       post(code, bin, 0).then(function(j){
@@ -1260,7 +1260,7 @@ STOCK_HTML = r"""<!doctype html>
 <html lang="zh-CN"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>现货可发 · 快麦</title>
+<title>现货可发 · 杨乾坤的发货查询系统</title>
 <style>
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   :root { --blue:#007AFF; --green:#34C759; --red:#FF3B30; --ink:#1d1d1f; --sub:#6e6e73;
@@ -1618,7 +1618,7 @@ function render(){
       + '</div></div>';
   }).join('') + (vis.length > head.length
       ? ('<div class="muted">只显示前 ' + head.length + ' 条，其余 ' + (vis.length - head.length) + ' 条请用「导出 Excel」或加关键词。</div>') : '');
-   /* 「生成波次」：先**实时查快麦订单**（/api/wave/lookup，实时查 ERP，不是本地缓存），
+   /* 「生成波次」：先**实时查 ERP 订单**（/api/wave/lookup，实时查 ERP，不是本地缓存），
      再把 中通/申通 各自的可生成件数摆成按钮让用户点选；选完才真的成波。
      成波走与「生成波次」页完全同一套接口/校验：一单一件口径、货位库存预检、成波排队锁、波次号回读。 */
   /* 关掉已打开的成波面板，并把那一行的「生成波次」按钮恢复（防止快速点两行时按钮卡在“查询中…”） */
@@ -1859,7 +1859,7 @@ function render(){
       render();
     });
   }
-  /* 「改库存」：按货位改数量（调盘点接口，二次确认后真实修改快麦库存） */
+  /* 「改库存」：按货位改数量（调盘点接口，二次确认后真实修改 ERP 库存） */
   box.querySelectorAll('.sbtn.adj').forEach(function(b){
     b.onclick = function(){
       const code = b.dataset.c;
@@ -1882,7 +1882,7 @@ function render(){
       const qty = parseInt(v, 10);
       if(isNaN(qty) || qty < 0){ alert('数量要填 0 或正整数'); return; }
       if(!confirm('确认改库存？\n\n编码：' + code + '\n货位：' + bin + '\n' + oldTxt + ' → ' + qty
-                  + ' 件\n\n【这会真实修改快麦里的库存，不可撤销】')) return;
+                  + ' 件\n\n【这会真实修改 ERP 里的库存，不可撤销】')) return;
       flash('正在改库存…');
       fetch(withSid('/api/stock/adjust'), {method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({code: code, bin: bin, qty: qty, confirm: 1})})
@@ -1915,7 +1915,7 @@ function render(){
         if(found !== null) cur = found;
       }
       if(!confirm('确认盘0？\n\n编码：' + code + '\n货位：' + bin + '\n' + cur + ' 件 → 0 件\n\n'
-                  + '【这会真实修改快麦库存，不可撤销】')) return;
+                  + '【这会真实修改 ERP 库存，不可撤销】')) return;
       if(!confirm('再确认一次：真的要把 ' + code + ' @ ' + bin + ' 盘成 0 吗？')) return;
       flash('正在盘0…');
       fetch(withSid('/api/stock/adjust'), {method:'POST', headers:{'Content-Type':'application/json'},
@@ -1961,7 +1961,7 @@ PERMS_HTML = r"""<!doctype html>
 <html lang="zh-CN"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>权限管理 · 快麦扫码查询</title>
+<title>权限管理 · 杨乾坤的发货查询系统</title>
 <style>
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   :root { --blue:#007AFF; --green:#34C759; --red:#FF3B30; --ink:#1d1d1f; --sub:#6e6e73;
@@ -2202,7 +2202,7 @@ PRINTS_HTML = r"""<!doctype html>
 <html lang="zh-CN"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>打印记录 · 快麦</title>
+<title>打印记录 · 杨乾坤的发货查询系统</title>
 <style>
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   :root { --blue:#007AFF; --green:#34C759; --red:#FF3B30; --orange:#FF9500; --ink:#1d1d1f; --sub:#6e6e73;
@@ -2499,7 +2499,7 @@ WAVE_HTML = r"""<!doctype html>
 <html lang="zh-CN"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>生成波次 · 快麦</title>
+<title>生成波次 · 杨乾坤的发货查询系统</title>
 <style>
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   :root { --blue:#007AFF; --green:#34C759; --red:#FF3B30; --ink:#1d1d1f; --sub:#6e6e73;
@@ -2859,7 +2859,7 @@ function loadShelfForItems(){
     }).catch(function(){});
 }
 
-const WAVE_LIMIT = 500;   /* 快麦 ERP 单个波次的订单上限 */
+const WAVE_LIMIT = 500;   /* ERP 单个波次的订单上限 */
 /* 待成波清单「合计件数」：当前快递清单里所有 SKU 的数量相加（≈ 这一波要挑多少单/多少件） */
 function updateTotal(){
   const wt = $('wtot'); if(!wt) return;
@@ -3323,7 +3323,7 @@ function handleCreateResult(p, items){
          + '<span class="tag">订单数 ' + esc((p.sids || []).length) + '</span>';
       h += '</div>';
       h += '<h2 style="margin-top:12px">配货明细（每个 SKU 一行）</h2>' + skuLines(p)
-         + '<div class="muted" style="margin-top:6px">波次号实时回读快麦 ERP「波次管理」。</div>';
+         + '<div class="muted" style="margin-top:6px">波次号实时回读 ERP「波次管理」。</div>';
       const wid = p.wave_id || v.wave_id || p.wave_code;
       if(wid){
         h += '<div class="actions" style="margin-top:10px"><button id="fwFromCreate" class="ghost" data-wid="'
@@ -3457,7 +3457,7 @@ function finishRenderPreview(d){
   return h;
 }
 function finishCommit(wid){
-  if(!confirm('确认把波次 ' + wid + ' 标记为「拣选完成（等待验货）」？\n会写入快麦 ERP，不可撤销。')) return;
+  if(!confirm('确认把波次 ' + wid + ' 标记为「拣选完成（等待验货）」？\n会写入 ERP，不可撤销。')) return;
   $('fwOut').innerHTML = '<div class="card"><div class="muted">正在提交（手动拣选）…</div></div>';
   post('/api/wave/finish', {wave_id: wid, confirm: true}).then(function(d){
     let h = '<div class="card"><h2>一键拣完 · 结果</h2>';
@@ -3472,7 +3472,7 @@ function finishCommit(wid){
       h += '<div class="badtext">未成功：' + esc((d && d.error) || '未知失败') + '</div>';
       if(d && d.pick_hand) h += '<div class="muted" style="margin-top:6px">pick.hand：' + esc(JSON.stringify(d.pick_hand)) + '</div>';
     }
-    h += '<div class="muted" style="margin-top:8px">状态为实时回读快麦 ERP。</div></div>';
+    h += '<div class="muted" style="margin-top:8px">状态为实时回读 ERP。</div></div>';
     $('fwOut').innerHTML = h;
   }).catch(function(e){ $('fwOut').innerHTML = '<div class="card"><div class="badtext">提交失败：' + esc(e.message) + '</div></div>'; });
 }
@@ -3518,12 +3518,12 @@ setInterval(function(){ try{ refreshAllMaxQuiet(); }catch(e){} }, 60000);  /* �
 
 # ============================ 网页「波次记录」页（/wave-records） ============================
 # 数据来自 GET /api/wave/records：本地只存「我自己生成过哪些波次号」，
-# 每条的 状态 / 件数 / 订单数 一律实时回读快麦 ERP（erp.trade.waves.query），不读本机缓存。
+# 每条的 状态 / 件数 / 订单数 一律实时回读 ERP（erp.trade.waves.query），不读本机缓存。
 WAVE_RECORDS_HTML = r"""<!doctype html>
 <html lang="zh-CN"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>波次记录 · 快麦</title>
+<title>波次记录 · 杨乾坤的发货查询系统</title>
 <style>
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   :root { --blue:#007AFF; --green:#34C759; --red:#FF3B30; --orange:#FF9500; --ink:#1d1d1f; --sub:#6e6e73;
@@ -3595,7 +3595,7 @@ button:active{box-shadow:var(--neu-in-sm)}
   <a class="home" href="#" id="refresh">刷新</a>
   <a class="home" href="#" id="home">返回扫码</a></header>
 <div class="card">
-  <div class="muted">状态 / 件数 / 订单数 <b>实时来自快麦 ERP</b>（每次打开/刷新都重新回读，近 24 小时）。
+  <div class="muted">状态 / 件数 / 订单数 <b>实时来自 ERP</b>（每次打开/刷新都重新回读，近 24 小时）。
     「<b>生成账号</b>」是<b>本系统</b>里点「生成波次」的那个账号 —— ERP 那边只有同一个登录，
     分不出是谁在本系统操作的，所以这一列取自本机记录（只存「波次号 → 账号」）。
     「<b>实发/订单</b>」= 该波次<b>已打印的订单数 / 属于本波次的订单数</b>：
@@ -3714,7 +3714,7 @@ function fwPreview(wid, wcode){
       $('fwBox').innerHTML = h;
       $('fwCancel').onclick = function(){ const r = $('fwRow'); if(r) r.remove(); };
       $('fwGo').onclick = function(){
-        if(!confirm('确认把波次 ' + (wcode || wid) + ' 标记为「拣选完成（等待验货）」？\n会写入快麦 ERP，不可撤销。')) return;
+        if(!confirm('确认把波次 ' + (wcode || wid) + ' 标记为「拣选完成（等待验货）」？\n会写入 ERP，不可撤销。')) return;
         $('fwBox').innerHTML = '<span class="muted">正在提交（手动拣选）…</span>';
         fetch(bust(withSid('/api/wave/finish')), {method:'POST', cache:'no-store',
             headers:{'Content-Type':'application/json'}, body:JSON.stringify({wave_id:wid, confirm:true})})

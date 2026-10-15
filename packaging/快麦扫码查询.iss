@@ -14,7 +14,7 @@
   #define MyAppVersion "1.31"
 #endif
 
-#define MyAppName "快麦扫码查询"
+#define MyAppName "km 发货查询系统"
 #define MyAppExeName "快麦扫码查询.exe"
 #define MyAppPublisher "火火火服饰"
 #define MyAppId "{{7C4B1E92-3A55-4F0C-9D2E-2B7A5C8E1F30}"

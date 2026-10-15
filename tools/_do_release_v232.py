@@ -8,7 +8,7 @@ INSTALLER = os.path.join(REPO, "packaging", "out", "快麦扫码查询_安装版
 NOTES = (
     "**v2.32：修「实发订单数又看不到了（一直 …）」**\n"
     "\n"
-    "**原因（一个"永不清空"的标志位）**\n"
+    "**原因（一个「永不清空」的标志位）**\n"
     "· 实发订单数是**后台异步抓**的：点开波次记录时，程序去 ERP 逐个波次回读\n"
     "  每单的打印次数，抓到就缓存。为了防止重复起线程，代码里有个标志：\n"
     "      if _WEB_STATE.get(\"wave_printed_thread\") is not None:\n"

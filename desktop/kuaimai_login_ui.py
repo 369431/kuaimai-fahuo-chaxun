@@ -5,7 +5,7 @@ LOGIN_HTML = r"""<!doctype html>
 <html lang="zh-CN"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>登录 · 快麦查询</title>
+<title>登录 · 杨乾坤的发货查询系统</title>
 <style>
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   :root { --blue:#007AFF; --green:#34C759; --red:#FF3B30; --ink:#1d1d1f; --sub:#6e6e73;
@@ -125,7 +125,7 @@ async function boot(tries){
       return;
     }
     $('box').innerHTML = '<h1>连不上后台程序</h1>'
-      + '<div class="sub">查询服务（电脑上的「快麦扫码查询」）好像没在运行。</div>'
+      + '<div class="sub">查询服务（电脑上的「km 发货查询系统」）好像没在运行。</div>'
       + '<div class="small">请确认电脑上的程序已启动，然后点下面重试。</div>'
       + '<button id="again">重试</button>';
     $('again').onclick = () => boot(0);
@@ -164,12 +164,11 @@ function setupView(d){
 }
 function loginView(d){
   const r = remembered();
-  $('box').innerHTML = '<h1>登录</h1><div class="sub">快麦扫码查询 · 请用你的账号登录</div>'
+  $('box').innerHTML = '<h1>登录</h1>'
     + '<label>账号</label><input id="u" type="text" autocomplete="username" value="' + esc(r.name) + '">'
     + '<label>密码</label><input id="p" type="password" autocomplete="current-password" value="' + esc(r.pw) + '">'
     + '<div class="chk"><input id="rm" type="checkbox"' + (r.name ? ' checked' : '') + '><label for="rm" style="margin:0">记住密码</label></div>'
     + '<button id="go">登录</button><div class="msg" id="m"></div>'
-    + '<div class="small">同一账号同一时间只能在一台设备登录，新登录会把旧设备踢下线。</div>'
     + (d && d.local ? '<div class="small"><a href="#" id="lsetup">本机：设置 / 重置管理员账号</a></div>' : '');
   const go = async () => {
     const u = ($('u').value || '').trim(), p = $('p').value;

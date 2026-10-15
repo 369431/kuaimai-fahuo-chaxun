@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-快麦扫码查待发货 + 可售库存（增强版）
+发货查询系统（主客户端）—— 待发货 + 可售库存（增强版）
 ==================================================
 功能：
   1. 扫商家编码 → 显示【待发货件数 + 当前可售库存】一行对比
@@ -16,7 +16,7 @@
   商品的商家编码(sysOuterId)汇总成“编码 → 待发货件数”的本地索引并缓存。
   扫码时直接查缓存（秒查），可售库存用 stock.api.status.query 实时查询。
 
-接口依据：快麦开放平台 open.kuaimai.com（V2 网关 https://gw.superboss.cc/router）
+接口依据：ERP 开放平台（V2 网关 https://gw.superboss.cc/router）
 """
 import os
 import sys
@@ -214,7 +214,7 @@ def now_gmt8():
 
 
 def ci_key(code):
-    """编码归一化：快麦的商家编码不区分字母大小写，比较时统一转大写。"""
+    """编码归一化：商家编码不区分字母大小写，比较时统一转大写。"""
     return str(code or "").strip().upper()
 
 
@@ -4278,7 +4278,7 @@ class _WebHandler(BaseHTTPRequestHandler):
                 _WEB_STATE["erp_status"] = {"t": now, "v": info}
                 return self._json(info)
             if parsed.path == "/api/erp/status_api":
-                # 兜底口径：只看快麦开放平台接口能不能用（密钥/会话是否有效）
+                # 兜底口径：只看 ERP 开放平台接口能不能用（密钥/会话是否有效）
                 info = {"ok": True, "erp": False, "why": "未检测"}
             if parsed.path == "/api/whoami":
                 # ★ 自检接口：一眼看出"谁在服务、现在算不算登录"。
@@ -6186,7 +6186,7 @@ def discovery_payload():
     except Exception:
         pass
     return {"app": "kuaimai-fahuo-chaxun",
-            "name": ("快麦主客户端 · " + info["pc"]) if info.get("pc") else "快麦主客户端",
+            "name": ("km 主客户端 · " + info["pc"]) if info.get("pc") else "km 主客户端",
             "pc": info.get("pc") or "", "ip": (ips[0] if ips else ""),
             "ips": ips,
             "port": int(_WEB_STATE.get("port") or WEB_PORT),
@@ -6483,7 +6483,7 @@ class ScanKeyHook:
 
 
 # ============================ 批次查询（按打印批次号反查） ============================
-# 快麦开放平台没有「打印批次」接口，但订单操作日志（erp.trade.trace.list）里
+# ERP 开放平台没有「打印批次」接口，但订单操作日志（erp.trade.trace.list）里
 # 「打印快递单」动作的 content 自带：打印批次号 / 打印序号 / 第几次打印 / 快递单号。
 _B_RE_SEQ = re.compile(r"打印序号[：:]\s*(\d+)")
 _B_RE_TIMES = re.compile(r"第(\d+)次打印")
@@ -6974,7 +6974,7 @@ class ScanApp:
         self.remote = bool(kmclient and session is not None and session.is_remote)
         self.gated = {}                        # 权限键 → [(控件, 处理方式, 说明)]
         self._locked = False                   # 被踢下线后锁界面
-        self.root.title("快麦扫码查询 %s%s" % (APP_VER, "（子客户端）" if self.remote else ""))
+        self.root.title("杨乾坤的发货查询系统 %s%s" % (APP_VER, "（子客户端）" if self.remote else ""))
         self.root.geometry("1080x760")
         self.root.minsize(920, 620)
         try:
@@ -8902,7 +8902,7 @@ class ScanApp:
         self.status_text.set("%s只能在主客户端上操作" % what)
         try:
             messagebox.showinfo("只能在主客户端上操作",
-                                "%s只能在主客户端（跑着程序、持有数据和快麦凭据的那台电脑）上做。" % what)
+                                "%s只能在主客户端（跑着程序、持有数据和 ERP 凭据的那台电脑）上做。" % what)
         except Exception:
             pass
 
@@ -8995,7 +8995,7 @@ class ScanApp:
                          % (s.base if s else ""))
             else:
                 self.web_label.config(
-                    text="子客户端模式：数据实时来自主客户端 %s（本机不存快麦凭据、不对外服务）"
+                    text="子客户端模式：数据实时来自主客户端 %s（本机不存 ERP 凭据、不对外服务）"
                          % (s.base if s else ""))
         except Exception:
             pass
@@ -9273,7 +9273,7 @@ class ScanApp:
             self.progress.grid_remove()
         except Exception:
             pass
-        self.root.title("快麦扫码查待发货 + 货架在架数")
+        self.root.title("杨乾坤的发货查询系统")
 
     def _show_pull_progress(self, count, page, t0):
         self._pull_count, self._pull_page, self._pull_t0 = count, page, t0
@@ -9297,7 +9297,7 @@ class ScanApp:
             body = "已拉取 %d 单（已处理 %d 个分片，用时 %d:%02d，约 %.0f 单/秒）；总数统计中…" % (
                 count, page, int(el) // 60, int(el) % 60, rate)
         self.status_text.set("正在全量拉取待发货订单…" + body)
-        self.root.title("快麦扫码查询 — 拉取 %d / %s 单" % (count, self.total_est or "统计中"))
+        self.root.title("杨乾坤的发货查询系统 — 拉取 %d / %s 单" % (count, self.total_est or "统计中"))
         # 进度文件走统一入口（界面底部那条彩色进度条读它）
         _write_pull_progress("orders", count, page, self.total_est, t0)
 
@@ -9398,16 +9398,16 @@ class ScanApp:
                    if not API_CONF.get(k)]
         self._api_state_text("未配置（缺 %s）" % "、".join(missing))
         if not self.can("api.settings"):
-            self.status_text.set("快麦接口未配置：请让主客户端那台在「API 设置」里填好")
+            self.status_text.set("ERP 接口未配置：请让主客户端那台在「API 设置」里填好")
             return
-        self.status_text.set("快麦接口未配置（缺 %s）：点「API 设置」填写" % "、".join(missing))
+        self.status_text.set("ERP 接口未配置（缺 %s）：点「API 设置」填写" % "、".join(missing))
 
     def _api_state_text(self, state):
-        """状态栏右侧常驻显示接口状态：快麦接口：已配置 / 未配置（缺 xx）。"""
+        """状态栏右侧常驻显示接口状态：ERP 接口：已配置 / 未配置（缺 xx）。"""
         try:
             if getattr(self, "api_state_lbl", None) is not None:
                 self.api_state_lbl.config(
-                    text="快麦接口：%s" % state,
+                    text="ERP 接口：%s" % state,
                     fg=("#1B7F35" if state.startswith("已配置") else "#d70015"))
         except Exception:
             pass
@@ -9711,7 +9711,7 @@ class ScanApp:
                 return
             if not messagebox.askyesno("确认改库存",
                                        "编码：%s\n货位：%s\n%s → %d 件\n\n"
-                                       "【这会真实修改快麦里的库存，不可撤销】\n继续？"
+                                       "【这会真实修改 ERP 里的库存，不可撤销】\n继续？"
                                        % (code, bin_code,
                                           ("当前 %s 件" % cur) if cur is not None else "当前无记录", q),
                                        parent=win):
@@ -9934,7 +9934,7 @@ class ScanApp:
                 messagebox.showerror("改库存", "数量要填 0 或正整数", parent=win)
                 return
             if not messagebox.askyesno("确认改库存",
-                                       "%s @ %s\n%s → %d 件\n\n【真实修改快麦库存，不可撤销】继续？"
+                                       "%s @ %s\n%s → %d 件\n\n【真实修改 ERP 库存，不可撤销】继续？"
                                        % (code, bin_, shl, q), parent=win):
                 return
             out = self.stock_adjust(code, bin_, q, who=who_am_i())
@@ -9952,7 +9952,7 @@ class ScanApp:
                 messagebox.showinfo("盘0", "这个货位本来就是在架 0，不用盘", parent=win)
                 return
             if not messagebox.askyesno("确认盘0",
-                                       "%s @ %s\n%s 件 → 0 件\n\n【真实修改快麦库存，不可撤销】"
+                                       "%s @ %s\n%s 件 → 0 件\n\n【真实修改 ERP 库存，不可撤销】"
                                        % (code, bin_, shl), parent=win):
                 return
             if not messagebox.askyesno("再确认一次",
@@ -11774,7 +11774,7 @@ def main():
             try:
                 messagebox.showwarning(
                     "已经在运行",
-                    "快麦扫码查询（主客户端）已经在运行了。\n\n"
+                    "km 发货查询系统（主客户端）已经在运行了。\n\n"
                     "请直接用屏幕上已经开着的那个窗口；不要开两个，\n"
                     "两个窗口会抢同一个数据库，扫码会没反应。")
             except Exception:

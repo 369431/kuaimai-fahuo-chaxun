@@ -2,7 +2,7 @@
 """桌面端登录窗：一个窗口两种身份。
 
 · 本机（主客户端）：本机跑服务、有数据；没有管理员账号时就在这里做「首次设置」
-· 子客户端：连局域网里的主客户端，账号/权限/数据都在主端，本机不放快麦凭据
+· 子客户端：连局域网里的主客户端，账号/权限/数据都在主端，本机不放 ERP 凭据
 
 用法（在主程序里）：
     sess = ask_login(root, ensure_server)
@@ -40,7 +40,7 @@ class LoginWindow:
 
         win = tk.Toplevel(parent)
         self.win = win
-        win.title("快麦扫码查询 %s · 登录" % kmc.APP_VER)
+        win.title("杨乾坤的发货查询系统 %s · 登录" % kmc.APP_VER)
         win.geometry("580x720")
         win.minsize(560, 660)
         win.resizable(True, True)
@@ -59,7 +59,7 @@ class LoginWindow:
 
         head = tk.Frame(win, bg=BG)
         head.pack(fill=tk.X, padx=16, pady=(14, 4))
-        tk.Label(head, text="快麦发货查询 %s" % kmc.APP_VER, bg=BG, fg="#1d1d1f",
+        tk.Label(head, text="km 发货查询系统 %s" % kmc.APP_VER, bg=BG, fg="#1d1d1f",
                  font=("Microsoft YaHei", 17, "bold")).pack(anchor="w")
         self.sub = tk.Label(head, text="登录后才能看到数据：管理员账号 = 主客户端，其它账号 = 子客户端",
                             bg=BG, fg="#6e6e73", font=("Microsoft YaHei", 9))
@@ -158,7 +158,7 @@ class LoginWindow:
         self.host_pw2_lbl = ttk.Label(f, text="再输一次密码（首次设置）")
         self.host_pw2_ent = ttk.Entry(f, textvariable=self.host_pw2, show="*", font=("Microsoft YaHei", 11))
         self.host_hint = tk.Label(
-            f, text="本机就是主客户端：数据、快麦凭据都在这台电脑上。\n"
+            f, text="本机就是主客户端：数据、ERP 凭据都在这台电脑上。\n"
                     "第一次用请先创建管理员账号（也只能在这台电脑上创建）。",
             bg=BG, fg="#6e6e73", font=("Microsoft YaHei", 9), justify="left", wraplength=440)
         self.host_hint.pack(anchor="w", pady=(6, 0))

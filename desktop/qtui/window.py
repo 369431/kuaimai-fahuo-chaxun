@@ -144,7 +144,7 @@ class LoginDialog(QDialog):
     def __init__(self, api, parent=None):
         super().__init__(parent)
         self.api = api
-        self.setWindowTitle("登录 快麦发货查询")
+        self.setWindowTitle("登录 · 杨乾坤的发货查询系统")
         self.setFixedSize(400, 300)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(20, 18, 20, 16)
@@ -212,7 +212,7 @@ class LoginScreen(QDialog):
         self.base = base
         self.out_file = out_file
         self._disp = Dispatcher(self)          # 跨线程回主线程（跟主窗口同一套机制）
-        self.setWindowTitle("快麦发货查询")
+        self.setWindowTitle("杨乾坤的发货查询系统")
         self.setFixedSize(470, 430)
         self.setStyleSheet(U.qss(U.LIGHT if theme == "light" else U.DARK))
 
@@ -221,7 +221,7 @@ class LoginScreen(QDialog):
         lay.setSpacing(9)
 
         head = QHBoxLayout()
-        brand = QLabel("快麦发货查询")
+        brand = QLabel("km 发货查询系统")
         brand.setObjectName("brand")
         head.addWidget(brand)
         head.addStretch(1)
@@ -792,7 +792,7 @@ class Desktop(QWidget):
         self.setObjectName("root")
         self._bg = QColor(U.LIGHT["bg"])
         self.setAttribute(Qt.WA_OpaquePaintEvent, True)
-        self.setWindowTitle("快麦发货查询 · 电脑版 · 新版界面Qt%s" % _BUILD_TAG())
+        self.setWindowTitle("杨乾坤的发货查询系统 · 电脑版 · 新版界面Qt%s" % _BUILD_TAG())
         self.resize(1240, 820)
         self.setMinimumSize(940, 600)
         self._build()
@@ -882,7 +882,7 @@ class Desktop(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        self.tb = U.MacTitleBar(self, "快麦发货查询", self.api.ver or "电脑版",
+        self.tb = U.MacTitleBar(self, "km 发货查询系统", self.api.ver or "电脑版",
                                 on_theme=self.toggle_theme)
         self.tb.title.setText("电脑版 · 本机服务（同一进程）")
         # 二级菜单：数据 / 设置 / 系统
@@ -959,7 +959,7 @@ class Desktop(QWidget):
         for key, tip in (("erp", "ERP 登录状态（看自动化浏览器那个会话）。"
                                  "点「登录 ERP」打开浏览器登录后，这里会变成已登录"),
                          ("phone", "外网访问：域名 / 9443 / frpc 隧道 是否都正常"),
-                         ("api", "快麦开放平台参数是否配好（API 设置里填）")):
+                         ("api", "ERP 开放平台参数是否配好（API 设置里填）")):
             c = ClickLabel("● —")
             c.setObjectName("hint")
             c.setToolTip(tip)
@@ -1620,7 +1620,7 @@ class Desktop(QWidget):
         self._show_top(d)
 
     def do_about(self):
-        self._say("关于", "快麦发货查询 · 电脑版\n\n"
+        self._say("关于", "km 发货查询系统 · 电脑版\n\n"
                           "界面：Qt（PySide6）+ mac 风格标题栏\n"
                           "数据：本机主程序 %s\n"
                           "登录账号：%s（%s）\n"
@@ -1684,7 +1684,7 @@ class Desktop(QWidget):
             self._say("导出失败", err, "error")
 
     def _poll_chips(self):
-        """刷新状态条：ERP 登录 / 快麦接口 / 外网访问（三条都是真检测）。"""
+        """刷新状态条：ERP 登录 / ERP 接口 / 外网访问（三条都是真检测）。"""
         def work():
             try:
                 c = self.api.api_conf() or {}
@@ -1709,10 +1709,10 @@ class Desktop(QWidget):
         """状态条三条 —— 只显示最影响使用的真实状态：
 
           ① ERP：用「波次管理」只读接口探活 ERP 会话（不是程序管理员账号！）
-          ② 快麦接口：开放平台 appKey/sessionId 是否已配置
+          ② ERP 接口：开放平台 appKey/sessionId 是否已配置
           ③ 外网访问：9443 是否在听 + frpc 隧道是否在跑 + 域名是否已填
         """
-        # ① ERP（★ 用快麦接口探活为主，浏览器为兜底 —— 以前只看 9222，浏览器拉起来了
+        # ① ERP（★ 用 ERP 接口探活为主，浏览器为兜底 —— 以前只看 9222，浏览器拉起来了
         #      但端口连不上时会误报"未登录"，用户实测反馈过）
         try:
             e = erp if isinstance(erp, dict) else {}
@@ -1724,13 +1724,13 @@ class Desktop(QWidget):
                 self._set_chip("erp", "ERP：" + str(e.get("why") or "未登录")[:28], "#c62828")
         except Exception:
             pass
-        # ② 快麦开放平台接口
+        # ② ERP 开放平台接口
         try:
             conf = ((c or {}).get("conf") or {}) if isinstance(c, dict) else {}
             ok = bool(str(conf.get("appKey") or "").strip()
                       and str(conf.get("sessionId") or "").strip())
             self._set_chip("api",
-                           "快麦接口已配置 ✓" if ok else "快麦接口未配置（去「API 设置」）",
+                           "ERP 接口已配置 ✓" if ok else "ERP 接口未配置（去「API 设置」）",
                            "#1B7F35" if ok else "#c62828")
         except Exception:
             pass
@@ -2804,7 +2804,7 @@ class StockDialog(QDialog):
                 ("标记已发", lambda: self.mark(True), "把选中的编码标记为「可发」（可以打了）"),
                 ("撤回", lambda: self.mark(False), "撤回选中编码的「可发」标记"),
                 ("清空已发", self.clear_sent, "清掉全部「可发」标记"),
-                ("改库存", self.adjust, "按货位改库存（会真实改快麦，需二次确认）"),
+                ("改库存", self.adjust, "按货位改库存（会真实改 ERP，需二次确认）"),
                 ("操作日志", lambda: self.open_log(), "看改库存的操作日志")):
             b = U.GlowButton(label)
             b.setToolTip(tip)
@@ -2963,7 +2963,7 @@ class StockDialog(QDialog):
             return
         if QMessageBox.question(
                 self, "确认改库存",
-                "编码：%s\n货位：%s\n%s → %d 件\n\n【这会真实修改快麦里的库存，不可撤销】\n继续？"
+                "编码：%s\n货位：%s\n%s → %d 件\n\n【这会真实修改 ERP 里的库存，不可撤销】\n继续？"
                 % (code, bin_code, ("当前 %s 件" % cur) if cur is not None else "当前无记录", q)
         ) != QMessageBox.Yes:
             return
@@ -4247,7 +4247,7 @@ class ApiSettingsDialog(QDialog):
         btns = QHBoxLayout()
         # ★ 「测试连接」和「恢复默认」：以前只有旧版窗口里有，现在搬到电脑版
         b_t = U.GlowButton("测试连接")
-        b_t.setToolTip("拿当前配置真调一次快麦开放平台")
+        b_t.setToolTip("拿当前配置真调一次 ERP 开放平台")
         b_t.clicked.connect(self.do_test)
         btns.addWidget(b_t)
         b_d = U.GlowButton("恢复默认")
@@ -4299,7 +4299,7 @@ class ApiSettingsDialog(QDialog):
         self.msg.setText("已填入内置默认值（还没保存）—— 点「保存并应用」生效")
 
     def do_test(self):
-        """测试连接：让主程序真调一次快麦开放平台，把结果告诉用户。"""
+        """测试连接：让主程序真调一次 ERP 开放平台，把结果告诉用户。"""
         self.msg.setText("正在测试连接…")
 
         def work():

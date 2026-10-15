@@ -127,7 +127,7 @@ DEFAULT_PAGE_SIZE = 600               # 与服务端 queryWaveTradeByCondition �
 
 
 def _ci(code):
-    """编码归一化：快麦不区分字母大小写，比较统一转大写。"""
+    """编码归一化：商家编码不区分字母大小写，比较统一转大写。"""
     return str(code or "").strip().upper()
 
 
@@ -466,7 +466,7 @@ def _priority_sids(sids, chunk=1000):
 
     ★★ 必须**串行**发！（实测教训，别再改成并发）
       试过线程池并发这批请求：串行 2211 条 = 15.4 秒；并发 = 167 秒且只拿回 1211 条。
-      快麦后端对同一账号的并发会互相排队/限流，并发不但更慢还会丢数据。
+      ERP 后端对同一账号的并发会互相排队/限流，并发不但更慢还会丢数据。
     """
     import json as _json
     import urllib.parse as _up
