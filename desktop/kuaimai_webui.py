@@ -1311,6 +1311,32 @@ STOCK_HTML = r"""<!doctype html>
   .sbtn.undo { background:#fdecec; color:#c62828; }
   .sbtn.adj { background:#fff4e5; color:#b26a00; }
   .sbtn.zero { background:#fde8e8; color:#b00020; }
+  /* 现货可发 · 成波面板：手机上好点、好输入（旧版把输入框塞进窄按钮列，根本没法用） */
+  .wqpanel { margin:4px 0 10px; padding:12px; border-radius:12px;
+             background:rgba(255,255,255,.55); border:1px solid var(--line); }
+  .wqtitle { font-size:13px; color:var(--sub); margin-bottom:6px; word-break:break-all; }
+  .wqrow { padding:9px 0; border-top:1px dashed rgba(60,60,67,.14); }
+  .wqrow:first-of-type { border-top:0; }
+  .wqmeta { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:7px; }
+  .wqcar { font-size:16px; font-weight:800; }
+  .wqmax { font-size:12.5px; color:var(--sub); }
+  .wqall { margin-left:6px; padding:2px 8px; font-size:12px; border-radius:7px;
+           background:rgba(0,122,255,.12); color:var(--blue); font-weight:700; box-shadow:none; }
+  .wqctl { display:grid; grid-template-columns:minmax(0,1fr) auto auto; align-items:center; gap:8px; }
+  .wqctl .qin { width:100%; min-width:0; padding:11px 10px; font-size:19px;
+                font-weight:800; text-align:center; border-radius:10px; }
+  .wqctl .qin::placeholder { font-size:13px; font-weight:400; color:#9a9aa0; }
+  .wqunit { flex:0 0 auto; font-size:13px; color:var(--sub); }
+  .wqctl .wave-go { flex:0 0 auto; min-width:118px; padding:11px 12px; font-size:15px;
+                    border-radius:10px; background:var(--blue); color:#fff; }
+  .wqctl .wave-go[disabled] { opacity:.45; }
+  .wqfoot { display:flex; gap:8px; margin-top:10px; }
+  .wqfoot .sbtn { flex:1; padding:11px; border-radius:10px; font-size:14px; }
+  .wqfoot .wave-go2 { background:var(--green); color:#fff; }
+  @media (max-width:380px) {
+    .wqctl { grid-template-columns:minmax(0,1fr) auto; }
+    .wqctl .wave-go { grid-column:1 / -1; min-width:0; }
+  }
   .chk { font-size:13px; display:flex; align-items:center; gap:5px; flex:1 1 100%; color:var(--sub); }
   .row.sent { opacity:.55; }
   .code.ug { color:#FF3B30; }
@@ -1320,6 +1346,8 @@ STOCK_HTML = r"""<!doctype html>
     .card { background:#262b36; border-color:rgba(255,255,255,.08); }
     .muted, .num, .sub, .legend { color:#a1a1a6; }
     .num b { color:#f2f2f7; }
+    .wqpanel { background:rgba(255,255,255,.06); border-color:rgba(255,255,255,.10); }
+    .wqtitle, .wqmax { color:#a1a1a6; }
     .bar input, .ctl select { background:rgba(118,118,128,.24); border-color:rgba(255,255,255,.12); color:#f2f2f7; }
   }
 </style>
@@ -1593,6 +1621,20 @@ function render(){
    /* 「生成波次」：先**实时查快麦订单**（/api/wave/lookup，实时查 ERP，不是本地缓存），
      再把 中通/申通 各自的可生成件数摆成按钮让用户点选；选完才真的成波。
      成波走与「生成波次」页完全同一套接口/校验：一单一件口径、货位库存预检、成波排队锁、波次号回读。 */
+  /* 关掉已打开的成波面板，并把那一行的「生成波次」按钮恢复（防止快速点两行时按钮卡在“查询中…”） */
+  function closeWqPanels(){
+    document.querySelectorAll('.wqpanel').forEach(function(p){
+      const row = p.previousElementSibling;
+      p.remove();
+      if(row){
+        const bs = row.querySelector('.btns');
+        if(bs){ bs.style.display = ''; }
+        const wb = row.querySelector('.sbtn.wave');
+        if(wb){ wb.disabled = false; wb.textContent = '生成波次'; }
+      }
+    });
+    document.querySelectorAll('.btns').forEach(function(x){ x.style.display = ''; });
+  }
   box.querySelectorAll('.sbtn.wave').forEach(function(b){
     b.onclick = function(){
       const code = b.dataset.w;
@@ -1601,7 +1643,15 @@ function render(){
       /* ★ 不再因为「本地可发 = 0」就直接拦下！
          以前这里 if(f<=0){...return;} —— 本地快照为 0 时压根不去问 ERP，
          结果 ERP 明明有可成波订单也点不出来。成波一律以 ERP 实时为准。 */
-      const cell = b.parentNode;
+      const btns = b.parentNode;
+      const rowEl = (b.closest && b.closest('.row')) || btns.parentNode;
+      /* 一次只开一个面板；旧面板先收掉，并把那一行的按钮恢复 */
+      closeWqPanels();
+      const panel = document.createElement('div');
+      panel.className = 'wqpanel';
+      panel.innerHTML = '<div class="wqtitle">正在实时查询 ERP…</div>';
+      rowEl.insertAdjacentElement('afterend', panel);
+      btns.style.display = 'none';
       b.disabled = true; b.textContent = '查询中…';
       fetch(withSid('/api/wave/lookup?code=' + encodeURIComponent(code)), {cache:'no-store'})
         .then(function(r){ return r.json(); })
@@ -1628,48 +1678,104 @@ function render(){
             render();
             return;
           }
-          let h = '';
+          let h = '<div class="wqtitle">' + esc(code) + ' · ERP 实时可成波</div>';
           keys.forEach(function(k){
             const n = parseInt(per[k], 10) || 0;
-            /* ★ 上限只用 ERP 实时值（该快递可生成数）。本地行数字不参与，避免混用。 */
-            const q = n;
-            h += '<input class="qin" data-k="' + esc(k) + '" type="number" min="1" max="' + (n > 0 ? q : 1)
-               + '" value="' + (n > 0 ? q : 1) + '" style="width:56px;margin-left:6px" title="要生成多少件（ERP 实时最多 '
-               + q + ' 件）">'
-               + '<button class="sbtn wave-go" data-k="' + esc(k) + '" data-q="' + (n > 0 ? q : 0) + '"'
-               + (n > 0 ? '' : ' disabled') + '>' + esc(k) + ' ' + (n > 0 ? (q + ' 件') : '0') + '</button>';
+            /* ★ 上限只用 ERP 实时值（该快递可生成数）。本地行数字不参与，避免混用。
+               ★ 输入框默认留空：用户填多少就生成多少（不再默认塞满 408 件误导人）。 */
+            h += '<div class="wqrow" data-k="' + esc(k) + '">'
+               +   '<div class="wqmeta"><span class="wqcar">' + esc(k) + '</span>'
+               +   '<span class="wqmax">最多 ' + n + ' 件'
+               +   (n > 0 ? '<button class="wqall" data-k="' + esc(k) + '">全部</button>' : '')
+               +   '</span></div>'
+               +   '<div class="wqctl">'
+               +     '<input class="qin" data-k="' + esc(k) + '" type="number" inputmode="numeric"'
+               +     ' pattern="[0-9]*" min="1" max="' + (n > 0 ? n : 1) + '" placeholder="填件数"'
+               +     (n > 0 ? '' : ' disabled') + '>'
+               +     '<span class="wqunit">件</span>'
+               +     '<button class="sbtn wave-go" data-k="' + esc(k) + '" data-q="' + n + '"'
+               +     (n > 0 ? '' : ' disabled') + '>生成 0 件</button>'
+               +   '</div></div>';
           });
           const _pos = keys.filter(function(k){ return (parseInt(per[k], 10) || 0) > 0; });
-          if(_pos.length > 1){
-            h += '<button class="sbtn wave-go2">两个都生成（' + _pos.join(' + ') + '）</button>';
-          }
-          h += '<button class="sbtn wave-cancel">取消</button>';
-          cell.innerHTML = h;
+          h += '<div class="wqfoot">'
+             + (_pos.length > 1 ? '<button class="sbtn wave-go2">两个都生成</button>' : '')
+             + '<button class="sbtn wave-cancel">取消</button></div>';
+          panel.innerHTML = h;
           if(_staleHint){ flash(code + '：' + _staleHint); }
-          cell.querySelectorAll('.sbtn.wave-go').forEach(function(g){
-            g.onclick = function(){ waveGo(g, code, _liveTot); };
+
+          function wqSync(){
+            const parts = [];
+            panel.querySelectorAll('.wqrow').forEach(function(wr){
+              const k = wr.getAttribute('data-k');
+              const inp = wr.querySelector('input.qin');
+              const go = wr.querySelector('.wave-go');
+              const mx = parseInt((go && go.dataset.q) || '0', 10) || 0;
+              let v = parseInt(inp && inp.value, 10);
+              if(isNaN(v) || v < 0){ v = 0; }
+              if(mx > 0 && v > mx){ v = mx; inp.value = mx; }
+              if(go){
+                go.textContent = '生成 ' + v + ' 件';
+                go.disabled = !(v > 0);
+              }
+              if(v > 0){ parts.push(k + ' ' + v); }
+            });
+            const b2 = panel.querySelector('.wave-go2');
+            if(b2){
+              b2.disabled = !parts.length;
+              b2.textContent = '两个都生成（' + parts.join(' + ') + '）';
+            }
+          }
+          panel.querySelectorAll('input.qin').forEach(function(inp){
+            inp.addEventListener('input', wqSync);
+            inp.addEventListener('keydown', function(e){
+              if(e.key === 'Enter'){
+                e.preventDefault();
+                const go = inp.closest('.wqrow') ? inp.closest('.wqrow').querySelector('.wave-go') : null;
+                if(go && !go.disabled){ go.click(); }
+              }
+            });
           });
-          cell.querySelectorAll('.sbtn.wave-go2').forEach(function(g){
-            g.onclick = function(){ waveGoBoth(cell, code, _liveTot, per, keys); };
+          panel.querySelectorAll('.wqall').forEach(function(q){
+            q.onclick = function(){
+              const wr = q.closest('.wqrow');
+              const inp = wr ? wr.querySelector('input.qin') : null;
+              if(inp){ inp.value = inp.getAttribute('max') || 1; wqSync(); inp.focus(); }
+            };
           });
-          const cb = cell.querySelector('.sbtn.wave-cancel');
-          if(cb){ cb.onclick = function(){ render(); }; }
+          wqSync();
+          panel.querySelectorAll('.sbtn.wave-go').forEach(function(g){
+            g.onclick = function(){ waveGo(g, code, panel); };
+          });
+          panel.querySelectorAll('.sbtn.wave-go2').forEach(function(g){
+            g.onclick = function(){ waveGoBoth(panel, code); };
+          });
+          const cb = panel.querySelector('.sbtn.wave-cancel');
+          if(cb){ cb.onclick = function(){ panel.remove(); btns.style.display = ''; b.disabled = false; b.textContent = '生成波次'; }; }
         })
         .catch(function(e){ flash('✗ ' + code + '：' + e.message); render(); });
     };
   });
 
-  /* 选好快递后：真正成波（实时查到的订单；件数 = min(可发, 该快递可生成)） */
-  function waveGo(g, code, f){
+  /* 选好快递后：按输入框里的件数成波（填多少生成多少；超过 ERP 上限会明确提示并夹到上限） */
+  function waveGo(g, code, panel){
     const carrier = g.dataset.k;
     const _maxQ = parseInt(g.dataset.q, 10) || 0;
-    let qty = _maxQ;
-    const _inp = g.parentNode ? g.parentNode.querySelector('input.qin[data-k="' + (g.dataset.k || '') + '"]') : null;
-    if(_inp){ const _v = parseInt(_inp.value, 10) || 0; if(_v > 0) qty = _v; }
-    if(_maxQ > 0 && qty > _maxQ) qty = _maxQ;
-    if(qty <= 0){ flash(code + '：' + carrier + ' 没有可成波订单'); return; }
-    const cell = g.parentNode;
-    cell.innerHTML = '<span class="muted">生成中…（' + esc(carrier) + ' ' + qty + ' 件）</span>';
+    const wr = g.closest ? g.closest('.wqrow') : null;
+    const _inp = wr ? wr.querySelector('input.qin') : null;
+    let qty = parseInt(_inp && _inp.value, 10);
+    if(isNaN(qty) || qty <= 0){
+      flash(code + '：请先填要生成多少件');
+      if(_inp){ _inp.focus(); }
+      return;
+    }
+    if(_maxQ > 0 && qty > _maxQ){
+      qty = _maxQ;
+      if(_inp){ _inp.value = _maxQ; }
+      flash(code + '：' + carrier + ' 最多 ' + _maxQ + ' 件，已按 ' + _maxQ + ' 件生成');
+    }
+    if(!confirm('用「' + carrier + '」生成 1 个波次，共 ' + qty + ' 件？')) return;
+    if(panel){ panel.innerHTML = '<div class="wqtitle">生成中…（' + esc(carrier) + ' ' + qty + ' 件）</div>'; }
     fetch(withSid('/api/wave/create'), {method:'POST', cache:'no-store',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({items:[{code:code, qty:qty}], carrier:carrier, confirm:true})})
@@ -1694,18 +1800,24 @@ function render(){
       })
       .catch(function(e){ flash('✗ ' + code + '：' + e.message); render(); });
   }
-  /* 一次把两个快递都成波：中通一个波次 + 申通一个波次（顺序执行，避免并发冲突） */
-  function waveGoBoth(cell, code, f, per, keys){
-    const todo = keys.filter(function(k){ return (parseInt(per[k], 10) || 0) > 0; })
-                     .map(function(k){
-                       const _max = Math.min(f, parseInt(per[k], 10) || 0);
-                       const _inp = cell.querySelector('input.qin[data-k="' + k + '"]');
-                       let _q = _inp ? (parseInt(_inp.value, 10) || 0) : _max;
-                       if(_q <= 0 || _q > _max) _q = _max;
-                       return {carrier: k, qty: _q};
-                     });
-    if(!todo.length){ flash(code + '：没有可成波订单'); return; }
-    cell.innerHTML = '<span class="muted">生成中…（' + todo.map(function(t){ return esc(t.carrier); }).join(' + ') + '）</span>';
+  /* 一次把两个快递都成波：按两个输入框里的件数，各建一个波次（顺序执行，避免并发冲突） */
+  function waveGoBoth(panel, code){
+    const todo = [];
+    panel.querySelectorAll('.wqrow').forEach(function(wr){
+      const k = wr.getAttribute('data-k');
+      const inp = wr.querySelector('input.qin');
+      const go = wr.querySelector('.wave-go');
+      const mx = parseInt((go && go.dataset.q) || '0', 10) || 0;
+      let q = parseInt(inp && inp.value, 10);
+      if(isNaN(q) || q <= 0 || mx <= 0){ return; }
+      if(q > mx){ q = mx; }
+      todo.push({carrier: k, qty: q});
+    });
+    if(!todo.length){ flash(code + '：请先填要生成多少件'); return; }
+    if(!confirm('按填写的件数生成 ' + todo.length + ' 个波次？\n'
+                + todo.map(function(t){ return t.carrier + ' ' + t.qty + ' 件'; }).join('\n'))) return;
+    panel.innerHTML = '<div class="wqtitle">生成中…（'
+      + todo.map(function(t){ return esc(t.carrier) + ' ' + t.qty + ' 件'; }).join(' + ') + '）</div>';
     const out = [];
     let chain = Promise.resolve();
     todo.forEach(function(t){
