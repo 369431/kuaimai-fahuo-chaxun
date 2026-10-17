@@ -3051,10 +3051,20 @@ class _WebHandler(BaseHTTPRequestHandler):
         key = (qs.get("k") or [""])[0] if qs else ""
         required = (getattr(self.app, "web_key", "") or "") if getattr(self.app, "require_key", True) else ""
         if required and key == required:
+            if auth:                       # 审计：老口令也算一次明确的操作人
+                try:
+                    auth.set_actor("口令登录", self._peer_ip())
+                except Exception:
+                    pass
             return {"name": "口令登录", "role": "admin"}
         if auth:
             u = auth.check(self._token(qs))
             if u:
+                # ★ 记下「这次请求是谁在操作」——账号审计日志要用（只追加，不改行为）
+                try:
+                    auth.set_actor(u.get("name"), self._peer_ip())
+                except Exception:
+                    pass
                 return u
         return None
 
@@ -4513,9 +4523,35 @@ class _WebHandler(BaseHTTPRequestHandler):
                     return self._json({"error": "已经设置过管理员了，请直接登录"}, 403)
                 name = str(body.get("name") or "").strip()
                 us = auth.users()
-                if name in us:
-                    if (us[name].get("role") or "user") != "admin":
+                try:
+                    auth.set_actor("(本机首次设置)", self._peer_ip())
+                except Exception:
+                    pass
+                # ★ 已经有账号时，这里**绝不重建、绝不覆盖**（v1.84）。
+                #   2026-10 子账号"无声消失"最可能的过程就是：登录失败 → 用户反复点
+                #   「首次设置」→ 每次都重写账号文件。现在只放行两种情况：
+                #     ① 还没有管理员 → 补建一个管理员（不动别人）；
+                #     ② 改**已有管理员**的口令 → 必须给出原密码（相当于本机改密码）；
+                #        老密码真忘了的话，前端会显式带 force=true 再走一次（带审计留痕）。
+                if us and not auth.need_setup():
+                    u = us.get(name)
+                    if not isinstance(u, dict):
+                        auth.audit("setup_reject", name, False, "已设置过管理员，拒绝新建/覆盖")
+                        return self._json({"error": "这台电脑已经有管理员账号了（%s），请直接登录。"
+                                                    "要新建账号请登录后到「账号管理」里加。"
+                                                    % ",".join(sorted(auth.owner_names() or list(us))[:60])}, 403)
+                    if (u.get("role") or "user") != "admin":
+                        auth.audit("setup_reject", name, False, "目标不是管理员，拒绝重置")
                         return self._json({"error": "本机设置只能重置管理员账号的密码"}, 403)
+                    old_pw = body.get("old_pw")
+                    force = str(body.get("force") or "").lower() in ("1", "true", "yes", "on")
+                    if not auth.verify(name, old_pw):
+                        if not force:
+                            auth.audit("setup_reject", name, False,
+                                       "改管理员密码没给对原密码（子账号一个都没动）")
+                            return self._json({"error": "要改管理员密码，请填原来的密码。"
+                                                        "老密码忘了就用「强制重置」——它会记进账号审计日志。"}, 403)
+                        auth.audit("setup_force", name, True, "本机强制重置管理员密码（没验证原密码）")
                     err = auth.set_password(name, body.get("pw"), 0)
                 else:
                     err = auth.add_user(name, body.get("pw"), "admin")
@@ -11389,17 +11425,29 @@ def _win_force_front(hwnd, topmost_ms=420):
         pass
 
 
-def _app_raise_windows(delay_ms=460, skip=()):
+def _app_raise_windows(delay_ms=460, skip=(), watch_ms=10000):
     """在 Tk 主线程里跑（**必须**经 uikit.post 进来）：把刚弹出的设置窗强制提到最前。
 
     为什么不能在 HTTP 线程里直接 root.after()：after() 不是线程安全的
     （项目里为此专门有 uikit.post），跨线程调可能静默失败 —— 那样提窗就没了。
+
+    ★ v1.84：**盯着看 watch_ms 毫秒**，而不是只看一两轮。
+      以前只重试 2 次（约 1 秒）就收工，而「打印分工」「子客户端管理」这类窗
+      内部要读接口/建几百个控件，真正映射出来常常要 2~5 秒 —— 提窗的那两轮早过去了，
+      于是用户看到的还是「设置窗压在主界面下面」。现在改成：这 10 秒内**任何**新出现的
+      窗口都会被提到最前（每个只提一次），慢窗也能提到。
     """
     try:
         skip = {int(x) for x in (skip or ())}
     except Exception:
         skip = set()
-    last = [0]
+    root = _RAISE_ROOT.get("root")
+    try:
+        watch_ms = int(watch_ms)
+    except Exception:
+        watch_ms = 10000
+    step = 300
+    state = {"left": max(1, int(delay_ms / step) + int(watch_ms / step))}
 
     def _step():
         try:
@@ -11409,16 +11457,19 @@ def _app_raise_windows(delay_ms=460, skip=()):
                 for h in new:
                     _win_force_front(h)
                     _RAISE_DONE.add(h)
-                last[0] = 0
-                return
-            if last[0] < 2:            # Tk 还没映射出来：再等一小会儿
-                last[0] += 1
-                root = _RAISE_ROOT.get("root")
+            state["left"] -= 1
+            if state["left"] > 0:
                 if root is not None:
-                    root.after(300, _step)
+                    root.after(step, _step)
         except Exception:
             pass
 
+    if root is not None:
+        try:
+            root.after(max(0, int(delay_ms)), _step)
+            return
+        except Exception:
+            pass
     _step()
 
 

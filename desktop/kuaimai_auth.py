@@ -13,6 +13,7 @@ import re
 import secrets
 import shutil
 import sys
+import threading
 import time
 from datetime import datetime
 
@@ -44,6 +45,14 @@ def _default_base_dir():
 
 BASE_DIR = _default_base_dir()
 USERS_FILE = os.path.join(BASE_DIR, "kuaimai_users.json")
+# ★ 账号变更审计日志：一行一条 JSON，**只追加不改写**（v1.84 起）。
+#   为什么要有：2026-10-13 前后子账号"无声消失"，程序一点痕迹都没留，
+#   只能从 auto_print.log 的时间线倒推，查不出是谁删的。
+LOG_FILE = os.path.join(BASE_DIR, "kuaimai_users_log.jsonl")
+BAK_KEEP_DAYS = 14
+# 同一进程内所有改账号的操作都串行（HTTP 服务是多线程的：
+# 两个请求同时「读→改→写」时，后写的会拿旧快照把别人刚加的账号抹掉）。
+_LOCK = threading.RLock()
 
 
 def _adopt_legacy_file():
@@ -64,6 +73,67 @@ _adopt_legacy_file()
 
 def _now():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+_ACTOR = threading.local()
+
+
+def set_actor(operator="", ip=""):
+    """登记「这次请求是谁在操作」，只给审计日志用（不参与鉴权）。
+
+    HTTP 服务是多线程的，所以用 threading.local —— 每个请求线程各记一份，
+    不会串号。调用方是 kuaimai_scan.py 的 do_POST（登录/鉴权完之后）。
+    """
+    _ACTOR.operator = str(operator or "")[:64]
+    _ACTOR.ip = str(ip or "")[:64]
+
+
+def _actor():
+    return (str(getattr(_ACTOR, "operator", "") or ""),
+            str(getattr(_ACTOR, "ip", "") or ""))
+
+
+def _audit(action, target="", ok=True, detail=""):
+    """往 kuaimai_users_log.jsonl 追加一行：时间 / 动作 / 账号 / 操作人 / 来源IP。
+
+    只追加、永不改写；写不进去也绝不打断业务（账号能不能改比日志重要）。
+    """
+    try:
+        who, ip = _actor()
+        rec = {"ts": _now(), "action": str(action), "target": str(target or ""),
+               "operator": who or "(未知)", "ip": ip, "ok": bool(ok)}
+        if detail:
+            rec["detail"] = str(detail)[:300]
+        with io.open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def audit(action, target="", ok=True, detail=""):
+    """对外入口：HTTP 层被拒绝的敏感操作也要留痕（否则只能看见成功的那些）。"""
+    _audit(action, target, ok=ok, detail=detail)
+
+
+def audit_log_tail(n=200):
+    """最近 n 条账号审计记录（给以后的管理界面/排查用，读不出来就给空表）。"""
+    out = []
+    try:
+        with io.open(LOG_FILE, encoding="utf-8") as f:
+            lines = f.readlines()[-max(1, int(n or 1)):]
+    except Exception:
+        return out
+    for ln in lines:
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            r = json.loads(ln)
+        except Exception:
+            continue
+        if isinstance(r, dict):
+            out.append(r)
+    return out
 
 
 def _hash(pw, salt):
@@ -117,12 +187,45 @@ def device_label(ua="", model=""):
     return " · ".join(parts)[:48]
 
 
-def _load():
+def _read_users_file(path):
+    """把一个账号文件读成 dict；读不出来就抛异常（由调用方决定怎么降级）。"""
+    with io.open(path, encoding="utf-8") as f:
+        d = json.load(f)
+    return d if isinstance(d, dict) else {"users": {}}
+
+
+def _recovery_chain():
+    """正式文件 → .good（最近一次成功写入的内容）→ .prev → 每日备份（新的在前）。"""
+    out = [USERS_FILE, USERS_FILE + ".good", USERS_FILE + ".prev"]
     try:
-        with io.open(USERS_FILE, encoding="utf-8") as f:
-            d = json.load(f)
-        d = d if isinstance(d, dict) else {"users": {}}
+        out += sorted(glob.glob(USERS_FILE + ".bak-*"), reverse=True)
     except Exception:
+        pass
+    return out
+
+
+def _load():
+    d = None
+    for i, p in enumerate(_recovery_chain()):
+        # 正式文件压根不存在时不要拿备份顶替（全新安装 / 用户主动清空重来）
+        if i and not os.path.exists(USERS_FILE):
+            break
+        try:
+            d = _read_users_file(p)
+        except Exception:
+            continue
+        if i:
+            # ★ 正式文件坏了（被截断 / 写到一半断电）：从备份接回来，并**立刻写回**。
+            #   不写回的话，下一次 _save 就会拿这个（可能更少的）内容覆盖正式文件 →
+            #   又变成"子账号无声消失"。这里先留痕，方便事后查是哪天坏的。
+            _audit("recover", "", ok=True,
+                   detail="账号文件读不出来，已从 %s 恢复" % os.path.basename(p))
+            try:
+                _save(d)
+            except Exception:
+                pass
+        break
+    if not isinstance(d, dict):
         d = {"users": {}}
     now = time.time()
     b = d.get("blocked") or {}
@@ -162,13 +265,100 @@ def _set_tokens(u, toks):
     return toks
 
 
-def _save(d):
+def _prune_backups():
+    """每日备份只留 BAK_KEEP_DAYS 天。"""
     try:
-        with io.open(USERS_FILE, "w", encoding="utf-8") as f:
-            f.write(json.dumps(d, ensure_ascii=False, indent=2))
-        return True
+        cutoff = time.time() - BAK_KEEP_DAYS * 86400
+        for p in glob.glob(USERS_FILE + ".bak-*"):
+            try:
+                if os.path.getmtime(p) < cutoff:
+                    os.remove(p)
+            except Exception:
+                pass
     except Exception:
-        return False
+        pass
+
+
+def _rotate_backups():
+    """落盘前先备份：.prev（上一次的内容）+ 每天一份 .bak-YYYYMMDD（留 14 天）。
+
+    ★ 只在「当前文件能正常读出来」时才备份 —— 否则会把写坏的内容复制进备份，
+      把能救回来的好备份也一起毁掉（这条是自测里真踩到的）。
+    """
+    try:
+        if not os.path.exists(USERS_FILE) or os.path.getsize(USERS_FILE) <= 2:
+            return
+        _read_users_file(USERS_FILE)          # 读不出来就抛异常 → 不备份
+    except Exception:
+        return
+    try:
+        try:
+            shutil.copy2(USERS_FILE, USERS_FILE + ".prev")
+        except Exception:
+            pass
+        daily = USERS_FILE + ".bak-" + datetime.now().strftime("%Y%m%d")
+        if not os.path.exists(daily):
+            try:
+                shutil.copy2(USERS_FILE, daily)
+            except Exception:
+                pass
+        _prune_backups()
+    except Exception:
+        pass
+
+
+def _save(d, allow_drop=None):
+    """写账号文件：先备份 → 防并发丢号 → 原子替换。
+
+    ★ 三层防护都是冲著「子账号无声消失」去的（v1.84）：
+      ① 写之前留 .prev（上一版）+ .good（这次写进去的）+ 每日备份 —— 真出事了能找回，
+         还能看出是哪天变的；坏内容绝不会被复制进备份；
+      ② 写之前跟盘上现有账号比一遍：盘上有、这次要写的内容里没有的账号，
+         说明手里的 d 是**旧快照**（两个线程同时改账号：A 加了人，B 拿着旧表写回
+         就把人抹了）→ 一律保留盘上的。只有 del_user 传 allow_drop，才是真删号；
+      ③ 先写 .tmp 再 os.replace —— 断电/崩溃不会留下半个（读不出来的）文件。
+    """
+    with _LOCK:
+        allow_drop = set(allow_drop or ())
+        us = d.get("users")
+        if not isinstance(us, dict):
+            us = d["users"] = {}
+        try:
+            disk = _read_users_file(USERS_FILE)
+            du = disk.get("users") or {}
+        except Exception:
+            du = {}
+        kept = [n for n, u in du.items() if n not in us and n not in allow_drop]
+        for n in kept:
+            us[n] = du[n]
+        if kept:
+            _audit("save_merge", "", ok=True,
+                   detail="写盘前发现盘上还有这些账号，已保留：%s" % ",".join(sorted(kept))[:200])
+        _rotate_backups()
+        tmp = USERS_FILE + ".tmp"
+        try:
+            with io.open(tmp, "w", encoding="utf-8") as f:
+                f.write(json.dumps(d, ensure_ascii=False, indent=2))
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
+            # .good = 最近一次成功写进去的内容：正式文件被写坏时，拿它就能一条不丢地接回来
+            # （.prev 是"上一版"，会丢最后一次改动）
+            try:
+                shutil.copy2(tmp, USERS_FILE + ".good")
+            except Exception:
+                pass
+            os.replace(tmp, USERS_FILE)
+            return True
+        except Exception:
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except Exception:
+                pass
+            return False
 
 
 def users():
@@ -203,15 +393,18 @@ def is_owner(name):
 
 def set_multi_device(name, flag):
     """是否允许同一账号电脑端 + 网页端同时在线。"""
-    d = _load()
-    u = (d.get("users") or {}).get(str(name or ""))
-    if not u:
-        return "账号不存在"
-    u["allow_multi_device"] = bool(flag)
-    if not flag:
-        _set_tokens(u, {})            # 关掉后只留一个：下次登录会踢掉其它
-    _save(d)
-    return ""
+    with _LOCK:
+        d = _load()
+        u = (d.get("users") or {}).get(str(name or ""))
+        if not u:
+            _audit("set_multi_device", name, ok=False, detail="账号不存在")
+            return "账号不存在"
+        u["allow_multi_device"] = bool(flag)
+        if not flag:
+            _set_tokens(u, {})            # 关掉后只留一个：下次登录会踢掉其它
+        _save(d)
+        _audit("set_multi_device", name, ok=True, detail="允许多端同时在线=%s" % bool(flag))
+        return ""
 
 
 def list_users():
@@ -235,22 +428,23 @@ def list_users():
 
 def touch(name, ip="", pc="", win_user="", kind=""):
     """子客户端心跳：只刷新「最后活跃」和设备信息，不动会话 token。"""
-    d = _load()
-    u = (d.get("users") or {}).get(str(name or ""))
-    if not u or not _tokens(u):
-        return False
-    u["seen_ts"] = time.time()
-    u["seen_at"] = _now()
-    if ip:
-        u["ip"] = str(ip)[:45]
-    if pc:
-        u["pc"] = str(pc)[:64]
-    if win_user:
-        u["win_user"] = str(win_user)[:64]
-    if kind:
-        u["kind"] = str(kind)[:16]
-    _save(d)
-    return True
+    with _LOCK:
+        d = _load()
+        u = (d.get("users") or {}).get(str(name or ""))
+        if not u or not _tokens(u):
+            return False
+        u["seen_ts"] = time.time()
+        u["seen_at"] = _now()
+        if ip:
+            u["ip"] = str(ip)[:45]
+        if pc:
+            u["pc"] = str(pc)[:64]
+        if win_user:
+            u["win_user"] = str(win_user)[:64]
+        if kind:
+            u["kind"] = str(kind)[:16]
+        _save(d)
+        return True
 
 
 def user_perms_raw(name):
@@ -267,14 +461,26 @@ def user_perms_raw(name):
 
 def set_user_perms(name, values):
     """保存某账号的按钮权限（只写 perms 字段，不动口令/会话）。"""
-    d = _load()
-    us = d.setdefault("users", {})
-    u = us.get(str(name or ""))
-    if not u:
-        return "账号不存在"
-    u["perms"] = dict(values or {})
-    _save(d)
-    return ""
+    with _LOCK:
+        d = _load()
+        us = d.setdefault("users", {})
+        u = us.get(str(name or ""))
+        if not u:
+            _audit("set_user_perms", name, ok=False, detail="账号不存在")
+            return "账号不存在"
+        u["perms"] = dict(values or {})
+        _save(d)
+        _audit("set_user_perms", name, ok=True,
+               detail="共 %d 项权限设置" % len(u["perms"]))
+        return ""
+
+
+def _user_brief(u):
+    """审计日志里带一句「这个账号长什么样」，删号之后也能照原样重建。"""
+    u = u if isinstance(u, dict) else {}
+    return "角色=%s 主账号=%s 创建于=%s 最后登录=%s 设备=%s" % (
+        u.get("role") or "", bool(u.get("owner")), u.get("created") or "-",
+        u.get("last_login") or "-", (u.get("pc") or u.get("device") or "-"))
 
 
 def add_user(name, pw, role="user"):
@@ -283,65 +489,88 @@ def add_user(name, pw, role="user"):
         return "账号和密码不能为空"
     if len(str(pw)) < 4:
         return "密码至少 4 位"
-    d = _load()
-    us = d.setdefault("users", {})
-    if name in us:
-        return "账号已存在"
-    salt = secrets.token_hex(8)
-    us[name] = {"salt": salt, "hash": _hash(pw, salt), "role": role, "created": _now(),
-                "token": "", "tokens": {}, "owner": False, "allow_multi_device": False,
-                "last_login": "", "device": ""}
-    _save(d)
-    return ""
+    with _LOCK:
+        d = _load()
+        us = d.setdefault("users", {})
+        if name in us:
+            _audit("add_user", name, ok=False, detail="账号已存在，未改动")
+            return "账号已存在"
+        salt = secrets.token_hex(8)
+        us[name] = {"salt": salt, "hash": _hash(pw, salt), "role": role, "created": _now(),
+                    "token": "", "tokens": {}, "owner": False, "allow_multi_device": False,
+                    "last_login": "", "device": ""}
+        _save(d)
+        _audit("add_user", name, ok=True,
+               detail="%s；写盘后共 %d 个账号：%s" % (
+                   "角色=%s" % role, len(us), ",".join(sorted(us))[:200]))
+        return ""
 
 
 def del_user(name):
-    d = _load()
-    us = d.setdefault("users", {})
-    u = us.get(name)
-    if not u:
-        return "账号不存在"
-    if u.get("role") == "admin":
-        admins = [n for n, x in us.items() if x.get("role") == "admin"]
-        if len(admins) <= 1:
-            return "至少要保留一个管理员账号"
-    us.pop(name, None)
-    _save(d)
-    return ""
+    name = str(name or "")
+    with _LOCK:
+        d = _load()
+        us = d.setdefault("users", {})
+        u = us.get(name)
+        if not u:
+            _audit("del_user", name, ok=False, detail="账号不存在")
+            return "账号不存在"
+        if u.get("role") == "admin":
+            admins = [n for n, x in us.items() if x.get("role") == "admin"]
+            if len(admins) <= 1:
+                _audit("del_user", name, ok=False, detail="这是最后一个管理员，拒绝删除")
+                return "至少要保留一个管理员账号"
+        us.pop(name, None)
+        # allow_drop：这是**真的**删号，_save 的"盘上有就保留"护栏要放行这一条
+        _save(d, allow_drop=[name])
+        _audit("del_user", name, ok=True,
+               detail="%s；删后剩 %d 个账号：%s" % (_user_brief(u), len(us),
+                                                 ",".join(sorted(us))[:200]))
+        return ""
 
 
 def kick(name, minutes=10):
     """把账号的当前登录踢下线，并让那台设备 minutes 分钟内不能再登录。"""
-    d = _load()
-    us = d.setdefault("users", {})
-    u = us.get(str(name))
-    if not u:
-        return "账号不存在"
-    dev = str(u.get("dev") or "").strip()
-    _set_tokens(u, {})               # 旧会话全部立即失效
-    u["kicked_at"] = _now()
-    if dev:
-        d.setdefault("blocked", {})[dev] = time.time() + max(1, int(minutes)) * 60
-    _save(d)
-    return ""
+    with _LOCK:
+        d = _load()
+        us = d.setdefault("users", {})
+        u = us.get(str(name))
+        if not u:
+            _audit("kick", name, ok=False, detail="账号不存在")
+            return "账号不存在"
+        dev = str(u.get("dev") or "").strip()
+        _set_tokens(u, {})               # 旧会话全部立即失效
+        u["kicked_at"] = _now()
+        if dev:
+            d.setdefault("blocked", {})[dev] = time.time() + max(1, int(minutes)) * 60
+        _save(d)
+        _audit("kick", name, ok=True,
+               detail="设备 %s 封 %d 分钟" % (dev or "-", int(minutes)))
+        return ""
 
 
 def set_password(name, pw, block_minutes=10):
     if len(str(pw or "")) < 4:
+        _audit("set_password", name, ok=False, detail="密码太短，未改动")
         return "密码至少 4 位"
-    d = _load()
-    us = d.setdefault("users", {})
-    u = us.get(str(name))
-    if not u:
-        return "账号不存在"
-    u["salt"] = secrets.token_hex(8)
-    u["hash"] = _hash(pw, u["salt"])
-    _set_tokens(u, {})               # 改密码后旧登录全部失效
-    dev = str(u.get("dev") or "").strip()
-    if block_minutes and dev:            # 管理员改别人的密码：那台设备 10 分钟内不能再登录
-        d.setdefault("blocked", {})[dev] = time.time() + max(1, int(block_minutes)) * 60
-    _save(d)
-    return ""
+    with _LOCK:
+        d = _load()
+        us = d.setdefault("users", {})
+        u = us.get(str(name))
+        if not u:
+            _audit("set_password", name, ok=False, detail="账号不存在")
+            return "账号不存在"
+        u["salt"] = secrets.token_hex(8)
+        u["hash"] = _hash(pw, u["salt"])
+        _set_tokens(u, {})               # 改密码后旧登录全部失效
+        dev = str(u.get("dev") or "").strip()
+        if block_minutes and dev:            # 管理员改别人的密码：那台设备 10 分钟内不能再登录
+            d.setdefault("blocked", {})[dev] = time.time() + max(1, int(block_minutes)) * 60
+        _save(d)
+        _audit("set_password", name, ok=True,
+               detail="%s；旧会话已清空，设备封禁=%s 分钟" % (
+                   _user_brief(u), int(block_minutes or 0)))
+        return ""
 
 
 def login(name, pw, device="", dev_id="", model="", pc="", win_user="", ip="", kind=""):
@@ -350,6 +579,11 @@ def login(name, pw, device="", dev_id="", model="", pc="", win_user="", ip="", k
     会话规则：默认一个账号只有一个会话（新登录把旧的踢掉）；
     allow_multi_device=True 时允许「电脑端 + 网页端」各一个（同端再登录会顶掉同端的旧会话）。
     """
+    with _LOCK:
+        return _login(name, pw, device, dev_id, model, pc, win_user, ip, kind)
+
+
+def _login(name, pw, device="", dev_id="", model="", pc="", win_user="", ip="", kind=""):
     name = str(name or "").strip()
     dev_id = str(dev_id or "").strip()
     left = blocked_left(dev_id)
@@ -402,7 +636,23 @@ def check(token):
     return None
 
 
+def verify(name, pw):
+    """只校验口令，不发 token（本机「重置管理员密码」前要凭这一句放行）。"""
+    u = users().get(str(name or "").strip())
+    if not isinstance(u, dict):
+        return False
+    try:
+        return _hash(pw, u.get("salt") or "") == u.get("hash")
+    except Exception:
+        return False
+
+
 def logout(token):
+    with _LOCK:
+        return _logout(token)
+
+
+def _logout(token):
     d = _load()
     changed = False
     for _name, u in (d.get("users") or {}).items():

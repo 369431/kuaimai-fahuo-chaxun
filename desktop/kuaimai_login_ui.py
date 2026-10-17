@@ -142,17 +142,21 @@ function setupView(d){
   $('box').innerHTML = '<h1>' + (first ? '设置管理员账号' : '重置管理员密码') + '</h1>'
     + '<div class="sub">' + (first
         ? '这台机器第一次使用，请先设置管理员（只有管理员能加/删账号）'
-        : '本机操作：管理员账号已存在就重置密码，不存在就新建一个管理员') + '</div>'
+        : '本机操作：只重置<b>已有管理员</b>的密码，不会新建、也不会动其它账号') + '</div>'
     + '<label>管理员账号</label><input id="u" type="text" autocomplete="username" placeholder="例如 admin">'
+    + (first ? '' : '<label>原来的密码（本机改密码时必填）</label><input id="op" type="password" autocomplete="current-password">')
     + '<label>密码（至少 4 位）</label><input id="p" type="password" autocomplete="new-password">'
     + '<label>确认密码</label><input id="p2" type="password" autocomplete="new-password">'
-    + '<button id="go">创建并进入</button><div class="msg" id="m"></div>'
-    + '<div class="small">账号存在程序目录的 kuaimai_users.json，密码只存加盐 SHA-256。</div>';
+    + (first ? '' : '<div class="chk"><input id="fr" type="checkbox"><label for="fr" style="margin:0">强制重置（忘了原密码；会记进账号审计日志）</label></div>')
+    + '<button id="go">' + (first ? '创建并进入' : '重置并进入') + '</button><div class="msg" id="m"></div>'
+    + '<div class="small">账号存在程序目录的 kuaimai_users.json，密码只存加盐 SHA-256；每次改动都记到 kuaimai_users_log.jsonl。</div>';
   $('go').onclick = async () => {
     const u = $('u').value.trim(), p = $('p').value, p2 = $('p2').value;
+    const op = (first ? '' : ($('op').value || ''));
+    const fr = (first ? false : !!($('fr') && $('fr').checked));
     if(!u || !p) return msg('err', '账号和密码不能为空');
     if(p !== p2) return msg('err', '两次密码不一致');
-    const d = await api('/api/auth/setup', {name:u, pw:p, dev_id:devId(), model:await modelName()});
+    const d = await api('/api/auth/setup', {name:u, pw:p, old_pw:op, force:fr, dev_id:devId(), model:await modelName()});
     if(d.error) return msg('err', d.error);
     setToken(d.token);
     gotoApp();

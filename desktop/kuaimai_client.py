@@ -461,8 +461,12 @@ def login(base, name, pw, mode="remote", server_name=""):
     return _after_login(mode, base, res, server_name)
 
 
-def setup(base, name, pw):
-    """首次设置管理员（只在主机本机允许）→ (Session, '') 或 (None, 原因)。"""
+def setup(base, name, pw, old_pw="", force=False):
+    """首次设置管理员 / 本机重置管理员密码（只在主机本机允许）→ (Session, '') 或 (None, 原因)。
+
+    `old_pw` / `force` 是 v1.84 加的保护：已经有管理员时，改密码必须给原密码，
+    老密码真忘了才显式 force（服务端会记一条审计）。
+    """
     base = norm_base(base)
     if not base:
         return None, "本机服务地址不对"
@@ -471,7 +475,8 @@ def setup(base, name, pw):
     if len(str(pw)) < 4:
         return None, "密码至少 4 位"
     ok, res = http_json(base, "/api/auth/setup", "POST", body={
-        "name": str(name).strip(), "pw": pw, "dev_id": device_id(),
+        "name": str(name).strip(), "pw": pw, "old_pw": str(old_pw or ""), "force": bool(force),
+        "dev_id": device_id(),
         "model": "Windows 桌面版", "pc": pc_name(), "win_user": win_user(),
         "kind": "desktop"}, timeout=15)
     if not ok or not isinstance(res, dict) or not res.get("ok"):
