@@ -1,10 +1,10 @@
 {
-  "version": "v2.34",
-  "notes": "**v2.34：现货可发「生成波次」可以自己填件数了（手机端重做输入面板）**\n\n**改了什么**\n· 以前数量输入框塞在窄窄的按钮列里，手机上只有 50 多像素，很难点；而且按钮文案写死「中通 408 件」，你改成 95 它还是显示 408，容易以为没生效。\n· 现在点「生成波次」，会在这一行下面展开一个面板：每个快递一行，大号数字输入框（默认留空，提示「最多 408 件」）、「全部」快捷键；你填多少，按钮就实时显示「生成 95 件」。\n· 成波严格按你填的件数提交（不再默认塞满 408）；超过 ERP 实时可成波上限会明确提示，并按上限生成。\n· 加了一次确认（「用中通生成 1 个波次，共 95 件？」），避免误点。\n· 快速切换不同编码时，上一行的按钮会恢复，不会卡在「查询中…」。\n\n**不受影响**\n· 挑单口径不变：只挑一单一件、一个波次只能一种快递、货位预检、成波排队锁、波次号回读都和原来一样。\n",
+  "version": "v2.35",
+  "notes": "**v2.35：修「升级后启动崩溃（DLL load failed）」+ 现货可发自定义件数**\n\n**升级崩溃的原因**\n· 这次打包用的 PySide6 升了版本，新版把 Qt/Shiboken 的 DLL 放到了 `_internal` 根目录；\n· 但覆盖安装不会删旧文件，v2.32 留在 `_internal\\PySide6\\`、`_internal\\shiboken6\\` 里的旧 DLL 还在，\n  新版 pyd 先找到了旧 DLL → 版本不匹配，启动直接报：\n  `DLL load failed while importing Shiboken/QtCore: 找不到指定的程序`\n· 修复：安装脚本升级时先整目录清掉 `_internal`（里面只有程序文件，不含用户数据），再装新文件。\n\n**现货可发 · 生成波次**\n· 数量输入框改成大号、默认留空，填多少按钮就显示「生成 95 件」，成波严格按填的件数；\n· 「全部」快捷键；超过 ERP 实时上限会提示并按上限生成；加二次确认；\n· 手机端面板整行展开，不再挤在窄按钮列里。\n\n**已经装过 v2.34 的用户**\n· 直接装这个 v2.35 即可 —— 安装时会自动清掉旧运行库，不会再崩。\n",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v2.34/kuaimai-scan-setup-v2.34.exe",
-  "sha256": "1aed917ce37bd62918564862583a8570acf35f0bc213834b9cfb77cc955fb87e",
-  "size": 44015209,
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v2.35/kuaimai-scan-setup-v2.35.exe",
+  "sha256": "9fb621fef3fbf20feb32f67951408262d71120bec78c9f85a4e596616ede27c4",
+  "size": 44020664,
   "mandatory": false,
-  "published_at": "2026-10-17 21:57"
+  "published_at": "2026-10-17 22:09"
 }
