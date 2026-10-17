@@ -237,7 +237,8 @@ def maybe_serve_local(tls, method, target, backend):
     return False
 
 
-_DROP_HEADERS = (b"x-forwarded-for", b"x-real-ip", b"x-forwarded-host", b"forwarded")
+_DROP_HEADERS = (b"x-forwarded-for", b"x-real-ip", b"x-forwarded-host", b"x-forwarded-proto",
+                 b"x-forwarded-port", b"forwarded")
 
 
 def with_forwarded(head, client_ip):
@@ -252,6 +253,9 @@ def with_forwarded(head, client_ip):
             return head                      # 不是标准请求头，原样转发（后端按来源 IP 判定）
         lines = head[:sep].split(b"\r\n")
         kept = [ln for ln in lines[1:] if ln.split(b":", 1)[0].strip().lower() not in _DROP_HEADERS]
+        # 本进程是 TLS 终止端，后端只看到明文 HTTP；必须告诉它原始请求是 https，
+        # 否则后端会把经中转的请求 302 回 https://<域名>:<端口>/，浏览器就无限重定向。
+        kept.append(b"X-Forwarded-Proto: https")
         if client_ip:
             kept.append(("X-Forwarded-For: %s" % client_ip).encode("latin-1", "replace"))
             kept.append(("X-Real-IP: %s" % client_ip).encode("latin-1", "replace"))

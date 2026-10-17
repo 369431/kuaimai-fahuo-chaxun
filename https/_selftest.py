@@ -57,6 +57,8 @@ def make_cert():
 
 class Stub(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        LAST.clear()
+        LAST.update({str(k).lower(): v for k, v in self.headers.items()})
         payload = ("PATH=%s\n" % self.path).encode() + BODY
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
@@ -68,11 +70,15 @@ class Stub(http.server.BaseHTTPRequestHandler):
         pass
 
 
-def fetch(url, timeout=8):
+LAST = {}
+
+
+def fetch(url, timeout=8, headers=None):
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
-    with urllib.request.urlopen(url, context=ctx, timeout=timeout) as r:
+    req = urllib.request.Request(url, headers=headers or {})
+    with urllib.request.urlopen(req, context=ctx, timeout=timeout) as r:
         return r.status, r.read()
 
 
@@ -110,6 +116,21 @@ def main():
                 failures.append("IPv4 转发内容不对")
             if b"/api/status?k=ABC123" not in body:
                 failures.append("查询串没有透传")
+            # 后端靠这个头判断“原始请求是 HTTPS”，缺了会把页面 302 死循环
+            if LAST.get("x-forwarded-proto") != "https":
+                failures.append("转发时没有补 X-Forwarded-Proto: https（会触发后端无限 302）")
+
+            # 客户端伪造转发头必须被剥离/覆盖，不能原样带到后端
+            status, body = fetch("https://127.0.0.1:%d/api/status" % PORT,
+                                 headers={"X-Forwarded-Proto": "http",
+                                          "X-Forwarded-For": "6.6.6.6",
+                                          "X-Real-IP": "6.6.6.6"})
+            if status != 200:
+                failures.append("带伪造转发头的请求转发失败")
+            if LAST.get("x-forwarded-proto") != "https":
+                failures.append("客户端伪造的 X-Forwarded-Proto 没有被覆盖")
+            if LAST.get("x-forwarded-for") == "6.6.6.6" or LAST.get("x-real-ip") == "6.6.6.6":
+                failures.append("客户端伪造的来源 IP 没有被剥离")
 
         # IPv6（本机有 ::1 时才测）
         try:
