@@ -49,6 +49,12 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 Name: "autostart"; Description: "开机自动启动（程序 + HTTPS中转，用计划任务）"; GroupDescription: "附加任务："
 Name: "bootstart"; Description: "真·开机自启（9443中转/frp 无需登录就跑 + 看门狗巡检，需要管理员）"; GroupDescription: "附加任务："
 
+[InstallDelete]
+; 升级时先清掉旧的运行库：PySide6 升版后，旧 _internal 里残留的 Qt/Shiboken DLL
+; 会和新 pyd 混用，启动直接报 "DLL load failed while importing Shiboken/QtCore"。
+; _internal 全是程序文件，不含用户数据，整目录删除是安全的。
+Type: filesandordirs; Name: "{app}\_internal"
+
 [Files]
 Source: "{#StageDir}\快麦扫码查询.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; v1.73：改成 onedir 打包（启动快 10 倍），依赖都在 _internal 里
