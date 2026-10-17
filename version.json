@@ -1,10 +1,10 @@
 {
-  "version": "v2.33",
-  "notes": "**v2.33：修「手机/域名访问打不开（一直转圈或提示重定向过多）」**\n\n**原因**\n· v2.32 的主程序加了「明文请求自动跳 HTTPS」的保护：只有请求头带 `X-Forwarded-Proto: https` 才放行。\n· 但 9443 的 HTTPS 中转 `km_https` 转发时只补了 `X-Forwarded-For`，没告诉后端「原始请求已经是 HTTPS」。\n· 于是经域名/手机进来的每个请求都被后端 302 回同一个地址 → 浏览器无限重定向。\n  本机 8790 被当成内网直连不受影响，所以「对外访问设置」面板还显示全绿，很难发现。\n\n**这一版**\n· `km_https` 转发时剥掉客户端自带的 `X-Forwarded-Proto/Port`，统一补 `X-Forwarded-Proto: https`\n· 自测加了回归断言：该头必须存在；客户端伪造的转发头必须被覆盖\n· README 补了说明\n\n**验证**\n· 手机 4G 打开 `https://<域名>:9443/` 正常显示登录页，不再报重定向过多\n· 登录后扫码、查询均正常\n",
+  "version": "v2.34",
+  "notes": "**v2.34：现货可发「生成波次」可以自己填件数了（手机端重做输入面板）**\n\n**改了什么**\n· 以前数量输入框塞在窄窄的按钮列里，手机上只有 50 多像素，很难点；而且按钮文案写死「中通 408 件」，你改成 95 它还是显示 408，容易以为没生效。\n· 现在点「生成波次」，会在这一行下面展开一个面板：每个快递一行，大号数字输入框（默认留空，提示「最多 408 件」）、「全部」快捷键；你填多少，按钮就实时显示「生成 95 件」。\n· 成波严格按你填的件数提交（不再默认塞满 408）；超过 ERP 实时可成波上限会明确提示，并按上限生成。\n· 加了一次确认（「用中通生成 1 个波次，共 95 件？」），避免误点。\n· 快速切换不同编码时，上一行的按钮会恢复，不会卡在「查询中…」。\n\n**不受影响**\n· 挑单口径不变：只挑一单一件、一个波次只能一种快递、货位预检、成波排队锁、波次号回读都和原来一样。\n",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v2.33/kuaimai-scan-setup-v2.33.exe",
-  "sha256": "2896260cea7bdb58db80318441bbca1235600b99cec9b7ec254b0c098ae2086e",
-  "size": 44007293,
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v2.34/kuaimai-scan-setup-v2.34.exe",
+  "sha256": "a09a101463e4fac06462c1c2379750aab4a3f80fbe4c24f40aac8e4a085833b5",
+  "size": 44015211,
   "mandatory": false,
-  "published_at": "2026-10-17 21:29"
+  "published_at": "2026-10-17 21:44"
 }
