@@ -3868,6 +3868,60 @@ class _WebHandler(BaseHTTPRequestHandler):
                 if not self._can(me, "admin.perms"):
                     return self._deny("admin.perms")
                 return self._json(self._perms_payload())
+            if parsed.path == "/api/users/audit":
+                # 账号变更记录（谁 / 什么时候 / 从哪 / 改了什么）——「无声消失」之后专门加的。
+                # 数据只来自只追加的 kuaimai_users_log.jsonl，改不了、删不掉（除了手工删文件）。
+                if not auth:
+                    return self._json({"error": "账号模块不可用"}, 400)
+                if not self._can(me, "admin.perms"):
+                    return self._deny("admin.perms")
+
+                def _q(k, d=""):
+                    try:
+                        return str((qs.get(k) or [d])[0] or d)
+                    except Exception:
+                        return d
+
+                try:
+                    lim = max(1, min(1000, int(_q("limit", "300"))))
+                except Exception:
+                    lim = 300
+                only_failed = _q("failed", "") not in ("", "0", "false", "False")
+                recs = auth.audit_log_tail(lim, action=_q("action"), who=_q("who"),
+                                           target=_q("target"), only_failed=only_failed)
+                rows, out = [], []
+                for r in recs:
+                    act = str(r.get("action") or "")
+                    snap = r.get("snapshot") if isinstance(r.get("snapshot"), dict) else {}
+                    can_restore = bool(act == "del_user" and r.get("ok") and snap)
+                    rows.append([str(r.get("ts") or ""), auth.audit_label(act),
+                                 str(r.get("target") or ""), str(r.get("operator") or ""),
+                                 str(r.get("ip") or ""), "成功" if r.get("ok") else "失败",
+                                 str(r.get("detail") or "")])
+                    out.append({"ts": str(r.get("ts") or ""), "action": act,
+                                "label": auth.audit_label(act),
+                                "target": str(r.get("target") or ""),
+                                "operator": str(r.get("operator") or ""),
+                                "ip": str(r.get("ip") or ""),
+                                "ok": bool(r.get("ok")),
+                                "detail": str(r.get("detail") or ""),
+                                "can_restore": can_restore,
+                                "snapshot": ({"role": snap.get("role") or "user",
+                                              "owner": bool(snap.get("owner")),
+                                              "allow_multi_device": bool(snap.get("allow_multi_device")),
+                                              "created": snap.get("created") or "",
+                                              "perms": len(snap.get("perms") or {})}
+                                             if can_restore else {})})
+                return self._json({
+                    "ok": True, "title": "账号变更记录",
+                    "columns": ["时间", "动作", "账号", "操作人", "来源IP", "结果", "说明"],
+                    "rows": rows, "count": len(rows),
+                    "records": out,
+                    "note": ("共 %d 条。日志在程序目录的 kuaimai_users_log.jsonl（只追加，改不了）。"
+                             "带「删除账号」的记录可以点「恢复选中账号」。"
+                             % len(rows)) if rows else "还没有账号变更记录。",
+                    "actions": [{"key": k, "label": v} for k, v in auth.AUDIT_LABELS.items()],
+                })
             if parsed.path == "/api/devices":
                 # 子客户端管理：在线设备（主账号看）
                 if not self._can(me, "desktop.admin"):
@@ -5466,6 +5520,28 @@ class _WebHandler(BaseHTTPRequestHandler):
                     return self._json({"error": err}, 400)
                 return self._json({"ok": True, "name": target,
                                    "perms": self._perms_of({"name": target, "role": "user"})})
+            if path == "/api/users/restore":
+                # 电脑版「账号变更记录」→「恢复选中账号」：按删除时的快照把账号建回来。
+                # 口令必须重设（日志里不存旧口令，故意的）。
+                if not auth:
+                    return self._json({"error": "账号模块不可用"}, 400)
+                if not self._can(me, "admin.perms"):
+                    return self._deny("admin.perms")
+                name = str(body.get("name") or "").strip()
+                rec = auth.find_delete_record(name, body.get("ts") or "")
+                if not rec:
+                    return self._json({"error": "没找到 %s 的删除记录（或那条记录是旧版本写的、没有快照）"
+                                                % (name or "该账号")}, 400)
+                snap = rec.get("snapshot") or {}
+                if (snap.get("role") or "") == "admin" and not bool((me or {}).get("owner")):
+                    return self._json({"error": "只有主账号能恢复管理员账号"}, 403)
+                err = auth.restore_user(name, body.get("pw"), snap)
+                if err:
+                    return self._json({"error": err}, 400)
+                return self._json({"ok": True, "name": name,
+                                   "users": auth.list_users(),
+                                   "msg": "已按 %s 的删除记录恢复账号 %s，请让它用新密码重新登录"
+                                          % (rec.get("ts") or "历史", name)})
             if path == "/api/users":
                 if not auth:
                     return self._json({"error": "账号模块不可用"}, 400)

@@ -63,12 +63,17 @@ def _adopt_legacy_file():
         cands = [p for p in glob.glob(os.path.join(os.environ.get("TEMP") or "", "_MEI*", "kuaimai_users.json"))
                  if os.path.getsize(p) > 2]
         if cands:
-            shutil.copy2(max(cands, key=os.path.getmtime), USERS_FILE)
+            src = max(cands, key=os.path.getmtime)
+            shutil.copy2(src, USERS_FILE)
+            _audit("adopt_legacy", "", ok=True,
+                   detail="从临时解包目录接管旧账号文件：%s"
+                          % (os.path.basename(os.path.dirname(src)) or src))
     except Exception:
         pass
 
 
-_adopt_legacy_file()
+# ★ 注意：_adopt_legacy_file() 的调用放在文件**末尾**（所有函数定义之后），
+#   因为它要写审计日志，而 _audit 定义在下面。
 
 
 def _now():
@@ -93,10 +98,11 @@ def _actor():
             str(getattr(_ACTOR, "ip", "") or ""))
 
 
-def _audit(action, target="", ok=True, detail=""):
+def _audit(action, target="", ok=True, detail="", extra=None):
     """往 kuaimai_users_log.jsonl 追加一行：时间 / 动作 / 账号 / 操作人 / 来源IP。
 
     只追加、永不改写；写不进去也绝不打断业务（账号能不能改比日志重要）。
+    `extra`：附加字段（目前只有 del_user 用它存被删账号的**快照**，供「一键恢复」用）。
     """
     try:
         who, ip = _actor()
@@ -104,26 +110,66 @@ def _audit(action, target="", ok=True, detail=""):
                "operator": who or "(未知)", "ip": ip, "ok": bool(ok)}
         if detail:
             rec["detail"] = str(detail)[:300]
+        if isinstance(extra, dict):
+            for k, v in extra.items():
+                if k not in rec:
+                    rec[str(k)] = v
         with io.open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except Exception:
         pass
 
 
-def audit(action, target="", ok=True, detail=""):
+def audit(action, target="", ok=True, detail="", extra=None):
     """对外入口：HTTP 层被拒绝的敏感操作也要留痕（否则只能看见成功的那些）。"""
-    _audit(action, target, ok=ok, detail=detail)
+    _audit(action, target, ok=ok, detail=detail, extra=extra)
 
 
-def audit_log_tail(n=200):
-    """最近 n 条账号审计记录（给以后的管理界面/排查用，读不出来就给空表）。"""
-    out = []
+# 审计动作 → 人话（电脑版「账号变更记录」下拉和表格都用这张表）
+AUDIT_LABELS = {
+    "add_user": "新增账号",
+    "del_user": "删除账号",
+    "restore_user": "恢复账号",
+    "set_password": "改密码",
+    "set_user_perms": "改权限",
+    "set_multi_device": "多端同登",
+    "kick": "踢下线",
+    "login": "登录成功",
+    "login_fail": "登录失败",
+    "logout": "退出登录",
+    "setup_force": "强制重置管理员",
+    "setup_reject": "被拒绝的首次设置",
+    "save_merge": "写盘时保留他人账号",
+    "recover": "账号文件自动恢复",
+    "adopt_legacy": "接管旧账号文件",
+}
+
+
+def audit_label(action):
+    a = str(action or "")
+    return AUDIT_LABELS.get(a, a or "-")
+
+
+def audit_log_tail(n=200, action="", who="", target="", only_failed=False):
+    """读审计日志（**新的在前**），支持按动作/操作人/账号筛选。
+
+    参数：
+      n          最多返回多少条（先读整个文件再倒数，文件很小：只在账号变更时写一行）
+      action     只看某一种动作（add_user / del_user / ...）；空 = 全部
+      who        只看某个「操作人」（大小写不敏感，包含匹配）
+      target     只看某个「账号」（包含匹配）
+      only_failed 只看失败的（ok=false）
+    """
     try:
         with io.open(LOG_FILE, encoding="utf-8") as f:
-            lines = f.readlines()[-max(1, int(n or 1)):]
+            lines = f.readlines()
     except Exception:
-        return out
-    for ln in lines:
+        return []
+    action = str(action or "").strip()
+    who = str(who or "").strip().lower()
+    target = str(target or "").strip().lower()
+    out = []
+    for ln in reversed(lines):              # 新的在前
         ln = ln.strip()
         if not ln:
             continue
@@ -131,9 +177,36 @@ def audit_log_tail(n=200):
             r = json.loads(ln)
         except Exception:
             continue
-        if isinstance(r, dict):
-            out.append(r)
+        if not isinstance(r, dict):
+            continue
+        if action and str(r.get("action") or "") != action:
+            continue
+        if who and who not in str(r.get("operator") or "").lower():
+            continue
+        if target and target not in str(r.get("target") or "").lower():
+            continue
+        if only_failed and r.get("ok"):
+            continue
+        out.append(r)
+        if len(out) >= max(1, int(n or 1)):
+            break
     return out
+
+
+def find_delete_record(name, ts=""):
+    """找某账号的删除记录（restore 用）。给了 ts 就精确匹配那条，否则取最近一条。"""
+    name = str(name or "").strip()
+    ts = str(ts or "").strip()
+    for r in audit_log_tail(1000, action="del_user"):
+        if not r.get("ok"):
+            continue
+        if str(r.get("target") or "") != name:
+            continue
+        if ts and str(r.get("ts") or "") != ts:
+            continue
+        if isinstance(r.get("snapshot"), dict):
+            return r
+    return None
 
 
 def _hash(pw, salt):
@@ -506,6 +579,20 @@ def add_user(name, pw, role="user"):
         return ""
 
 
+def _snapshot(u):
+    """把账号「长什么样」存一份，**不含口令和会话**（删号后能一键恢复）。
+
+    口令哈希故意不存：恢复时必须重新设一个密码，否则等于把旧密码留在了日志里。
+    """
+    u = u if isinstance(u, dict) else {}
+    out = {}
+    for k in ("role", "owner", "allow_multi_device", "perms", "created", "last_login",
+              "device", "pc", "win_user", "ip", "kind"):
+        if k in u:
+            out[k] = u[k]
+    return out
+
+
 def del_user(name):
     name = str(name or "")
     with _LOCK:
@@ -520,12 +607,56 @@ def del_user(name):
             if len(admins) <= 1:
                 _audit("del_user", name, ok=False, detail="这是最后一个管理员，拒绝删除")
                 return "至少要保留一个管理员账号"
+        snap = _snapshot(u)
         us.pop(name, None)
         # allow_drop：这是**真的**删号，_save 的"盘上有就保留"护栏要放行这一条
         _save(d, allow_drop=[name])
         _audit("del_user", name, ok=True,
                detail="%s；删后剩 %d 个账号：%s" % (_user_brief(u), len(us),
-                                                 ",".join(sorted(us))[:200]))
+                                                 ",".join(sorted(us))[:200]),
+               extra={"snapshot": snap})
+        return ""
+
+
+def restore_user(name, pw, snap):
+    """按删除时的快照，把账号原样建回来（权限/角色/多端同登都照旧）→ '' 或 错误。
+
+    为什么必须重设密码：日志里**不存**旧口令（故意的），所以恢复=新建口令。
+    主账号（owner）只在当前没有主账号时才恢复成主账号，避免出现两个主账号。
+    """
+    name = str(name or "").strip()
+    if not name or not pw:
+        return "账号和密码不能为空"
+    if len(str(pw)) < 4:
+        _audit("restore_user", name, ok=False, detail="密码太短，未恢复")
+        return "密码至少 4 位"
+    snap = snap if isinstance(snap, dict) else {}
+    with _LOCK:
+        d = _load()
+        us = d.setdefault("users", {})
+        if name in us:
+            _audit("restore_user", name, ok=False, detail="账号已存在，未改动")
+            return "账号 %s 已经存在了，不用恢复" % name
+        has_owner = any(isinstance(x, dict) and x.get("owner") for x in us.values())
+        owner = bool(snap.get("owner")) and not has_owner
+        salt = secrets.token_hex(8)
+        u = {"salt": salt, "hash": _hash(pw, salt),
+             "role": snap.get("role") or "user", "created": _now(),
+             "token": "", "tokens": {}, "owner": owner,
+             "allow_multi_device": bool(snap.get("allow_multi_device")),
+             "last_login": "", "device": "",
+             "restored_from": str(snap.get("created") or "")}
+        if isinstance(snap.get("perms"), dict):
+            u["perms"] = dict(snap["perms"])
+        us[name] = u
+        _save(d)
+        _audit("restore_user", name, ok=True,
+               detail="按 %s 的删除记录恢复：角色=%s 主账号=%s 权限=%d 项%s" % (
+                   snap.get("created") or "历史", u["role"], owner,
+                   len(u.get("perms") or {}),
+                   "" if (snap.get("owner") == owner) else
+                   "（原来也是主账号，但现在已有主账号，这次不设为主账号）"),
+               extra={"restored_from": u["restored_from"]})
         return ""
 
 
@@ -588,11 +719,13 @@ def _login(name, pw, device="", dev_id="", model="", pc="", win_user="", ip="", 
     dev_id = str(dev_id or "").strip()
     left = blocked_left(dev_id)
     if left:
+        _audit_login_fail(name, "这台设备被踢下线了，还剩 %d 分钟" % left, ip, pc, win_user, kind)
         return None, "这台设备被踢下线了，%d 分钟后才能再登录" % left
     d = _load()
     us = d.setdefault("users", {})
     u = us.get(name)
     if not u or _hash(pw, u.get("salt") or "") != u.get("hash"):
+        _audit_login_fail(name, "账号或密码不对" if u else "账号不存在", ip, pc, win_user, kind)
         return None, "账号或密码不对"
     tok = secrets.token_urlsafe(24)
     k = str(kind or "desktop")[:16]
@@ -616,7 +749,47 @@ def _login(name, pw, device="", dev_id="", model="", pc="", win_user="", ip="", 
         u["dev"] = dev_id
         (d.get("blocked") or {}).pop(dev_id, None)
     _save(d)
+    # ★ 登录也记一笔：出问题时"谁在什么时候从哪台电脑登进来的"是最有用的一条线索
+    #   （原来只有心跳，不落盘 —— 子端一路「请先登录」那次完全查不出是哪台机器）
+    #   操作人：首次设置那条路径已经记了"(本机首次设置)"，保留它；普通登录就是账号本人。
+    #   来源 IP：一律用**这次登录**的 IP（不能沿用请求线程里之前设的值）。
+    _who0 = _actor()[0]
+    set_actor(_who0 or name, ip)
+    _audit("login", name, ok=True,
+           detail="%s；设备=%s；电脑=%s；系统用户=%s；会话=%s" % (
+               _login_desc(kind, device, model), dev_id or "-",
+               str(pc or "-")[:40], str(win_user or "-")[:40],
+               ",".join(sorted(toks.keys())) or "-"))
     return tok, ""
+
+
+_LOGIN_FAIL_AT = {}          # name → 上次记「登录失败」的时间（防刷屏，见下）
+
+
+def _audit_login_fail(name, reason, ip="", pc="", win_user="", kind=""):
+    """记「登录失败」。同名连续失败 60 秒内只记一条 —— 否则一个卡在重试的子端能把日志刷爆。"""
+    try:
+        nm = str(name or "") or "(空账号)"
+        now = time.time()
+        last = float(_LOGIN_FAIL_AT.get(nm) or 0)
+        if now - last < 60:
+            return
+        _LOGIN_FAIL_AT[nm] = now
+        # 这次尝试的「操作人 = 尝试登录的账号，来源 IP = 请求方」
+        set_actor(nm, ip)
+        _audit("login_fail", nm, ok=False,
+               detail="%s；原因=%s；设备=%s；电脑=%s；系统用户=%s" % (
+                   _login_desc(kind, "", ""), reason, str(ip or "-")[:40],
+                   str(pc or "-")[:40], str(win_user or "-")[:40]))
+    except Exception:
+        pass
+
+
+def _login_desc(kind, device="", model=""):
+    k = str(kind or "").lower()
+    name = {"desktop": "电脑版登录", "web": "网页端登录"}.get(k, (k + " 登录") if k else "登录")
+    d = device_label(device, model)
+    return name + (("　" + d) if d else "")
 
 
 def check(token):
@@ -655,6 +828,7 @@ def logout(token):
 def _logout(token):
     d = _load()
     changed = False
+    who = ""
     for _name, u in (d.get("users") or {}).items():
         if not isinstance(u, dict):
             continue
@@ -665,6 +839,14 @@ def _logout(token):
                 toks.pop(k, None)
             _set_tokens(u, toks)
             changed = True
+            who = _name
     if changed:
         _save(d)
+        _audit("logout", who, ok=True, detail="主动退出登录（会话已失效）")
     return changed
+
+
+# ==================== 模块加载时的动作（必须放最后） ====================
+# 接管老版本的账号文件（打包版从临时解包目录接过来）。放最后是因为它要写审计日志，
+# 而 _audit / AUDIT_LABELS 都在上面才定义 —— 放前面会 NameError（被 try 吞掉，日志就没了）。
+_adopt_legacy_file()

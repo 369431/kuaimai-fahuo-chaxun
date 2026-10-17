@@ -215,6 +215,21 @@ class Api(object):
         """
         return self.users_action("set_multi", name=name, flag=bool(on))
 
+    # ---------- 账号变更记录（审计日志）+ 一键恢复 ----------
+    def users_audit(self, limit=300, action="", who="", target="", only_failed=False):
+        """账号变更记录：谁 / 什么时候 / 从哪 / 改了什么（只读，来自只追加的 jsonl）。"""
+        import urllib.parse
+        q = urllib.parse.urlencode({"limit": int(limit or 300), "action": str(action or ""),
+                                    "who": str(who or ""), "target": str(target or ""),
+                                    "failed": "1" if only_failed else ""})
+        return self.get("/api/users/audit?" + q, timeout=20)
+
+    def restore_user(self, name, pw, ts=""):
+        """按删除时的快照把账号恢复回来（口令必须重设）。"""
+        return self.post("/api/users/restore",
+                         {"name": str(name or ""), "pw": str(pw or ""), "ts": str(ts or "")},
+                         timeout=25)
+
     def perms_payload(self):
         """权限清单 + 各账号权限（/api/perms）。
 

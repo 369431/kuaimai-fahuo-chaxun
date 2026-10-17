@@ -862,6 +862,7 @@ class Desktop(QWidget):
         out["每日发货量"] = (lambda *a: self.do_ship_stats())
         # ★ 三个设置窗也不再弹旧 Tk 窗了，改成电脑版自己的 Qt 窗
         out["子客户端管理"] = (lambda *a: self._open_dlg(AdminPanelDialog, "子客户端管理"))
+        out["账号变更记录"] = (lambda *a: self._open_dlg(AuditDialog, "账号变更记录"))
         out["打印分工"] = (lambda *a: self._open_dlg(PrintClientsDialog, "打印分工"))
         out["对外访问设置"] = (lambda *a: self._open_dlg(GatewayDialog, "对外访问设置"))
         # ★ API 设置也换成 Qt 窗（以前调主程序弹旧 Tk 窗，用户要求不要看到旧界面）
@@ -890,7 +891,7 @@ class Desktop(QWidget):
                      "导出扫码日志 Excel", "清空日志", "-",
                      "按条件筛选（本地）", "现货可发", "批次查询",
                      "改库存日志", "盘点", "每日发货量"]),
-            ("设置", ["API 设置", "对外访问设置", "子客户端管理", "打印分工",
+            ("设置", ["API 设置", "对外访问设置", "子客户端管理", "账号变更记录", "打印分工",
                      "登录 ERP", "-",
                      "可发撤回宽限…", "自动上架推荐货位", "上架后自动智能审核",
                      "后台扫码监听", "声音提示", "手机访问需口令"]),
@@ -3326,6 +3327,168 @@ class GatewayDialog(QDialog):
             self.load()
         else:
             self.msg.setText("失败：%s" % str((r or {}).get("error") or "未知错误")[:140])
+
+
+class AuditDialog(TableDialog):
+    """账号变更记录：谁 / 什么时候 / 从哪个 IP / 对哪个账号 / 做了什么。
+
+    ★ 为什么加这个窗：2026-10 出过「子账号无声消失」，当时**没有日志**，只能靠
+      auto_print.log 的时间线倒推，查不出是谁删的。现在每次账号变更都写进
+      kuaimai_users_log.jsonl（只追加），这个窗就是它的界面。
+
+      数据来源：GET /api/users/audit（可按 动作 / 操作人 / 账号 / 只看失败 筛选）
+      额外能力：选中一条「删除账号」记录 → 「恢复选中账号」→ 按当时的样子建回来
+               （口令必须重设，日志里不存旧口令）
+    """
+
+    def __init__(self, api, theme="light", parent=None):
+        # ★ 这几个筛选值必须在 super().__init__ 之前准备好：
+        #   TableDialog.__init__ 结尾会立刻 self.reload()，而 _request() 要读它们。
+        self.act = ""
+        self.who = ""
+        self.target = ""
+        self.failed = False
+        self._records = []
+        super().__init__(api, "user_audit", theme, parent)
+        self.setWindowTitle("账号变更记录")
+        self.resize(1180, 680)
+
+        box = QHBoxLayout()
+        box.addWidget(QLabel("动作"))
+        self.cb_act = QComboBox()
+        self.cb_act.addItem("全部动作", "")
+        self.cb_act.setMinimumHeight(32)
+        box.addWidget(self.cb_act)
+        box.addWidget(QLabel("操作人"))
+        self.e_who = QLineEdit()
+        self.e_who.setPlaceholderText("如 admin，留空=全部")
+        self.e_who.setMinimumHeight(32)
+        self.e_who.setFixedWidth(150)
+        self.e_who.returnPressed.connect(lambda *a: self.query())
+        box.addWidget(self.e_who)
+        box.addWidget(QLabel("账号"))
+        self.e_tgt = QLineEdit()
+        self.e_tgt.setPlaceholderText("只看某个账号")
+        self.e_tgt.setMinimumHeight(32)
+        self.e_tgt.setFixedWidth(150)
+        self.e_tgt.returnPressed.connect(lambda *a: self.query())
+        box.addWidget(self.e_tgt)
+        self.ck_fail = QCheckBox("只看失败")
+        box.addWidget(self.ck_fail)
+        b_q = U.GlowButton("查 询", primary=True)
+        b_q.clicked.connect(lambda *a: self.query())
+        box.addWidget(b_q)
+        # 插到标题行下面（索引 1）
+        self.layout().insertLayout(1, box)
+
+        # 底部：在「刷新 / 关闭」前面加一个「恢复选中账号」
+        row = self.layout().itemAt(self.layout().count() - 1).layout()
+        try:
+            self.b_restore = U.GlowButton("恢复选中账号")
+            self.b_restore.setToolTip("选中一条「删除账号」记录（绿色可恢复），把账号按当时的样子建回来")
+            self.b_restore.clicked.connect(lambda *a: self.restore_selected())
+            row.insertWidget(row.count() - 2, self.b_restore)
+        except Exception:
+            pass
+
+    # ---------- 数据 ----------
+    def _request(self):
+        return ("/api/users/audit",
+                {"limit": 400, "action": self.act, "who": self.who,
+                 "target": self.target, "failed": "1" if self.failed else ""}, 25)
+
+    def fill(self, r):
+        super().fill(r)
+        r = r if isinstance(r, dict) else {}
+        self._records = r.get("records") or []
+        # 下拉的动作清单由服务端给（同一个 AUDIT_LABELS 表，改后端就不用改界面）
+        try:
+            acts = r.get("actions") or []
+            if acts and self.cb_act.count() <= 1:
+                for a in acts:
+                    self.cb_act.addItem(str(a.get("label") or a.get("key")), str(a.get("key") or ""))
+        except Exception:
+            pass
+        self._mark_restorable()
+
+    def _mark_restorable(self):
+        """把「可以恢复」的行标绿、不可恢复的灰掉，用户一眼知道能点哪个。"""
+        try:
+            from PySide6.QtGui import QColor
+            good = QColor(28, 140, 70)
+            for i, rec in enumerate(self._records):
+                item = self.t.item(i, 1)
+                if item is None:
+                    continue
+                if rec.get("can_restore"):
+                    item.setForeground(good)
+                    item.setToolTip("可以点「恢复选中账号」把 %s 建回来" % rec.get("target"))
+                elif rec.get("action") == "del_user":
+                    item.setToolTip("这条记录是旧版本写的（没有账号快照），只能看、不能一键恢复")
+        except Exception:
+            pass
+
+    def query(self):
+        self.act = str(self.cb_act.currentData() or "")
+        self.who = (self.e_who.text() or "").strip()
+        self.target = (self.e_tgt.text() or "").strip()
+        self.failed = bool(self.ck_fail.isChecked())
+        self.lbl_kw.setText("筛选：" + " / ".join(
+            x for x in (self.cb_act.currentText() if self.act else "",
+                        ("操作人=" + self.who) if self.who else "",
+                        ("账号=" + self.target) if self.target else "",
+                        "只看失败" if self.failed else "") if x))
+        self.reload()
+
+    # ---------- 恢复 ----------
+    def restore_selected(self):
+        from PySide6.QtWidgets import QInputDialog
+        i = self.t.currentRow()
+        rec = self._records[i] if 0 <= i < len(self._records) else None
+        if not rec:
+            self.status.setText("先在表格里点一条记录，再点「恢复选中账号」")
+            return
+        if not rec.get("can_restore"):
+            self.status.setText("这条记录不能恢复（只有带账号快照的「删除账号」记录可以）")
+            return
+        snap = rec.get("snapshot") or {}
+        name = str(rec.get("target") or "")
+        what = "角色=%s%s%s" % (snap.get("role") or "user",
+                                "，主账号" if snap.get("owner") else "",
+                                "，权限 %s 项" % snap.get("perms")
+                                if snap.get("perms") else "")
+        if QMessageBox.question(
+                self, "恢复账号",
+                "按 %s 的删除记录恢复「%s」？\n\n当时的样子：%s\n删的人：%s（%s）\n\n"
+                "恢复后要让它用**新密码**重新登录。"
+                % (rec.get("ts") or "历史", name, what, rec.get("operator") or "?", rec.get("ip") or "?"),
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes) != QMessageBox.Yes:
+            return
+        pw, ok = QInputDialog.getText(self, "恢复账号",
+                                      "给 %s 设个新密码（至少 4 位）：" % name, QLineEdit.Password)
+        if not ok:
+            return
+        if len(pw or "") < 4:
+            self.status.setText("密码至少 4 位")
+            return
+        self.status.setText("正在恢复 %s…" % name)
+
+        def work():
+            try:
+                r = self.api.restore_user(name, pw, rec.get("ts") or "")
+            except Exception as e:
+                r = {"error": str(e)[:150]}
+            self._disp.post(lambda: self._restored(name, r))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _restored(self, name, r):
+        r = r if isinstance(r, dict) else {}
+        if r.get("error"):
+            self.status.setText("恢复失败：%s" % str(r.get("error"))[:160])
+            return
+        self.status.setText(str(r.get("msg") or ("已恢复 %s" % name))[:200])
+        self.reload()          # 刷新：新记录（restore_user）应该出现在最上面
 
 
 class AdminPanelDialog(QDialog):
