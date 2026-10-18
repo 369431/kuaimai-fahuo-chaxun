@@ -5565,9 +5565,11 @@ class _WebHandler(BaseHTTPRequestHandler):
                         return self._json({"error": "主账号不能删"}, 400)
                     err = auth.del_user(target)
                 elif act == "passwd":
-                    # 改自己的密码：不踢自己、不锁自己；改别人的：旧会话失效 + 那台设备 10 分钟不能再登录
+                    # 改密码：旧会话失效、需要用它重新登录。
+                    # ★ 不再锁设备 10 分钟（用户反馈不合理）：改完马上能用新密码登。
+                    # ★ 改**自己**的密码时保留自己的会话，否则自己这台界面立刻变 401。
                     mine = (target == str(me.get("name") or ""))
-                    err = auth.set_password(target, body.get("pw"), 0 if mine else 10)
+                    err = auth.set_password(target, body.get("pw"), 0, clear_tokens=not mine)
                 elif act == "kick":
                     if target == str(me.get("name") or ""):
                         return self._json({"error": "不能踢自己下线"}, 400)

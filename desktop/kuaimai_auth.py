@@ -680,7 +680,15 @@ def kick(name, minutes=10):
         return ""
 
 
-def set_password(name, pw, block_minutes=10):
+def set_password(name, pw, block_minutes=10, clear_tokens=True):
+    """改密码。
+
+    `block_minutes`：改完后让那台设备多少分钟不能再登录（0 = 不锁）。
+      ★ 电脑端「改密码」现在传 0：旧会话清掉、用新密码立刻就能登，不再莫名其妙锁 10 分钟
+        （用户反馈"给子账号改密码会踢下线十分钟这个不合理"）。
+    `clear_tokens`：是否让该账号所有旧会话立刻失效。
+      ★ 改**自己**的密码时传 False —— 否则自己这台电脑的界面会立刻变 401。
+    """
     if len(str(pw or "")) < 4:
         _audit("set_password", name, ok=False, detail="密码太短，未改动")
         return "密码至少 4 位"
@@ -693,14 +701,16 @@ def set_password(name, pw, block_minutes=10):
             return "账号不存在"
         u["salt"] = secrets.token_hex(8)
         u["hash"] = _hash(pw, u["salt"])
-        _set_tokens(u, {})               # 改密码后旧登录全部失效
+        if clear_tokens:
+            _set_tokens(u, {})           # 改密码后旧登录全部失效
         dev = str(u.get("dev") or "").strip()
-        if block_minutes and dev:            # 管理员改别人的密码：那台设备 10 分钟内不能再登录
+        if block_minutes and dev:            # 管理员改别人的密码：那台设备 N 分钟内不能再登录
             d.setdefault("blocked", {})[dev] = time.time() + max(1, int(block_minutes)) * 60
         _save(d)
         _audit("set_password", name, ok=True,
-               detail="%s；旧会话已清空，设备封禁=%s 分钟" % (
-                   _user_brief(u), int(block_minutes or 0)))
+               detail="%s；旧会话%s，设备封禁=%s 分钟" % (
+                   _user_brief(u), "已清空" if clear_tokens else "保留（本人改自己的密码）",
+                   int(block_minutes or 0)))
         return ""
 
 

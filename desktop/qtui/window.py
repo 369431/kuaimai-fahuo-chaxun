@@ -3524,7 +3524,7 @@ class AdminPanelDialog(QDialog):
         self.t_perm = QTableWidget(0, 3)
         self.t_perm.setHorizontalHeaderLabels(["权限键", "说明", "允许"])
         setup_table(self.t_perm, [220, 0, 80])
-        # ★ 权限页整页做成一个容器：表格 + 按钮栏（全选/全不选/恢复默认/刷新）
+        # ★ 权限页整页做成一个容器：表格 + 按钮栏（全选/全不选/恢复默认/保存权限）
         #   +「电脑端和网页端同时在线」开关。旧版有这些，之前全漏了。
         ptab = QWidget()
         pv = QVBoxLayout(ptab)
@@ -3536,12 +3536,14 @@ class AdminPanelDialog(QDialog):
         self.lbl_perm_info.setObjectName("hint")
         pbar.addWidget(self.lbl_perm_info)
         pbar.addStretch(1)
+        # ★ 这里只放「权限页自己的」按钮。以前「刷新」两个页签各有一个、
+        #   「保存权限」底部又重复一个 —— 用户反馈"有的按钮重复了"。现在：
+        #   刷新统一在底部（一次刷账号+权限），保存权限只留在这一页。
         for label, fn, tip in (
                 ("全 选", lambda: self.set_all_perms(True), "把当前账号的权限全部勾上"),
                 ("全不选", lambda: self.set_all_perms(False), "把当前账号的权限全部取消"),
-                ("恢复默认", self.restore_default_perms, "每个权限恢复成出厂默认值"),
-                ("保存权限", lambda: self.save_perms(), "保存当前账号的权限勾选"),
-                ("刷新", lambda: self.load(), "重新读取账号与权限")):
+                ("恢复默认", self.restore_default_perms, "每个权限恢复成出厂默认值（还要点保存）"),
+                ("保存权限", lambda: self.save_perms(), "保存当前账号的权限勾选")):
             b = U.GlowButton(label)
             b.setToolTip(tip)
             b.clicked.connect(lambda *a, f=fn: f())
@@ -3564,18 +3566,22 @@ class AdminPanelDialog(QDialog):
         self.who = QComboBox()
         self.who.setMinimumWidth(160)
         row.addWidget(self.who)
+        # ★ 「保存权限」从这里挪走了（权限页已经有了），免得同一个按钮出现两次
         for label, fn, tip in (
                 ("新增子账号", self.add_account,
                  "新建一个子账号（账号名 + 密码），建完在「权限」页勾权限"),
-                ("踢下线", lambda: self.user_act("kick"), "把选中的账号踢下线"),
-                ("改密码", lambda: self.user_act("passwd"), "给选中的账号改密码"),
-                ("删除", lambda: self.user_act("del"), "删除选中的账号"),
-                ("保存权限", lambda: self.save_perms(), "保存当前账号的权限勾选")):
+                ("踢下线", lambda: self.user_act("kick"),
+                 "把选中的账号踢下线，那台设备 10 分钟内不能再登录"),
+                ("改密码", lambda: self.user_act("passwd"),
+                 "给选中的账号改密码：旧登录立即失效、用新密码马上能再登（不锁设备）"),
+                ("删除", lambda: self.user_act("del"),
+                 "删除选中的账号（会先确认；删错了能在「账号变更记录」里一键恢复）")):
             b = U.GlowButton(label, primary=(label == "新增子账号"))
             b.setToolTip(tip)
             b.clicked.connect(lambda *a, f=fn: f())
             row.addWidget(b)
         b_re = U.GlowButton("刷 新")
+        b_re.setToolTip("重新读取账号、在线设备与权限")
         b_re.clicked.connect(lambda *a: self.load())
         row.addWidget(b_re)
         b_cl = U.GlowButton("关 闭", primary=True)
@@ -3630,13 +3636,21 @@ class AdminPanelDialog(QDialog):
             self.who.setCurrentIndex(i)
         # ★ 每个账号的权限 + 是否允许两端同时在线（旧版是按账号切换显示的）
         self._perm_users = {str(u.get("name")): u for u in devs if u.get("name")}
+        # ★ 权限勾选状态的数据源是 /api/perms 的 users[].perms（**完整的生效权限表**）。
+        #   以前这里读的是 /api/devices 的账号列表 —— 那份数据**没有 perms 字段**，
+        #   所以权限页永远全不勾、保存后也看不出变化，用户反馈"改权限不生效"就是这个。
+        try:
+            self._perm_by_name = {str(x.get("name")): x for x in ((p or {}).get("users") or [])
+                                  if x.get("name")}
+        except Exception:
+            self._perm_by_name = {}
         try:
             if not getattr(self, "_perm_hooked", False):
                 self.who.currentTextChanged.connect(lambda *a: self._show_user_perms())
+                self.t_dev.itemSelectionChanged.connect(lambda *a: self._sync_combo_from_table())
                 self._perm_hooked = True
         except Exception:
             pass
-        self._show_user_perms()
         # 权限表
         cat = []
         try:
@@ -3660,21 +3674,54 @@ class AdminPanelDialog(QDialog):
         self.t_perm.setRowCount(len(keys))
         for r, (k, label, grp) in enumerate(keys):
             shown = "%s　·　%s" % (grp, k) if grp else k
-            self.t_perm.setItem(r, 0, QTableWidgetItem(shown))
+            item = QTableWidgetItem(shown)
+            # ★ 真正的权限键存在 UserRole 里：显示文字里带分组（"订单　·　order.query"），
+            #   直接拿显示文字当键会被服务端 sanitize() 全部丢掉 → 保存等于没保存。
+            try:
+                item.setData(Qt.UserRole, k)
+            except Exception:
+                pass
+            self.t_perm.setItem(r, 0, item)
             self.t_perm.setItem(r, 1, QTableWidgetItem(str(label)))
             cb = QCheckBox()
             self.t_perm.setCellWidget(r, 2, cb)
-            # 反查数据里这个键的值，确定勾选状态
-            cb.setChecked(bool((self._perm_vals or {}).get(k)))
             cb.stateChanged.connect(lambda *a: self._perm_dirty())
         self.t_perm.resizeColumnsToContents()
-        # 「同时在线」开关跟着当前选中的账号走
+        # ★ 必须在权限表建好之后再刷勾选状态（以前先刷、表还是空的 → 勾选框永远不勾）
+        self._show_user_perms()
+        self.lbl_perm_info.setText("账号 %d 个　·　权限项 %d 个" % (len(devs), len(keys)))
+
+    def _perm_key(self, row):
+        """取第 row 行真正的权限键（存在 UserRole 里；老数据兜底用显示文字切）。"""
+        it = self.t_perm.item(row, 0)
+        if it is None:
+            return ""
         try:
-            u = self._perm_user or {}
-            self.ck_multi.setChecked(bool(u.get("allow_multi_device")))
+            k = it.data(Qt.UserRole)
+            if k:
+                return str(k)
         except Exception:
             pass
-        self.lbl_perm_info.setText("账号 %d 个　·　权限项 %d 个" % (len(devs), len(keys)))
+        return str(it.text()).split("·")[-1].strip()
+
+    def _sync_combo_from_table(self):
+        """在「在线设备 / 账号」页点某一行 → 上面那个账号下拉跟着切过去。
+
+        否则很容易出现"表里选的是张三、下拉还停在李四"→ 改密码/保存权限落到别人身上。
+        """
+        try:
+            r = self.t_dev.currentRow()
+            if r < 0:
+                return
+            it = self.t_dev.item(r, 0)
+            if it is None:
+                return
+            name = str(it.text() or "").strip()
+            i = self.who.findText(name)
+            if i >= 0 and self.who.currentIndex() != i:
+                self.who.setCurrentIndex(i)
+        except Exception:
+            pass
 
     def add_account(self):
         """★ 新增子账号（电脑端）。
@@ -3774,19 +3821,29 @@ class AdminPanelDialog(QDialog):
                                           QLineEdit.Password)
             if not ok or not pw:
                 return
+        if action == "del":
+            # ★ 删号必须二次确认：删错了以前只能手工改 json（现在还能在「账号变更记录」里恢复，
+            #   但也不该一点就删）。这里把账号名写进确认框，避免"选错人"。
+            if QMessageBox.question(
+                    self, "删除账号",
+                    "确认删除账号「%s」？\n\n它现在的登录会立即失效。\n"
+                    "删错了可以在「设置 → 账号变更记录」里点「恢复选中账号」把它恢复回来。"
+                    % name, QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                return
 
         def work():
             try:
                 r = self.api.users_action(action, name=name, pw=pw)
             except Exception as e:
                 r = {"error": str(e)[:150]}
-            self._disp.post(lambda: self._user_done(action, r))
+            self._disp.post(lambda: self._user_done(action, name, r))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _user_done(self, action, r):
+    def _user_done(self, action, name, r):
         if isinstance(r, dict) and r.get("ok"):
-            self.msg.setText("已%s ✓" % action)
+            self.msg.setText("已%s：%s ✓" % ({"kick": "踢下线", "passwd": "改密码",
+                                              "del": "删除账号"}.get(action, action), name))
             self.load()
         else:
             self.msg.setText("失败：%s" % str((r or {}).get("error") or "未知错误")[:140])
@@ -3795,14 +3852,17 @@ class AdminPanelDialog(QDialog):
         """把当前选中账号的权限勾选状态和「同时在线」开关刷到界面上。"""
         name = (self.who.currentText() or "").strip()
         u = (self._perm_users or {}).get(name) or {}
-        self._perm_user = u
-        self._perm_vals = dict(u.get("perms") or {})
+        pu = (getattr(self, "_perm_by_name", None) or {}).get(name) or {}
+        self._perm_user = u or pu
+        # ★ 生效权限表来自 /api/perms（完整表）；拿不到就退回账号里存的原始 perms
+        self._perm_vals = dict(pu.get("perms") or {})
+        if not self._perm_vals:
+            self._perm_vals = dict(u.get("perms") or {})
         for r in range(self.t_perm.rowCount()):
-            it = self.t_perm.item(r, 0)
+            key = self._perm_key(r)
             cb = self.t_perm.cellWidget(r, 2)
-            if it is None or cb is None:
+            if not key or cb is None:
                 continue
-            key = str(it.text()).split("·")[-1].strip()
             try:
                 cb.blockSignals(True)
                 cb.setChecked(bool(self._perm_vals.get(key)))
@@ -3811,12 +3871,12 @@ class AdminPanelDialog(QDialog):
                 pass
         try:
             self.ck_multi.blockSignals(True)
-            self.ck_multi.setChecked(bool(u.get("allow_multi_device")))
+            self.ck_multi.setChecked(bool(pu.get("allow_multi_device", u.get("allow_multi_device"))))
             self.ck_multi.blockSignals(False)
         except Exception:
             pass
         self.lbl_perm_info.setText("当前账号：%s（%s）　勾选 %d 项"
-                                   % (name or "-", u.get("role") or "-",
+                                   % (name or "-", pu.get("role") or u.get("role") or "-",
                                       sum(1 for v in (self._perm_vals or {}).values() if v)))
 
     def _perm_dirty(self):
@@ -3833,11 +3893,10 @@ class AdminPanelDialog(QDialog):
     def restore_default_perms(self):
         """恢复默认：按权限清单里的 default 值勾选（不直接写库，跟旧版一样要点保存）。"""
         for r in range(self.t_perm.rowCount()):
-            it = self.t_perm.item(r, 0)
+            key = self._perm_key(r)
             cb = self.t_perm.cellWidget(r, 2)
-            if it is None or cb is None:
+            if not key or cb is None:
                 continue
-            key = str(it.text()).split("·")[-1].strip()
             cb.setChecked(bool((self._perm_default or {}).get(key)))
         self._perm_dirty()
 
@@ -3872,13 +3931,17 @@ class AdminPanelDialog(QDialog):
     def save_perms(self):
         name = (self.who.currentText() or "").strip()
         if not name:
+            self.msg.setText("先在下面的下拉里选一个账号")
             return
         vals = {}
         for r in range(self.t_perm.rowCount()):
-            k = self.t_perm.item(r, 0)
+            key = self._perm_key(r)
             cb = self.t_perm.cellWidget(r, 2)
-            if k is not None and cb is not None:
-                vals[k.text()] = bool(cb.isChecked())
+            if key and cb is not None:
+                vals[key] = bool(cb.isChecked())
+        if not vals:
+            self.msg.setText("没读到权限清单（先点「刷新」）")
+            return
         self.msg.setText("正在保存权限…")
 
         def work():
@@ -3886,15 +3949,35 @@ class AdminPanelDialog(QDialog):
                 r = self.api.save_perms(name, vals)
             except Exception as e:
                 r = {"error": str(e)[:150]}
-            self._disp.post(lambda: self._perm_done(r))
+            self._disp.post(lambda: self._perm_done(name, vals, r))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _perm_done(self, r):
-        if isinstance(r, dict) and r.get("ok"):
-            self.msg.setText("权限已保存 ✓")
-        else:
-            self.msg.setText("保存失败：%s" % (str((r or {}).get("error") or "未知错误")[:140]))
+    def _perm_done(self, name, vals, r):
+        r = r if isinstance(r, dict) else {}
+        if r.get("error"):
+            self.msg.setText("保存失败：%s" % str(r.get("error"))[:140])
+            return
+        # 服务端会回一份「保存后生效的权限表」→ 直接拿它回填，界面和盘上一定一致
+        p = r.get("perms") if isinstance(r.get("perms"), dict) else None
+        self.msg.setText("已保存 %s 的权限（%d 项开启）✓" % (name, sum(1 for v in vals.values() if v)))
+        if p is not None:
+            try:
+                self._perm_by_name.setdefault(name, {})["perms"] = dict(p)
+                self._perm_vals = dict(p)
+                for i in range(self.t_perm.rowCount()):
+                    key = self._perm_key(i)
+                    cb = self.t_perm.cellWidget(i, 2)
+                    if key and cb is not None:
+                        cb.blockSignals(True)
+                        cb.setChecked(bool(p.get(key)))
+                        cb.blockSignals(False)
+                self.lbl_perm_info.setText("当前账号：%s　勾选 %d 项（已保存）"
+                                           % (name, sum(1 for v in p.values() if v)))
+                return
+            except Exception:
+                pass
+        self.load()
 
 
 class PrintProgressDialog(QDialog):
