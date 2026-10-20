@@ -10,7 +10,7 @@ WEB_INDEX_HTML = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0b5394">
-<title>杨乾坤的发货查询系统</title>
+<title>快麦扫码查询</title>
 <style>
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body { margin:0; font-family:-apple-system,"Microsoft YaHei","PingFang SC",sans-serif; background:#f5f6f8; color:#222; }
@@ -435,7 +435,7 @@ PICK_HTML = r"""<!doctype html>
 <html lang="zh-CN"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>拣货 · 杨乾坤的发货查询系统</title>
+<title>拣货 · 快麦发货查询</title>
 <style>
   body { margin:0; font-family:system-ui,-apple-system,"Microsoft YaHei",sans-serif; background:#f5f6f8; padding:10px 10px 78px; }
   h1 { font-size:17px; margin:2px 0 8px; color:#0b5394; }
@@ -913,7 +913,7 @@ ORDER_HTML = r"""<!doctype html>
 <html lang="zh-CN"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>订单查询 · 杨乾坤的发货查询系统</title>
+<title>订单查询 · 快麦</title>
 <style>
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   :root { --blue:#007AFF; --green:#34C759; --red:#FF3B30; --ink:#1d1d1f; --sub:#6e6e73;
@@ -1087,7 +1087,7 @@ STOCKTAKE_HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-<title>库存盘点 · 杨乾坤的发货查询系统</title>
+<title>库存盘点 · 快麦扫码</title>
 <style>
   :root { --bg:#e0e5ec; --card:#e0e5ec; --sub:#6b7280; --line:rgba(60,60,67,.10); }
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
@@ -1260,7 +1260,7 @@ STOCK_HTML = r"""<!doctype html>
 <html lang="zh-CN"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>现货可发 · 杨乾坤的发货查询系统</title>
+<title>现货可发 · 快麦</title>
 <style>
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   :root { --blue:#007AFF; --green:#34C759; --red:#FF3B30; --ink:#1d1d1f; --sub:#6e6e73;
@@ -1961,7 +1961,7 @@ PERMS_HTML = r"""<!doctype html>
 <html lang="zh-CN"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>权限管理 · 杨乾坤的发货查询系统</title>
+<title>权限管理 · 快麦扫码查询</title>
 <style>
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   :root { --blue:#007AFF; --green:#34C759; --red:#FF3B30; --ink:#1d1d1f; --sub:#6e6e73;
@@ -2202,7 +2202,7 @@ PRINTS_HTML = r"""<!doctype html>
 <html lang="zh-CN"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>打印记录 · 杨乾坤的发货查询系统</title>
+<title>打印记录 · 快麦</title>
 <style>
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   :root { --blue:#007AFF; --green:#34C759; --red:#FF3B30; --orange:#FF9500; --ink:#1d1d1f; --sub:#6e6e73;
@@ -2499,7 +2499,7 @@ WAVE_HTML = r"""<!doctype html>
 <html lang="zh-CN"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>生成波次 · 杨乾坤的发货查询系统</title>
+<title>生成波次 · 快麦</title>
 <style>
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   :root { --blue:#007AFF; --green:#34C759; --red:#FF3B30; --ink:#1d1d1f; --sub:#6e6e73;
@@ -3523,7 +3523,7 @@ WAVE_RECORDS_HTML = r"""<!doctype html>
 <html lang="zh-CN"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>波次记录 · 杨乾坤的发货查询系统</title>
+<title>波次记录 · 快麦</title>
 <style>
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   :root { --blue:#007AFF; --green:#34C759; --red:#FF3B30; --orange:#FF9500; --ink:#1d1d1f; --sub:#6e6e73;

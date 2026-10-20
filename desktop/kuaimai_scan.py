@@ -6974,7 +6974,7 @@ class ScanApp:
         self.remote = bool(kmclient and session is not None and session.is_remote)
         self.gated = {}                        # 权限键 → [(控件, 处理方式, 说明)]
         self._locked = False                   # 被踢下线后锁界面
-        self.root.title("杨乾坤的发货查询系统 %s%s" % (APP_VER, "（子客户端）" if self.remote else ""))
+        self.root.title("快麦扫码查询 %s%s" % (APP_VER, "（子客户端）" if self.remote else ""))
         self.root.geometry("1080x760")
         self.root.minsize(920, 620)
         try:
@@ -9273,7 +9273,7 @@ class ScanApp:
             self.progress.grid_remove()
         except Exception:
             pass
-        self.root.title("杨乾坤的发货查询系统")
+        self.root.title("快麦扫码查待发货 + 货架在架数")
 
     def _show_pull_progress(self, count, page, t0):
         self._pull_count, self._pull_page, self._pull_t0 = count, page, t0
@@ -9297,7 +9297,7 @@ class ScanApp:
             body = "已拉取 %d 单（已处理 %d 个分片，用时 %d:%02d，约 %.0f 单/秒）；总数统计中…" % (
                 count, page, int(el) // 60, int(el) % 60, rate)
         self.status_text.set("正在全量拉取待发货订单…" + body)
-        self.root.title("杨乾坤的发货查询系统 — 拉取 %d / %s 单" % (count, self.total_est or "统计中"))
+        self.root.title("快麦扫码查询 — 拉取 %d / %s 单" % (count, self.total_est or "统计中"))
         # 进度文件走统一入口（界面底部那条彩色进度条读它）
         _write_pull_progress("orders", count, page, self.total_est, t0)
 
@@ -11774,7 +11774,7 @@ def main():
             try:
                 messagebox.showwarning(
                     "已经在运行",
-                    "km 发货查询系统（主客户端）已经在运行了。\n\n"
+                    "快麦扫码查询（主客户端）已经在运行了。\n\n"
                     "请直接用屏幕上已经开着的那个窗口；不要开两个，\n"
                     "两个窗口会抢同一个数据库，扫码会没反应。")
             except Exception:

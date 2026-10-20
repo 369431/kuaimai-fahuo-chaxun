@@ -40,7 +40,7 @@ class LoginWindow:
 
         win = tk.Toplevel(parent)
         self.win = win
-        win.title("杨乾坤的发货查询系统 %s · 登录" % kmc.APP_VER)
+        win.title("快麦扫码查询 %s · 登录" % kmc.APP_VER)
         win.geometry("580x720")
         win.minsize(560, 660)
         win.resizable(True, True)
@@ -59,7 +59,7 @@ class LoginWindow:
 
         head = tk.Frame(win, bg=BG)
         head.pack(fill=tk.X, padx=16, pady=(14, 4))
-        tk.Label(head, text="km 发货查询系统 %s" % kmc.APP_VER, bg=BG, fg="#1d1d1f",
+        tk.Label(head, text="快麦发货查询 %s" % kmc.APP_VER, bg=BG, fg="#1d1d1f",
                  font=("Microsoft YaHei", 17, "bold")).pack(anchor="w")
         self.sub = tk.Label(head, text="登录后才能看到数据：管理员账号 = 主客户端，其它账号 = 子客户端",
                             bg=BG, fg="#6e6e73", font=("Microsoft YaHei", 9))

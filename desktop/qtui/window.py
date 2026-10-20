@@ -144,7 +144,7 @@ class LoginDialog(QDialog):
     def __init__(self, api, parent=None):
         super().__init__(parent)
         self.api = api
-        self.setWindowTitle("登录 · 杨乾坤的发货查询系统")
+        self.setWindowTitle("登录 快麦发货查询")
         self.setFixedSize(400, 300)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(20, 18, 20, 16)
@@ -212,7 +212,7 @@ class LoginScreen(QDialog):
         self.base = base
         self.out_file = out_file
         self._disp = Dispatcher(self)          # 跨线程回主线程（跟主窗口同一套机制）
-        self.setWindowTitle("杨乾坤的发货查询系统")
+        self.setWindowTitle("快麦发货查询")
         self.setFixedSize(470, 430)
         self.setStyleSheet(U.qss(U.LIGHT if theme == "light" else U.DARK))
 
@@ -221,7 +221,7 @@ class LoginScreen(QDialog):
         lay.setSpacing(9)
 
         head = QHBoxLayout()
-        brand = QLabel("km 发货查询系统")
+        brand = QLabel("快麦发货查询")
         brand.setObjectName("brand")
         head.addWidget(brand)
         head.addStretch(1)
@@ -792,7 +792,7 @@ class Desktop(QWidget):
         self.setObjectName("root")
         self._bg = QColor(U.LIGHT["bg"])
         self.setAttribute(Qt.WA_OpaquePaintEvent, True)
-        self.setWindowTitle("杨乾坤的发货查询系统 · 电脑版 · 新版界面Qt%s" % _BUILD_TAG())
+        self.setWindowTitle("快麦发货查询 · 电脑版 · 新版界面Qt%s" % _BUILD_TAG())
         self.resize(1240, 820)
         self.setMinimumSize(940, 600)
         self._build()
@@ -882,7 +882,7 @@ class Desktop(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        self.tb = U.MacTitleBar(self, "km 发货查询系统", self.api.ver or "电脑版",
+        self.tb = U.MacTitleBar(self, "快麦发货查询", self.api.ver or "电脑版",
                                 on_theme=self.toggle_theme)
         self.tb.title.setText("电脑版 · 本机服务（同一进程）")
         # 二级菜单：数据 / 设置 / 系统
@@ -1620,7 +1620,7 @@ class Desktop(QWidget):
         self._show_top(d)
 
     def do_about(self):
-        self._say("关于", "km 发货查询系统 · 电脑版\n\n"
+        self._say("关于", "快麦发货查询 · 电脑版\n\n"
                           "界面：Qt（PySide6）+ mac 风格标题栏\n"
                           "数据：本机主程序 %s\n"
                           "登录账号：%s（%s）\n"
