@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """桌面端「登录 / 主-子客户端」支撑：本机配置、局域网自动发现、会话与远程接口。
 
 主客户端 = 跑服务、持有数据和 ERP 凭据的那台电脑（登录管理员账号的那台）
@@ -22,7 +22,7 @@ import urllib.parse
 import urllib.request
 
 APP = "kuaimai-fahuo-chaxun"
-APP_VER = "v2.35"              # 版本号（登录窗/主窗口都显示它，一眼能看出是不是新版）
+APP_VER = "v2.36"              # 版本号（登录窗/主窗口都显示它，一眼能看出是不是新版）
 DISCOVER_PORT = 8791
 DISCOVER_REQ = b"KUIMAI-SCAN-DISCOVER/1"
 DEFAULT_PORT = 8790
