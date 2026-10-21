@@ -4308,6 +4308,14 @@ class _WebHandler(BaseHTTPRequestHandler):
                     "lan": bool(_WEB_STATE.get("lan")),
                     "ver": APP_VER,
                 })
+            if parsed.path == "/api/desktop/auto_audit":
+                # ★ GET 版：读「自动智能审核」设置。
+                #   踩过的坑：这条一开始只写在 do_POST 里，GET 直接 404 ——
+                #   跟当初 /api/wave/queue 一样的毛病，所以 GET / POST 都要注册。
+                deny = self._need(me, "data.refresh")
+                if deny:
+                    return deny
+                return self._json(auto_audit_settings())
             if parsed.path == "/api/desktop/log":
                 # 电脑版「打单进度 / 实时日志」用：读 auto_print.log 尾部。
                 # 权限用 data.refresh（跟其它电脑版接口一套；data.view 默认没发给管理员，实测 403）
@@ -4918,6 +4926,50 @@ class _WebHandler(BaseHTTPRequestHandler):
                 except Exception as e:
                     return self._json({"error": "执行失败：%s" % str(e)[:180]}, 500)
                 return self._json({"ok": True, "name": name})
+            if path == "/api/desktop/auto_audit":
+                # ★ 自动智能审核的设置读写（电脑版「智能审核」菜单用）
+                #   GET  → 返回 {on, all, interval_min, days}
+                #   POST → 改设置（只改传进来的键）
+                deny = self._need(me, "data.refresh")
+                if deny:
+                    return deny
+                if not body:
+                    return self._json(auto_audit_settings())
+                try:
+                    out = set_auto_audit_conf(
+                        on=body.get("on") if "on" in body else None,
+                        all_=body.get("all") if "all" in body else None,
+                        interval_min=body.get("interval_min") if "interval_min" in body else None,
+                        days=body.get("days") if "days" in body else None)
+                except Exception as e:
+                    return self._json({"error": str(e)[:160]}, 400)
+                try:
+                    print_jobs_log("自动智能审核设置已更新：%s"
+                                   % json.dumps(out, ensure_ascii=False))
+                except Exception:
+                    pass
+                return self._json(out)
+            if path == "/api/desktop/auto_audit_run":
+                # ★ 立刻跑一次智能审核（不等定时）—— 手动触发
+                deny = self._need(me, "data.refresh")
+                if deny:
+                    return deny
+                try:
+                    import auto_audit as _aa
+                    _cfg = auto_audit_settings()
+
+                    def _cdp():
+                        import kuaimai_print as _kp
+                        return _kp.open_cdp_page()
+
+                    _n, _lines = _aa.audit_all(
+                        _cdp, api_call_authed, days=_cfg["days"],
+                        dry_run=bool(body.get("dry_run")))
+                    for _ln in _lines:
+                        print_jobs_log("[自动审核]%s" % _ln)
+                    return self._json({"ok": True, "count": _n, "lines": _lines})
+                except Exception as e:
+                    return self._json({"error": "审核失败：%s" % str(e)[:180]}, 500)
             if path == "/api/desktop/opt":
                 # 电脑版：开关类设置。带 value = 设成该值；不带 = 切换。
                 deny = self._need(me, "data.refresh")
@@ -11167,22 +11219,68 @@ def set_auto_putaway_conf(on=None, secs=None):
 
 
 def auto_audit_conf():
-    """上架后自动智能审核 → 开关（默认 **关**）。
+    """自动智能审核的开关（默认 **关**）。
 
-    用户口径：「操作完上架单还要智能审核才能去打印快递单」。
-    只在上架成功且本开关打开时才触发；审核走 ERP 自己的审单规则（不强制放行）。
+    返回 bool：总开关是否打开（兼容老调用）。要看详细设置用 auto_audit_settings()。
     """
     s = load_settings() or {}
     return bool(s.get("auto_audit_on", False))
 
 
-def set_auto_audit_conf(on=None):
-    """写自动审核开关（只改这一个键，其他设置原样保留）。"""
+# ★ 定时全量审核的间隔（分钟）：1 分钟 ~ 24 小时
+AUDIT_INTERVAL_MIN_DEF = 10
+AUDIT_INTERVAL_MIN_LO = 1
+AUDIT_INTERVAL_MIN_HI = 1440
+
+
+def auto_audit_settings():
+    """自动智能审核的完整设置 → {on, all, interval_min, days}。
+
+    on          总开关
+    all         True = 定时审**全部可审的**（不再只跟上架那批）
+                False = 老行为：上架成功后只审那批编码
+    interval_min 定时全量审核的间隔（分钟）
+    days        回溯多少天内创建的待审核单
+    """
+    s = load_settings() or {}
+    try:
+        iv = int(s.get("auto_audit_interval_min") or AUDIT_INTERVAL_MIN_DEF)
+    except Exception:
+        iv = AUDIT_INTERVAL_MIN_DEF
+    iv = max(AUDIT_INTERVAL_MIN_LO, min(AUDIT_INTERVAL_MIN_HI, iv))
+    try:
+        days = int(s.get("auto_audit_days") or 7)
+    except Exception:
+        days = 7
+    days = max(1, min(30, days))
+    return {"on": bool(s.get("auto_audit_on", False)),
+            "all": bool(s.get("auto_audit_all", True)),
+            "interval_min": iv,
+            "days": days}
+
+
+def set_auto_audit_conf(on=None, all_=None, interval_min=None, days=None):
+    """写自动审核设置（只改传进来的键，其它设置原样保留）。"""
     s = load_settings() or {}
     if on is not None:
         s["auto_audit_on"] = bool(on)
+    if all_ is not None:
+        s["auto_audit_all"] = bool(all_)
+    if interval_min is not None:
+        try:
+            v = int(interval_min)
+        except Exception:
+            v = AUDIT_INTERVAL_MIN_DEF
+        s["auto_audit_interval_min"] = max(AUDIT_INTERVAL_MIN_LO,
+                                           min(AUDIT_INTERVAL_MIN_HI, v))
+    if days is not None:
+        try:
+            d = int(days)
+        except Exception:
+            d = 7
+        s["auto_audit_days"] = max(1, min(30, d))
     save_settings(s)
-    return auto_audit_conf()
+    return auto_audit_settings()
 
 
 def _load_shelf_map_now():
@@ -11259,12 +11357,19 @@ def start_auto_putaway_watcher(session=None, shelf_map_getter=None):
     _WEB_STATE["auto_putaway_stop"] = stop
 
     def on_done(codes):
-        """上架成功后：若开了「上架后自动智能审核」→ 把这批编码的待审核单智能审掉。
+        """上架成功后：若开了「智能审核」→ 把这批编码的待审核单智能审掉。
 
         用户口径：「操作完上架单还要智能审核才能去打印快递单」。
         **未开开关就直接返回**（不影响上架）；审核异常也不影响上架（process_once 已兜住）。
+
+        ★ 如果设置里开了「审全部可审的」，这里就**不再重复审一遍**
+          （定时循环会统一扫全部，避免同一个单被两个入口抢着送审）。
         """
-        if not auto_audit_conf():
+        cfg = auto_audit_settings()
+        if not cfg["on"]:
+            return
+        if cfg["all"]:
+            # 全量模式 → 交给定时循环，避免重复送审
             return
         try:
             import auto_audit as aa
@@ -11277,7 +11382,7 @@ def start_auto_putaway_watcher(session=None, shelf_map_getter=None):
             return KP.open_cdp_page()
 
         n, lines = aa.audit_codes(cdp_factory, api, codes,
-                                  days=AUTO_AUDIT_LOOKBACK_DAYS)
+                                  days=cfg["days"])
         for ln in lines:
             print_jobs_log("[自动审核]%s" % ln)
         if n:
@@ -11299,6 +11404,81 @@ def start_auto_putaway_watcher(session=None, shelf_map_getter=None):
     _on, _secs = auto_putaway_conf()
     print_jobs_log("自动上架监听已启动（开关 %s，每 %d 秒查一次待上架单）"
                    % ("开" if _on else "关", _secs))
+    return t
+
+
+def start_auto_audit_loop(api=None):
+    """★ 定时全量智能审核：每 N 分钟扫一遍**全部**待审核单，能审的都审掉。
+
+    为什么要它（用户要求）：「把智能审核改成审全部可审的，触发时长自定义」。
+    和老行为（上架成功后只审那批编码）的区别：
+      · 老行为漏掉的单永远不审（比如库存本来就有、没走上架流程的编码）
+      · 这里**定时全量扫**：缺货异常 / 有未处理留言的仍然自动跳过
+
+    设置：auto_audit_on（总开关）、auto_audit_all（是否全量）、
+          auto_audit_interval_min（间隔分钟，1~1440）、auto_audit_days（回溯天数）
+    """
+    if _WEB_STATE.get("auto_audit_thread") is not None:
+        return _WEB_STATE.get("auto_audit_thread")
+    if api is None:
+        api = api_call_authed
+
+    stop = threading.Event()
+    _WEB_STATE["auto_audit_stop"] = stop
+
+    def _one_round():
+        cfg = auto_audit_settings()
+        if not cfg["on"]:
+            return
+        if not cfg["all"]:
+            return              # 只跟上架走（老行为），不需要定时扫
+        try:
+            import auto_audit as aa
+        except Exception as e:
+            print_jobs_log("[自动审核] 模块加载失败：%s" % str(e)[:120])
+            return
+
+        def cdp_factory():
+            import kuaimai_print as KP
+            return KP.open_cdp_page()
+
+        try:
+            n, lines = aa.audit_all(cdp_factory, api, days=cfg["days"])
+        except BaseException as e:
+            print_jobs_log("[自动审核] 本轮出错：%s" % str(e)[:140])
+            return
+        for ln in lines:
+            print_jobs_log("[自动审核]%s" % ln)
+        if n:
+            print_jobs_log("[自动审核] 定时全量：本轮审掉 %d 单" % n)
+
+    def run():
+        # 启动后先等 60 秒（避免和开机时的一堆初始化抢浏览器），之后按间隔跑
+        first = True
+        while not stop.is_set():
+            cfg = auto_audit_settings()
+            wait_s = 60 if first else max(60, cfg["interval_min"] * 60)
+            first = False
+            # 用短切片等待，开关/间隔改了能较快生效，也能及时响应退出
+            slept = 0
+            while slept < wait_s and not stop.is_set():
+                time.sleep(min(5, wait_s - slept))
+                slept += 5
+            if stop.is_set():
+                break
+            try:
+                _one_round()
+            except BaseException:
+                pass
+
+    t = threading.Thread(target=run, daemon=True, name="auto-audit-loop")
+    _WEB_STATE["auto_audit_thread"] = t
+    t.start()
+    _cfg = auto_audit_settings()
+    print_jobs_log("智能审核定时任务已启动（开关 %s，模式 %s，每 %d 分钟）"
+                   % ("开" if _cfg["on"] else "关",
+                      "审全部可审" if _cfg["all"] else "只审上架那批",
+                      _cfg["interval_min"]))
     return t
 
 
@@ -11847,6 +12027,11 @@ def main():
             # 自动上架（推荐货位）：独立开关 + 可调间隔，纯开放平台 API（只在主客户端跑）
             start_auto_putaway_watcher(
                 session, shelf_map_getter=lambda: getattr(app, "shelf_map", {}) or {})
+        except Exception:
+            pass
+        try:
+            # ★ 定时全量智能审核（审全部可审的，间隔可自定义）
+            start_auto_audit_loop()
         except Exception:
             pass
         _note_login(session.name, session.role, session.mode)

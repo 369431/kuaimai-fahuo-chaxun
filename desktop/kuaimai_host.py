@@ -539,6 +539,13 @@ class Host(object):
         except Exception:
             pass
         try:
+            # ★ 定时全量智能审核（审全部可审的，间隔可自定义）
+            #   ★★ 必须放在 Host 里：实际运行的是 Host.start()，不是 kuaimai_scan.main()
+            #      （当初只加在 main() 里，结果线上一直没生效 —— 日志里看不到启动行）
+            KS.start_auto_audit_loop()
+        except Exception:
+            pass
+        try:
             KS._note_login(sess.name, sess.role, sess.mode,
                            token=str(getattr(sess, "token", "") or ""))
         except Exception:

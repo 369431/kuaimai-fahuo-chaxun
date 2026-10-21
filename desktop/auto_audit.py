@@ -88,8 +88,11 @@ def _up(s):
 
 # ============= 找「这些编码的待审核单」=============
 
-def find_pending_sids(api, codes, days=_DEFAULT_WINDOW_DAYS, max_win_days=2):
-    """查 `codes` 里各编码当前**待审核**的订单 → (可审 sids, 命中的编码, 跳过说明, 错误)。
+def find_pending_sids(api, codes=None, days=_DEFAULT_WINDOW_DAYS, max_win_days=2):
+    """查**待审核**订单 → (可审 sids, 命中的编码, 跳过说明, 错误)。
+
+    codes=None 或空 → **审全部可审的**（不按编码过滤，用于「定时全量自动审核」）；
+    codes 给了具体编码 → 只审这些编码相关的单（上架后的老行为）。
 
     **用户口径（必须遵守）**：
       · **缺货异常的订单本身就不能智能审核** → 带 `exceptions`（尤其 `EX_INSUFFICIENT`）的直接跳过；
@@ -100,8 +103,10 @@ def find_pending_sids(api, codes, days=_DEFAULT_WINDOW_DAYS, max_win_days=2):
     只查 WAIT_AUDIT；按创建时间切窗（避免 20027 查询结果过多）。
     """
     from datetime import datetime, timedelta
+    # ★ codes=None/空 = 全量模式：不按编码过滤（"审全部可审的"）
+    all_mode = not any(str(c or "").strip() for c in (codes or []))
     want = set(_up(c) for c in (codes or []) if str(c or "").strip())
-    if not want:
+    if not all_mode and not want:
         return [], set(), "没有要审的编码", ""
     now = datetime.now()
     fmt = "%Y-%m-%d %H:%M:%S"
@@ -137,17 +142,24 @@ def find_pending_sids(api, codes, days=_DEFAULT_WINDOW_DAYS, max_win_days=2):
                 sid = str(o.get("sid") or "").strip()
                 if not sid or sid in seen:
                     continue
-                m = False
-                for it in (o.get("orders") or []):
-                    c1, c2 = _up(it.get("sysOuterId")), _up(it.get("sysItemOuterId"))
-                    if c1 in want or c2 in want:
-                        m = True
-                        if c1 in want:
+                if all_mode:
+                    # 全量模式：不按编码过滤，只把涉及编码记进 hit（日志里好显示范围）
+                    for it in (o.get("orders") or []):
+                        c1 = _up(it.get("sysOuterId"))
+                        if c1:
                             hit.add(c1)
-                        if c2 in want:
-                            hit.add(c2)
-                if not m:
-                    continue
+                else:
+                    m = False
+                    for it in (o.get("orders") or []):
+                        c1, c2 = _up(it.get("sysOuterId")), _up(it.get("sysItemOuterId"))
+                        if c1 in want or c2 in want:
+                            m = True
+                            if c1 in want:
+                                hit.add(c1)
+                            if c2 in want:
+                                hit.add(c2)
+                    if not m:
+                        continue
                 seen.add(sid)
                 # ① 缺货异常 → 本身就不能审
                 if o.get("exceptions"):
@@ -303,6 +315,157 @@ def verify_left_pending(api, sids, days=_DEFAULT_WINDOW_DAYS):
 
 
 # ============= 对外主流程 =============
+
+def audit_scope_all(c, ignore_before_date=True):
+    """★ 调用 ERP 原生的「**审核所有待审核订单**」模式 → (状态, 说明)。
+
+    这是从 ERP 前端 JS 里挖出来的确切用法（`main.b6ed4c72bed648b44954.js`）：
+        l = {url:"/trade/audit/manual", type:"post"}
+        对话框 radio name="audit_num" 的取值（注意**界面顺序 ≠ 取值**）：
+            value="1" → 审核查询结果中待审核订单
+            value="3" → 审核查询结果中待审核订单和仅【缺】异常订单（会加 containInsufficient=true）
+            value="2" → **审核所有待审核订单**   ← 就是本函数用的
+        value=2 时前端只做两件事：l.ignoreBeforeDate=勾选值，然后直接发 l
+        （**不传 sid / queryId / pageNo / timeType**，服务端自己扫全部待审核）
+
+    api_name 是前端从 url 自动生成的：
+        c.url.substring(1).replace(/[\\/]/g, "_")  →  /trade/audit/manual → trade_audit_manual
+
+    好处：一个请求审完，不受「7 天窗口 / 单批 200 单」限制。
+    注意：不传 containInsufficient ⇒ 缺货/异常单**不会被强制审核**（与 ERP 默认行为一致）。
+    """
+    form = {"api_name": _AUDIT_API_NAME,
+            "ignoreBeforeDate": "true" if ignore_before_date else "false"}
+    code, js, raw = _parse_resp(_form_post(c, _AUDIT_PATH, form))
+    if js is None:
+        return "error", "送审请求失败（HTTP %s）：%s" % (code, raw[:160])
+    result = js.get("result")
+    msg = str(js.get("message") or "")
+    if any(w in msg for w in _LOCK_WORDS):
+        return "lock", "别人正在审核，稍后再试（%s）" % msg[:60]
+    if result == 1 or str((js.get("data") or {}).get("status") or "") == "success":
+        pk = (js.get("data") or {}).get("progressKey")
+        return "ok", "已受理「审核所有待审核订单」%s" % ("（异步任务）" if pk else "")
+    return "reject", "被拒：result=%s %s" % (result, msg[:80] or str(js)[:80])
+
+
+def audit_all(cdp_factory, api, days=_DEFAULT_WINDOW_DAYS, dry_run=False,
+              max_rounds=20, native_all=False):
+    """★ 审**全部可审的**待审核单（不只上架那批）→ (审掉的单数, 日志行列表)。
+
+    用于「定时自动审核」：每隔 N 分钟扫一遍全部 WAIT_AUDIT，
+    自动跳过 缺货/异常 + 有未处理留言/备注 的单，剩下的交 ERP 智能审核。
+
+    native_all=False（默认，**推荐**）：
+       先本地筛选（跳过缺货/异常/未处理留言），只把干净的单按 sid 送审。
+       —— 实测某次：待审核 627 单里 600 单是缺货异常，这个模式只送 27 单，
+          不会把缺货单误审掉（符合用户「缺货异常不能审」的要求）。
+    native_all=True：
+       直接调 ERP 原生「审核所有待审核订单」（一个请求、不受 7 天/200 单限制），
+       但**无法在客户端排除缺货单**，是否跳过全看 ERP 服务端规则 —— 不建议默认开。
+
+    · 单次送审上限 200 单，所以**分批循环**，直到某一轮没有可审的了
+    · max_rounds 防死循环（默认最多 20 轮 = 4000 单）
+    """
+    lines = []
+    total = 0
+
+    # ★ 优先用 ERP 原生「审核所有待审核订单」（一个请求搞定，不受 7 天窗口 / 200 单限制）
+    if native_all:
+        sids0, _hit0, skipped0, err0 = find_pending_sids(api, None, days=days)
+        if err0:
+            lines.append("！！%s" % err0)
+            return total, lines
+        if not sids0:
+            lines.append("  没有待审核的单%s"
+                         % ("（剩下的是缺货异常 / 留言未处理）" if skipped0 else ""))
+            return total, lines
+        lines.append("  待审核 %d 单%s（将用 ERP「审核所有待审核订单」一次处理）"
+                     % (len(sids0), ("；先跳过：" + skipped0) if skipped0 else ""))
+        if dry_run:
+            lines.append("  【预演】本会调 ERP「审核所有待审核订单」，dry-run 不调接口")
+            return len(sids0), lines
+        c = None
+        try:
+            c = cdp_factory()
+        except BaseException as e:
+            lines.append("  跳过审核：连不上 ERP 浏览器（%s）" % str(e)[:100])
+            return total, lines
+        if c is None:
+            lines.append("  跳过审核：ERP 浏览器没开（Edge 9222）")
+            return total, lines
+        try:
+            st, msg = audit_scope_all(c)
+            lines.append("  智能审核（审核所有）：%s" % msg)
+        finally:
+            try:
+                c.close()
+            except Exception:
+                pass
+        if st != "ok":
+            lines.append("  → 原生全量模式没成功，改用「逐单送审」兜底")
+        else:
+            left, why = verify_left_pending(api, sids0, days=days)
+            got = len(sids0) - left
+            lines.append("  审核核对：%s%s"
+                         % (why, "（规则不放行的，如临货异常/留言未处理，会留着，属正常）"
+                            if left else ""))
+            lines.append("  合计智能审核 %d 单（ERP 全量模式）" % max(0, got))
+            return max(0, got), lines
+
+    for rnd in range(1, int(max_rounds) + 1):
+        sids, hit, skipped, err = find_pending_sids(api, None, days=days)
+        if err:
+            lines.append("！！%s" % err)
+            return total, lines
+        if skipped:
+            lines.append("  跳过：%s" % skipped)
+        if not sids:
+            lines.append("  第 %d 轮：没有可审的单%s"
+                         % (rnd, "（剩下的是缺货异常 / 留言未处理）" if skipped else ""))
+            break
+        lines.append("  第 %d 轮：可审 %d 单（涉及 %d 个编码：%s）"
+                     % (rnd, len(sids), len(hit), "、".join(sorted(hit)[:6])))
+        if dry_run:
+            lines.append("  【预演】本会智能审核 %d 单，dry-run 不调接口" % len(sids))
+            return len(sids), lines
+
+        c = None
+        try:
+            c = cdp_factory()
+        except BaseException as e:
+            lines.append("  跳过审核：连不上打单浏览器（%s）" % str(e)[:100])
+            return total, lines
+        if c is None:
+            lines.append("  跳过审核：打单浏览器没开（Edge 9222）")
+            return total, lines
+        try:
+            st, msg = smart_audit_sids(c, sids)
+            lines.append("  智能审核：%s" % msg)
+        finally:
+            try:
+                c.close()
+            except Exception:
+                pass
+        if st != "ok":
+            # lock/reject/error 都不重试轰炸；本轮到此为止
+            return total, lines
+        left, why = verify_left_pending(api, sids, days=days)
+        got = len(sids) - left
+        total += got
+        lines.append("  审核核对：%s%s"
+                     % (why, "（规则不放行的，如临货异常/留言未处理，会留着，属正常）"
+                        if left else ""))
+        # 这一轮如果一单都没审掉，说明剩下的都会被规则挡住 → 停，别空转
+        if got <= 0:
+            lines.append("  本轮没有新增通过的单，停止（剩下的被 ERP 规则挡住）")
+            break
+        if len(sids) < _MAX_SIDS_PER_CALL:
+            lines.append("  本轮不足一批上限，视作已处理完")
+            break
+    lines.append("  合计智能审核 %d 单" % total)
+    return total, lines
+
 
 def audit_codes(cdp_factory, api, codes, days=_DEFAULT_WINDOW_DAYS, dry_run=False):
     """上架成功后调用：把 `codes` 下**可审的**待审核单**智能审核**掉 → (审掉的单数, 日志行列表)。

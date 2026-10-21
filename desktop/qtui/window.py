@@ -25,7 +25,7 @@ from PySide6.QtCore import QObject, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QLinearGradient, QPainter
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFileDialog,
                                QFrame, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
-                               QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
+                               QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox,
                                QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout,
                                QWidget)
 
@@ -863,6 +863,7 @@ class Desktop(QWidget):
         # ★ 三个设置窗也不再弹旧 Tk 窗了，改成电脑版自己的 Qt 窗
         out["子客户端管理"] = (lambda *a: self._open_dlg(AdminPanelDialog, "子客户端管理"))
         out["账号变更记录"] = (lambda *a: self._open_dlg(AuditDialog, "账号变更记录"))
+        out["自动智能审核"] = (lambda *a: self._open_dlg(AutoAuditDialog, "自动智能审核"))
         out["打印分工"] = (lambda *a: self._open_dlg(PrintClientsDialog, "打印分工"))
         out["对外访问设置"] = (lambda *a: self._open_dlg(GatewayDialog, "对外访问设置"))
         # ★ API 设置也换成 Qt 窗（以前调主程序弹旧 Tk 窗，用户要求不要看到旧界面）
@@ -894,7 +895,7 @@ class Desktop(QWidget):
             ("设置", ["API 设置", "对外访问设置", "子客户端管理", "账号变更记录", "打印分工",
                      "登录 ERP", "-",
                      "可发撤回宽限…", "自动上架推荐货位", "上架后自动智能审核",
-                     "后台扫码监听", "声音提示", "手机访问需口令"]),
+                     "自动智能审核…", "后台扫码监听", "声音提示", "手机访问需口令"]),
             ("系统", ["检查更新", "重新登录", "打单进度 / 实时日志", "-",
                      "打开数据目录", "打开数据文件", "关于"]),
         ):
@@ -3327,6 +3328,176 @@ class GatewayDialog(QDialog):
             self.load()
         else:
             self.msg.setText("失败：%s" % str((r or {}).get("error") or "未知错误")[:140])
+
+
+class AutoAuditDialog(QDialog):
+    """★ 自动智能审核设置（电脑版）。
+
+    用户要求：「把智能审核改成审全部可审的，触发时长需要自定义」。
+    · 模式一：审全部可审的（定时全量，用 ERP「审核所有待审核订单」）
+    · 模式二：只审刚上架那批（老行为）
+    · 间隔：每隔多少分钟跑一次（1~1440）
+
+    缺货异常 / 有未处理留言的单**始终跳过**（ERP 默认不强制审缺货单）。
+    """
+
+    def __init__(self, api, theme="light", parent=None):
+        super().__init__(parent)
+        self.api = api
+        self._disp = Dispatcher(self)
+        self.setWindowTitle("自动智能审核")
+        self.resize(560, 420)
+        self.setStyleSheet(U.qss(U.LIGHT if theme == "light" else U.DARK))
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 14, 16, 12)
+        lay.setSpacing(10)
+
+        head = QLabel("自动智能审核")
+        head.setObjectName("sect")
+        lay.addWidget(head)
+
+        tip = QLabel(
+            "作用：把**待审核**的订单交给 ERP「智能审核」，审过才能打快递单。\n"
+            "· 「审全部可审的」走 ERP 原生「审核所有待审核订单」，一个请求搞完\n"
+            "· 缺货异常 / 有未处理留言的订单会自动跳过（ERP 也不强制审缺货单）\n"
+            "· 需要「跑程序的自动化浏览器」已登录 ERP，否则本轮会跳过并记日志")
+        tip.setObjectName("hint")
+        tip.setWordWrap(True)
+        lay.addWidget(tip)
+
+        form = QWidget()
+        fl = QVBoxLayout(form)
+        fl.setContentsMargins(0, 0, 0, 0)
+        self.ck_on = QCheckBox("启用自动智能审核")
+        fl.addWidget(self.ck_on)
+        self.ck_all = QCheckBox("审全部可审的（不只上架那批）—— 推荐")
+        fl.addWidget(self.ck_all)
+
+        r1 = QHBoxLayout()
+        lb = QLabel("每隔")
+        lb.setObjectName("hint")
+        r1.addWidget(lb)
+        self.sp_min = QSpinBox()
+        self.sp_min.setRange(1, 1440)
+        self.sp_min.setSuffix(" 分钟")
+        self.sp_min.setMinimumWidth(120)
+        r1.addWidget(self.sp_min)
+        lb2 = QLabel("跑一次（1~1440）")
+        lb2.setObjectName("hint")
+        r1.addWidget(lb2)
+        r1.addStretch(1)
+        fl.addLayout(r1)
+
+        r2 = QHBoxLayout()
+        lb3 = QLabel("查最近")
+        lb3.setObjectName("hint")
+        r2.addWidget(lb3)
+        self.sp_days = QSpinBox()
+        self.sp_days.setRange(1, 30)
+        self.sp_days.setSuffix(" 天内创建的待审核单")
+        self.sp_days.setMinimumWidth(200)
+        r2.addWidget(self.sp_days)
+        r2.addStretch(1)
+        fl.addLayout(r2)
+        lay.addWidget(form)
+
+        self.msg = QLabel("")
+        self.msg.setObjectName("hint")
+        self.msg.setWordWrap(True)
+        lay.addWidget(self.msg)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        for label, fn, tip2 in (
+                ("预演一次", lambda: self.run_audit(True), "只统计会审多少单，不真提交"),
+                ("立即审核一次", lambda: self.run_audit(False), "马上真跑一次"),
+                ("保 存", self.save, "保存设置"),
+                ("关 闭", self.accept, "")):
+            b = U.GlowButton(label, primary=(label == "保 存"))
+            if tip2:
+                b.setToolTip(tip2)
+            b.clicked.connect(lambda *a, f=fn: f())
+            row.addWidget(b)
+        lay.addLayout(row)
+        self.load()
+
+    def load(self):
+        self.msg.setText("正在读取…")
+
+        def work():
+            try:
+                r = self.api.auto_audit_conf()
+            except Exception as e:
+                r = {"error": str(e)[:150]}
+            self._disp.post(lambda: self.fill(r))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def fill(self, r):
+        r = r if isinstance(r, dict) else {}
+        if r.get("error"):
+            self.msg.setText("读取失败：%s" % str(r.get("error"))[:120])
+            return
+        self.ck_on.setChecked(bool(r.get("on")))
+        self.ck_all.setChecked(bool(r.get("all")))
+        try:
+            self.sp_min.setValue(int(r.get("interval_min") or 10))
+            self.sp_days.setValue(int(r.get("days") or 7))
+        except Exception:
+            pass
+        self.msg.setText("当前：%s · 模式 %s · 每 %s 分钟 · 查最近 %s 天"
+                         % ("已启用" if r.get("on") else "未启用",
+                            "审全部可审" if r.get("all") else "只审上架那批",
+                            r.get("interval_min"), r.get("days")))
+
+    def save(self):
+        on = bool(self.ck_on.isChecked())
+        allv = bool(self.ck_all.isChecked())
+        mins = int(self.sp_min.value())
+        days = int(self.sp_days.value())
+
+        def work():
+            try:
+                r = self.api.save_auto_audit_conf(on=on, all=allv,
+                                                  interval_min=mins, days=days)
+            except Exception as e:
+                r = {"error": str(e)[:150]}
+            self._disp.post(lambda: self._saved(r))
+
+        self.msg.setText("正在保存…")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _saved(self, r):
+        r = r if isinstance(r, dict) else {}
+        if r.get("error"):
+            self.msg.setText("保存失败：%s" % str(r.get("error"))[:140])
+            return
+        self.fill(r)
+        self.msg.setText("已保存 ✓　" + self.msg.text())
+
+    def run_audit(self, dry):
+        self.msg.setText("正在%s…（要连 ERP 浏览器，可能要几十秒）"
+                         % ("预演" if dry else "审核"))
+
+        def work():
+            try:
+                r = self.api.auto_audit_run(dry_run=dry)
+            except Exception as e:
+                r = {"error": str(e)[:150]}
+            self._disp.post(lambda: self._ran(dry, r))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _ran(self, dry, r):
+        r = r if isinstance(r, dict) else {}
+        if r.get("error"):
+            self.msg.setText("失败：%s" % str(r.get("error"))[:200])
+            return
+        lines = r.get("lines") or []
+        n = r.get("count")
+        txt = ("预演结果：会审 %s 单" % n) if dry else ("已审 %s 单" % n)
+        self.msg.setText(txt + "\n" + "\n".join(str(x) for x in lines[-6:])[:600])
+
 
 
 class AuditDialog(TableDialog):

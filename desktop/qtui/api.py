@@ -140,6 +140,19 @@ class Api(object):
             body["value"] = value
         return self.post("/api/desktop/opt", body, timeout=20)
 
+    def auto_audit_conf(self):
+        """读「自动智能审核」设置 → {on, all, interval_min, days}。"""
+        return self.get("/api/desktop/auto_audit", timeout=20)
+
+    def save_auto_audit_conf(self, **kw):
+        """改「自动智能审核」设置（只传要改的键：on / all / interval_min / days）。"""
+        return self.post("/api/desktop/auto_audit", dict(kw or {}), timeout=30)
+
+    def auto_audit_run(self, dry_run=False):
+        """立刻跑一次智能审核（dry_run=True 只预演不提交）。"""
+        return self.post("/api/desktop/auto_audit_run", {"dry_run": bool(dry_run)},
+                         timeout=300)
+
     def desktop_log(self, tail=120):
         return self.get("/api/desktop/log?tail=%d" % int(tail), timeout=10)
 
