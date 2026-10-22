@@ -349,42 +349,99 @@ def audit_scope_all(c, ignore_before_date=True):
     return "reject", "被拒：result=%s %s" % (result, msg[:80] or str(js)[:80])
 
 
+def _audit_scope_all_detail(c, ignore_before_date=True):
+    """同 audit_scope_all，但多返回 progressKey → (状态, 说明, progressKey)。"""
+    form = {"api_name": _AUDIT_API_NAME,
+            "ignoreBeforeDate": "true" if ignore_before_date else "false"}
+    code, js, raw = _parse_resp(_form_post(c, _AUDIT_PATH, form))
+    if js is None:
+        return "error", "送审请求失败（HTTP %s）：%s" % (code, raw[:160]), ""
+    result = js.get("result")
+    msg = str(js.get("message") or "")
+    data = js.get("data") or {}
+    pk = str(data.get("progressKey") or "")
+    if any(w in msg for w in _LOCK_WORDS):
+        return "lock", "别人正在审核，稍后再试（%s）" % msg[:60], ""
+    if result == 1 or str(data.get("status") or "") == "success":
+        return "ok", "已受理「审核所有待审核订单」%s" % ("（异步任务）" if pk else ""), pk
+    return "reject", "被拒：result=%s %s" % (result, msg[:80] or str(js)[:80]), ""
+
+
+def audit_progress(c, progress_key, tries=12, gap=2.0):
+    """★ 轮询 ERP 的审核进度，拿**真实成功单数** → (sucNum | None, 失败明细, 说明)。
+
+    ERP 前端在 `data.progressKey` 有值时，会去 `/trade/progress/queryByProgressKey`
+    轮询，失败回调里带 `t.sucNum`（成功笔数）和逐单错误列表。这里照做，
+    所以「审了多少单」是 ERP 自己报的数，不是我们估的。
+    """
+    if not progress_key:
+        return None, [], "没有 progressKey（同步返回，数量以 ERP 页面为准）"
+    path = "/trade/progress/queryByProgressKey"
+    last = ""
+    for i in range(max(1, int(tries))):
+        try:
+            code, js, raw = _parse_resp(_form_post(
+                c, path, {"progressKey": str(progress_key)}))
+        except BaseException as e:
+            return None, [], "查进度失败：%s" % str(e)[:80]
+        if js is None:
+            return None, [], "查进度失败（HTTP %s）：%s" % (code, raw[:120])
+        data = js.get("data") or {}
+        status = str(data.get("status") or "")
+        # ERP 里 status=success 表示跑完；有的版本用 done/finish
+        if status.lower() in ("success", "done", "finish", "finished", "complete",
+                              "completed") or status == "1":
+            suc = data.get("sucNum")
+            try:
+                suc = int(suc) if suc is not None else None
+            except Exception:
+                suc = None
+            errs = []
+            for e in (data.get("errors") or data.get("failList") or []):
+                if isinstance(e, dict):
+                    errs.append(str(e.get("errorMsg") or e.get("sid") or "")[:120])
+                else:
+                    errs.append(str(e)[:120])
+            return suc, errs, ""
+        last = status or "进行中"
+        time.sleep(float(gap))
+    return None, [], "进度未在 %d 秒内完成（当前：%s）" % (int(tries * gap), last)
+
+
 def audit_all(cdp_factory, api, days=_DEFAULT_WINDOW_DAYS, dry_run=False,
-              max_rounds=20, native_all=False):
-    """★ 审**全部可审的**待审核单（不只上架那批）→ (审掉的单数, 日志行列表)。
+              max_rounds=20, native_all=True):
+    """★ 审**全部可审的**待审核单（只审没有异常的）→ (审掉的单数, 日志行列表)。
 
-    用于「定时自动审核」：每隔 N 分钟扫一遍全部 WAIT_AUDIT，
-    自动跳过 缺货/异常 + 有未处理留言/备注 的单，剩下的交 ERP 智能审核。
+    **native_all=True（默认，正确做法）**：
+       调 ERP 原生「审核所有待审核订单」（`api_name=trade_audit_manual`，不传 sid/queryId，
+       也不传 containInsufficient）→ **服务端自己扫全部待审核，跳过所有异常单**
+       （缺货 EX_INSUFFICIENT / 退款 EX_REFUND / 发货异常等都跳过）。
+       实测证据：用户在网页 ERP 审完 200+ 单后，抽样的缺货异常单 8/8 仍留在待审核，
+       说明 ERP 本来就不审异常单 —— 这正是「只审核所有没有异常的订单」。
 
-    native_all=False（默认，**推荐**）：
-       先本地筛选（跳过缺货/异常/未处理留言），只把干净的单按 sid 送审。
-       —— 实测某次：待审核 627 单里 600 单是缺货异常，这个模式只送 27 单，
-          不会把缺货单误审掉（符合用户「缺货异常不能审」的要求）。
-    native_all=True：
-       直接调 ERP 原生「审核所有待审核订单」（一个请求、不受 7 天/200 单限制），
-       但**无法在客户端排除缺货单**，是否跳过全看 ERP 服务端规则 —— 不建议默认开。
+    **为什么不能靠本地逐单筛选**：
+       实测店铺待审核量极大（最近 1 天 total≈35577），其中 99.7% 带 EX_INSUFFICIENT。
+       本地筛选必须把所有页翻完（约 1250 页 ≈ 29 分钟）才找得全；
+       只取首页 200 单 → 只能找到 3 单（这就是「软件只有 3 单、ERP 有 200 多」的原因）。
+       交给 ERP 服务端筛，一个请求搞定且结果一致。
 
-    · 单次送审上限 200 单，所以**分批循环**，直到某一轮没有可审的了
-    · max_rounds 防死循环（默认最多 20 轮 = 4000 单）
+    **native_all=False（兜底/离线可用）**：
+       本地逐单扫 + 跳过带 exceptions 的单 + 按 sid 送审；单批上限 200，分批循环。
+       ＊注意：因为只翻到有限页，找出来的单会比 ERP 少，不要用它判断「有没有可审的单」。
     """
     lines = []
     total = 0
 
-    # ★ 优先用 ERP 原生「审核所有待审核订单」（一个请求搞定，不受 7 天窗口 / 200 单限制）
+    # ★ 优先用 ERP 原生「审核所有待审核订单」（一个请求搞定，服务端自己跳过异常单）
     if native_all:
-        sids0, _hit0, skipped0, err0 = find_pending_sids(api, None, days=days)
-        if err0:
-            lines.append("！！%s" % err0)
-            return total, lines
-        if not sids0:
-            lines.append("  没有待审核的单%s"
-                         % ("（剩下的是缺货异常 / 留言未处理）" if skipped0 else ""))
-            return total, lines
-        lines.append("  待审核 %d 单%s（将用 ERP「审核所有待审核订单」一次处理）"
-                     % (len(sids0), ("；先跳过：" + skipped0) if skipped0 else ""))
         if dry_run:
-            lines.append("  【预演】本会调 ERP「审核所有待审核订单」，dry-run 不调接口")
-            return len(sids0), lines
+            lines.append("  【预演】将调用 ERP「审核所有待审核订单」：")
+            lines.append("     ERP 会自己扫全部待审核单，**只审没有异常的**"
+                         "（缺货/退款/发货异常统统跳过）")
+            lines.append("     dry-run 不调接口，所以这次没有真实单数")
+            lines.append("     想先确认效果：直接点「立即审核一次」，"
+                         "审核数量由 ERP 返回（日志里会写）")
+            return 0, lines
         c = None
         try:
             c = cdp_factory()
@@ -394,9 +451,22 @@ def audit_all(cdp_factory, api, days=_DEFAULT_WINDOW_DAYS, dry_run=False,
         if c is None:
             lines.append("  跳过审核：ERP 浏览器没开（Edge 9222）")
             return total, lines
+        st = "error"
+        msg = ""
+        pk = ""
         try:
-            st, msg = audit_scope_all(c)
+            st, msg, pk = _audit_scope_all_detail(c)
             lines.append("  智能审核（审核所有）：%s" % msg)
+            if st == "ok" and pk:
+                # ★ 用 ERP 自己的进度接口拿真实成功单数（比本地估算准）
+                n_ok, errs, detail = audit_progress(c, pk)
+                if n_ok is not None:
+                    lines.append("  ERP 执行结果：成功审核 %d 单%s"
+                                 % (n_ok, ("；失败 %d 单（%s）"
+                                           % (len(errs), errs[0][:60]) if errs else "")))
+                    total = n_ok
+                elif detail:
+                    lines.append("  ERP 进度：%s" % detail)
         finally:
             try:
                 c.close()
@@ -405,13 +475,9 @@ def audit_all(cdp_factory, api, days=_DEFAULT_WINDOW_DAYS, dry_run=False,
         if st != "ok":
             lines.append("  → 原生全量模式没成功，改用「逐单送审」兜底")
         else:
-            left, why = verify_left_pending(api, sids0, days=days)
-            got = len(sids0) - left
-            lines.append("  审核核对：%s%s"
-                         % (why, "（规则不放行的，如临货异常/留言未处理，会留着，属正常）"
-                            if left else ""))
-            lines.append("  合计智能审核 %d 单（ERP 全量模式）" % max(0, got))
-            return max(0, got), lines
+            lines.append("  合计：ERP 审核所有待审核订单 已提交%s"
+                         % ("，成功 %d 单" % total if total else "（数量以 ERP 为准）"))
+            return total, lines
 
     for rnd in range(1, int(max_rounds) + 1):
         sids, hit, skipped, err = find_pending_sids(api, None, days=days)
