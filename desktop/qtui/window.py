@@ -863,7 +863,10 @@ class Desktop(QWidget):
         # ★ 三个设置窗也不再弹旧 Tk 窗了，改成电脑版自己的 Qt 窗
         out["子客户端管理"] = (lambda *a: self._open_dlg(AdminPanelDialog, "子客户端管理"))
         out["账号变更记录"] = (lambda *a: self._open_dlg(AuditDialog, "账号变更记录"))
-        out["自动智能审核"] = (lambda *a: self._open_dlg(AutoAuditDialog, "自动智能审核"))
+        # ★ 键必须跟菜单里显示的标签**逐字一致**（含省略号），
+        #   否则 _build() 里 _ACTION.get(it) 取不到 → act.setEnabled(False) → 灰掉点不动。
+        #   踩过：菜单写「自动智能审核…」、这里写「自动智能审核」→ 菜单项点不了。
+        out["自动智能审核…"] = (lambda *a: self._open_dlg(AutoAuditDialog, "自动智能审核"))
         out["打印分工"] = (lambda *a: self._open_dlg(PrintClientsDialog, "打印分工"))
         out["对外访问设置"] = (lambda *a: self._open_dlg(GatewayDialog, "对外访问设置"))
         # ★ API 设置也换成 Qt 窗（以前调主程序弹旧 Tk 窗，用户要求不要看到旧界面）
