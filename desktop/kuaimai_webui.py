@@ -1301,6 +1301,8 @@ STOCK_HTML = r"""<!doctype html>
   .free.neg { color:#c62828; }
   .sub { display:block; font-size:12.5px; color:var(--sub); margin-top:2px; line-height:1.55; }
   .legend { font-size:12px; color:var(--sub); line-height:1.7; }
+  .zones { font-size:12px; color:var(--blue); cursor:pointer; white-space:nowrap;
+           border-bottom:1px dashed rgba(0,122,255,.5); }
   .rec { margin-top:8px; padding:9px 12px; border-radius:12px; background:rgba(52,199,89,.14);
          color:#1B7F35; font-size:14.5px; font-weight:700; line-height:1.5; }
   .rec.bad { background:rgba(255,59,48,.13); color:#c62828; }
@@ -1544,6 +1546,77 @@ function flash(msg){
   if(msg){ setTimeout(function(){ if(el.textContent === msg) el.textContent = ''; }, 5000); }
 }
 function params(){ return 'kw=' + encodeURIComponent($('kw').value.trim()) + '&only=' + $('only').value + '&sort=' + $('sort').value; }
+
+/* ★ 货位分区（默认 A/B/C/D）：点「分区 … ▾」弹出勾选。
+   只勾选的区才计入「在架数 / 可成波 / 可发件数」—— 其它区（F/G/XT）不算。 */
+function bindZones(){
+  var el = $('zones');
+  if(!el || el._bound) return;
+  el._bound = 1;
+  el.onclick = function(){ openZones(); };
+}
+function openZones(){
+  fetch(withSid('/api/desktop/stock_zones'), {cache:'no-store'})
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      var all = (d && d.all_prefixes) || {};
+      var cur = (d && d.zones) || [];
+      var names = Object.keys(all);
+      var box = document.createElement('div');
+      var html = '<div style="font-size:14px;line-height:1.9">';
+      if(!names.length){
+        html += '本机还没有货位数据（先在电脑版「刷新货位库存」）';
+      } else {
+        names.forEach(function(p){
+          var on = cur.indexOf(p) >= 0;
+          var info = all[p] || {};
+          html += '<label style="display:block;padding:2px 0">'
+            + '<input type="checkbox" value="' + esc(p) + '"' + (on ? ' checked' : '') + '>'
+            + ' <b>' + esc(p) + '</b> 区　'
+            + '<span style="color:#6e6e73;font-size:12px">' + (info.codes||0) + ' 个编码 / '
+            + (info.qty||0) + ' 件</span></label>';
+        });
+        html += '<div style="color:#6e6e73;font-size:12px;margin-top:6px">'
+          + '只勾选的区才计入「在架数 / 可成波 / 可发件数」</div>';
+      }
+      html += '</div>';
+      box.innerHTML = html;
+      var mask = document.createElement('div');
+      mask.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:99;display:flex;align-items:center;justify-content:center;padding:16px';
+      var card = document.createElement('div');
+      card.style.cssText = 'background:#fff;border-radius:14px;padding:16px;max-width:420px;width:100%;color:#1d1d1f';
+      card.innerHTML = '<div style="font-size:17px;font-weight:800;margin-bottom:10px">货位分区</div>';
+      card.appendChild(box);
+      var bar = document.createElement('div');
+      bar.style.cssText = 'display:flex;gap:8px;margin-top:14px;justify-content:flex-end';
+      var b1 = document.createElement('button');
+      b1.textContent = '取消'; b1.className = 'sbtn';
+      b1.onclick = function(){ document.body.removeChild(mask); };
+      var b2 = document.createElement('button');
+      b2.textContent = '保存'; b2.className = 'sbtn';
+      b2.style.background = 'var(--blue)'; b2.style.color = '#fff';
+      b2.onclick = function(){
+        var picked = [];
+        box.querySelectorAll('input[type=checkbox]').forEach(function(c){
+          if(c.checked) picked.push(c.value);
+        });
+        fetch(withSid('/api/desktop/stock_zones'), {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({zones: picked})
+        }).then(function(r){ return r.json(); }).then(function(rr){
+          document.body.removeChild(mask);
+          if(rr && rr.error){ flash(rr.error); return; }
+          flash('分区已保存：' + ((rr.zones||[]).join('/') || '全部'));
+          load();
+        }).catch(function(e){ flash('保存失败：' + e.message); });
+      };
+      bar.appendChild(b1); bar.appendChild(b2);
+      card.appendChild(bar);
+      mask.appendChild(card);
+      document.body.appendChild(mask);
+    })
+    .catch(function(e){ flash('读取分区失败：' + e.message); });
+}
 function load(){
   $('sum').textContent = '正在载入…';
   fetch(withSid('/api/stock?' + params()), {cache:'no-store'})
@@ -1556,6 +1629,9 @@ function load(){
         + ((t.up || t.uo) ? ('　<b style="color:#c62828">加急 ' + (t.up||0) + ' 件</b>') : '')
         + ((t.prio) ? ('　<b style="color:#FF3B30">加急有货 ' + t.prio + '</b>') : '')
         + ((t.sent) ? ('　<b style="color:#1B7F35">已发 ' + t.sent + '</b>') : '')
+        /* ★ 只算哪些货位分区（默认 A/B/C/D）：在架数、可发件数都不含其它区 */
+        + '　<span class="zones" id="zones" title="只看这些货位分区的库存，点一下可改">'
+        + '分区 ' + ((d.zones && d.zones.length) ? esc(d.zones.join('/')) : '全部') + ' ▾</span>'
         /* ★ 明确标出「还能成波多少」来自 ERP 实时还是本地快照，避免再被旧数字误导 */
         + (d.live
             ? '　<span style="color:#1B7F35;font-weight:700">可成波数据：ERP 实时</span>'
@@ -1563,6 +1639,7 @@ function load(){
               + '刷新实时</button>'
             : '　<span style="color:#c62828;font-weight:700">可成波数据：本地快照（ERP 没连上）</span>');
       const rec = $('rec');
+      bindZones();
       if(rec){
         if((t.free||0) >= 0){
           rec.className = 'rec';

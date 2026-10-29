@@ -318,6 +318,99 @@ def save_settings(data):
 WEB_HOLD_DEFAULT = 10          # 网页「可发」的撤回宽限（秒），电脑端可改
 
 
+# ============================ 货位分区过滤（A/B/C/D） ============================
+# 用户口径：「可成波 / 可发件数」只算 A、B、C、D 四个分区的库存，
+# 其它分区（F / G / XT 等）不算 —— 因为实际只在 A~D 区拣货。
+# 货位名形如 `A-0-0-0`、`G-8-4-2-5`、`XT-2-5-5-1`，取第一段作分区。
+STOCK_ZONES_DEFAULT = ("A", "B", "C", "D")
+
+
+def stock_zone_of(bin_name):
+    """货位名 → 分区前缀。`XT-2-5-5-1` → `XT`；`A-0-0-0` → `A`；无名 → ``。"""
+    s = str(bin_name or "").strip().upper()
+    if not s:
+        return ""
+    return s.split("-")[0].strip()
+
+
+def stock_zones():
+    """当前允许计入库存的分区集合（空集合 = 不限制，全部算）。"""
+    try:
+        s = load_settings() or {}
+        raw = s.get("stock_zones", None)
+        if raw is None:
+            return set(STOCK_ZONES_DEFAULT)
+        if isinstance(raw, (list, tuple)):
+            return set(str(x).strip().upper() for x in raw if str(x).strip())
+        txt = str(raw or "").strip()
+        if not txt:
+            return set()                      # 显式空 = 不限制
+        return set(x.strip().upper() for x in txt.replace("，", ",").split(",")
+                   if x.strip())
+    except Exception:
+        return set(STOCK_ZONES_DEFAULT)
+
+
+def set_stock_zones(zones):
+    """写分区白名单（空 = 不限制）。"""
+    s = load_settings() or {}
+    if isinstance(zones, (list, tuple, set)):
+        vals = [str(x).strip().upper() for x in zones if str(x).strip()]
+    else:
+        vals = [x.strip().upper() for x in str(zones or "").replace("，", ",").split(",")
+                if x.strip()]
+    s["stock_zones"] = vals
+    save_settings(s)
+    return stock_zones()
+
+
+def bins_in_zones(bins, zones=None):
+    """按分区筛货位 → (过滤后的 [[名, 件数]...], 合计件数)。
+
+    zones 为空/None 时不过滤（全算），保持老行为。
+    """
+    zs = stock_zones() if zones is None else set(zones)
+    out, tot = [], 0
+    for b in (bins or []):
+        try:
+            name = str(b[0])
+            q = int(b[1] or 0)
+        except Exception:
+            continue
+        if zs and stock_zone_of(name) not in zs:
+            continue
+        out.append([name, q])
+        tot += q
+    return out, tot
+
+
+def _all_bin_prefixes():
+    """本机货位索引里出现过的所有分区前缀 + 各自编码数/件数（给设置窗做勾选）。"""
+    try:
+        app = (_WEB_STATE or {}).get("app")
+        shelf = (getattr(app, "shelf_map", None) if app is not None else None) or {}
+        if not shelf:
+            shelf = _load_shelf_map_now() or {}
+    except Exception:
+        return {}
+    out = {}
+    for _code, sh in (shelf or {}).items():
+        for b in ((sh or {}).get("bins") or []):
+            try:
+                p = stock_zone_of(b[0])
+                q = int(b[1] or 0)
+            except Exception:
+                continue
+            if not p:
+                continue
+            d = out.setdefault(p, {"codes": 0, "qty": 0})
+            d["codes"] += 1
+            d["qty"] += q
+    return dict(sorted(out.items()))
+
+
+
+
 def get_web_hold():
     """网页可发的撤回宽限秒数（电脑端设置，网页按这个走）。"""
     try:
@@ -4308,6 +4401,15 @@ class _WebHandler(BaseHTTPRequestHandler):
                     "lan": bool(_WEB_STATE.get("lan")),
                     "ver": APP_VER,
                 })
+            if parsed.path == "/api/desktop/stock_zones":
+                # ★ GET：读货位分区白名单（默认 A/B/C/D）+ 所有出现过的分区供勾选
+                #   踩过的坑：这条一开始只写在 POST 分支（还错用了 parsed.path）→ GET 404
+                deny = self._need(me, "data.refresh")
+                if deny:
+                    return deny
+                return self._json({"zones": sorted(stock_zones()),
+                                   "default": list(STOCK_ZONES_DEFAULT),
+                                   "all_prefixes": _all_bin_prefixes()})
             if parsed.path == "/api/desktop/auto_audit":
                 # ★ GET 版：读「自动智能审核」设置。
                 #   踩过的坑：这条一开始只写在 do_POST 里，GET 直接 404 ——
@@ -4926,6 +5028,30 @@ class _WebHandler(BaseHTTPRequestHandler):
                 except Exception as e:
                     return self._json({"error": "执行失败：%s" % str(e)[:180]}, 500)
                 return self._json({"ok": True, "name": name})
+            if path == "/api/desktop/stock_zones":
+                # ★ POST：改货位分区白名单（默认 A/B/C/D）
+                #   注意这里必须用 `path`（POST 分支的变量），不是 parsed.path
+                deny = self._need(me, "data.refresh")
+                if deny:
+                    return deny
+                if not body:
+                    return self._json({"zones": sorted(stock_zones()),
+                                       "default": list(STOCK_ZONES_DEFAULT),
+                                       "all_prefixes": _all_bin_prefixes()})
+                try:
+                    z = set_stock_zones(body.get("zones"))
+                except Exception as e:
+                    return self._json({"error": str(e)[:160]}, 400)
+                try:
+                    _app = (_WEB_STATE or {}).get("app")
+                    if _app is not None:
+                        _app._web_idx_cache = None      # 立刻失效，下次请求重算
+                        _app._shelf_version = getattr(_app, "_shelf_version", 0) + 1
+                except Exception:
+                    pass
+                print_jobs_log("货位分区已更新：%s" % (sorted(z) or "全部"))
+                return self._json({"ok": True, "zones": sorted(z),
+                                   "all_prefixes": _all_bin_prefixes()})
             if path == "/api/desktop/auto_audit":
                 # ★ 自动智能审核的设置读写（电脑版「智能审核」菜单用）
                 #   GET  → 返回 {on, all, interval_min, days}
@@ -7313,7 +7439,9 @@ class ScanApp:
         只包含编码+数字，体积小（几百 KB），手机拉一次就能本地秒查。
         """
         ver = (getattr(self, "_store_version", 0), getattr(self, "_shelf_version", 0),
-               getattr(self, "_lock_version", 0))
+               getattr(self, "_lock_version", 0),
+               # ★ 分区白名单也要进缓存键：改了「只算 A/B/C/D」必须立刻生效
+               tuple(sorted(stock_zones())))
         cache = getattr(self, "_web_idx_cache", None)
         if cache and cache[0] == ver:
             return cache[1]
@@ -7325,17 +7453,22 @@ class ScanApp:
             e = idx.get(code) or {}
             sh = shelf.get(code) or {}
             lk = lock.get(code) or {}
+            # ★ 在架数只算允许的分区（默认 A/B/C/D）—— 下游的「可发件数」跟着变
+            _zones = stock_zones()
+            _bl_raw = [[str(b[0]), int(b[1] or 0)] for b in (sh.get("bins") or [])]
+            _bl, _sq = (bins_in_zones(_bl_raw, _zones) if _zones
+                        else (_bl_raw, int(sh.get("shelf", 0) or 0)))
             items[code] = {
                 "o": int(e.get("orders", 0) or 0),
                 "p": int(e.get("qty", 0) or 0),
                 "n": int(e.get("ones", 0) or 0),
-                "s": int(sh.get("shelf", 0) or 0),
+                "s": _sq,
                 "l": int(lk.get("lock", 0) or 0),
                 "uo": int(e.get("uo", 0) or 0),
                 "up": int(e.get("up", 0) or 0),
                 "ue": {k: int(v or 0) for k, v in (e.get("ue") or {}).items()},
-                "b": "、".join(str(b[0]) for b in (sh.get("bins") or [])[:6]),
-                "bl": [[str(b[0]), int(b[1] or 0)] for b in (sh.get("bins") or [])],
+                "b": "、".join(str(b[0]) for b in _bl[:6]),
+                "bl": _bl,
             }
         payload = {
             "loaded_at": self.loaded_at,
@@ -7971,6 +8104,14 @@ class ScanApp:
                     ones, _multi_ord = 0, 0
                 pieces = max(0, ones + _multi_ord)      # 可发只用于「一单一件」，多件只占 1 件/单
                 orders = max(0, ones + _multi_ord)
+                # ★ 分区过滤：只算 A/B/C/D 的在架，可成波件数不能超过这些区能出的量
+                if stock_zones():
+                    _cap = shelf
+                    if pieces > _cap:
+                        pieces = _cap
+                        ones = min(ones, pieces)
+                        _multi_ord = max(0, pieces - ones)
+                        orders = pieces
                 # 加急数仍来自本地（ERP 清单没有加急字段）；订单没了就按 0 计
                 if ones <= 0 and _multi_ord <= 0:
                     uo = up = 0
@@ -8013,6 +8154,8 @@ class ScanApp:
         return {"total": len(rows), "rows": rows,
                 # ★ live=True 表示成波相关列来自 ERP 实时；False 表示回退到本地快照
                 "live": bool(getattr(self, "_stock_live", False)),
+                # ★ 只算了哪些货位分区（默认 A/B/C/D）；空 = 全部
+                "zones": sorted(stock_zones()),
                 "totals": {"shelf": sum(r["s"] for r in rows),
                            "pieces": sum(r["p"] for r in rows),
                            "ones": sum(r["n"] for r in rows),
