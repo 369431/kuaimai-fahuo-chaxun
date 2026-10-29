@@ -390,12 +390,40 @@ def _shelf_info(code):
 
 
 def _shelf_in_zones(code):
-    """★ 某编码在**允许的分区**（默认 A/B/C/D）里的在架数 → (件数, 货位列表, 索引是否为空)。
+    """★ 某编码在**允许的分区**（默认 A/B/C/D）里的**可用数** → (件数, 货位列表, 索引是否为空)。
 
     用户口径：「生成波次时，锁定的订单只取 A/B/C/D 分区的货」。
+    数据来源优先级：
+      ① **ERP「货位库存」接口**（`/wms/goodsSectionInventory/list`）——
+         每货位带 `allocateNum`(已配数) 和 `sku.avaliableNum`(可用数)，
+         可用数已扣掉已被别的订单/波次配走的量，最准；
+      ② 拿不到就退回本机货位快照的「在架数」（不含已配数，会偏高）。
+
     分区白名单来自设置 `stock_zones`（空 = 不限制，等于全部）。
-    货位索引为空时返回 (None, [], True)，调用方据此**不做限制**（避免没数据时全挡住）。
+    返回的件数是**可用数**之和，不是物理在架数。
     """
+    # ① 先试 ERP 货位库存（带已配数）
+    try:
+        rows = section_rows(code)
+    except Exception:
+        rows = None
+    if rows:
+        try:
+            import kuaimai_scan as KS
+            zs = KS.stock_zones()
+            kept, tot = [], 0
+            for r in rows:
+                b = str(r.get("bin") or "")
+                if zs and KS.stock_zone_of(b) not in zs:
+                    continue
+                q = int(r.get("avail") or 0)
+                kept.append((b, q))
+                tot += q
+            return int(tot), kept, False
+        except Exception:
+            pass
+
+    # ② 退回本机快照
     info = _shelf_info(code)
     if info["shelf_index_empty"]:
         return None, [], True
@@ -408,6 +436,85 @@ def _shelf_in_zones(code):
         return int(tot), [(k[0], k[1]) for k in kept], False
     except Exception:
         return info["shelf_qty"], info["bins"], False
+
+
+# ---------- ERP 货位库存（带「已配数」） ----------
+SECTION_LIST_PATH = "/wms/goodsSectionInventory/list"
+_SECTION_CACHE = {}          # {code: (ts, rows)}
+_SECTION_TTL = 90            # 90 秒缓存：成波时要反复问同一个编码
+
+
+def _section_body(text):
+    """货位库存接口的请求体（参数照抄 ERP 页面实际请求）。"""
+    return {
+        "availableNumEnd": "", "availableNumStart": "", "qualityTypes": [],
+        "isExcep": "", "warehouseId": WAREHOUSE_ID, "stockRegionIds": "",
+        "isAccurate": "1", "goodsSectionCode": "", "queryOuterIdType": "0",
+        "text": str(text or ""), "queryMainOuterIdType": "0", "mainOuterId": "",
+        "multiCode": "", "supplierItemOuterId": "", "cIds": [],
+        "queryParams": [{"queryType": "title", "queryText": ""},
+                        {"queryType": "propertiesName", "queryText": ""}],
+        "supplierNames": "", "supplierIds": [], "categoryNameStr": "",
+        "stockRegionType": "", "shipperIds": "", "batchNo": "",
+        "productTimeStart": "", "productTimeEnd": "", "expireDateStart": "",
+        "expireDateEnd": "", "hasBatch": "", "hasProduct": "", "productTimeStatus": "",
+        "itemTagIdsStr": "", "tagQueryType": 0, "catIds": [],
+        "page": {"pageNo": 1, "pageSize": 200}, "userIds": "-1", "cid": "",
+        "api_name": "wms_goodsSectionInventory_list",
+    }
+
+
+def section_rows(code, force=False):
+    """★ 调 ERP「货位库存」拿某编码每个货位的：数量/已配数/可用数。
+
+    返回 [{"bin","count","alloc","avail","total"}, ...]；取不到返回 None。
+    字段对应（从 ERP 前端 JS 里挖出来的）：
+        code         = 货位编码（如 G-8-4-2-5）
+        allocateNum  = **已配数**（订单和其他波次配货时，在该货位预配的数量）
+        sku.avaliableNum = **可用数**（已扣已配）
+        sku.totalNum = 该货位库存数
+        sku.showOuterId / skuOuterId = 商家编码
+    """
+    cd = str(code or "").strip()
+    if not cd:
+        return None
+    now = time.time()
+    hit = _SECTION_CACHE.get(cd)
+    if (not force) and hit and (now - hit[0]) < _SECTION_TTL:
+        return hit[1]
+    c = None
+    try:
+        c = KP.open_cdp_page()
+        res = _post(c, SECTION_LIST_PATH, json.dumps(_section_body(cd)),
+                    "application/json")
+        txt = (res or {}).get("text") or ""
+        j = json.loads(txt or "{}")
+        d = j.get("data") or {}
+        lst = d.get("list") or []
+        out = []
+        for r in lst:
+            if not isinstance(r, dict):
+                continue
+            s = r.get("sku") or {}
+            try:
+                out.append({"bin": str(r.get("code") or ""),
+                            "count": int(r.get("count") or 0),
+                            "alloc": int(r.get("allocateNum") or 0),
+                            "avail": int(s.get("avaliableNum") or 0),
+                            "total": int(s.get("totalNum") or 0),
+                            "code": str(s.get("showOuterId") or s.get("skuOuterId") or "")})
+            except Exception:
+                continue
+        _SECTION_CACHE[cd] = (now, out)
+        return out
+    except Exception:
+        return None
+    finally:
+        try:
+            if c is not None:
+                c.close()
+        except Exception:
+            pass
 
 
 def lookup(code):
@@ -710,15 +817,35 @@ def plan(items, carrier="", on_step=None):
     except Exception:
         _zone_on = False
     if _zone_on:
-        _step("正在核对货位分区（只锁定 A/B/C/D 的在架）…")
+        _step("正在核对货位分区（只锁定 A/B/C/D 的可用数）…")
+        # ★ 并发查：每个编码一次 ERP 货位库存请求，串行会太慢
+        _zone_res = {}
+        try:
+            from concurrent.futures import ThreadPoolExecutor
+            _codes_q = [orig.get(t, t) for t in targets]
+
+            def _one(cd):
+                try:
+                    return cd, _shelf_in_zones(cd)
+                except Exception:
+                    return cd, (None, [], True)
+
+            with ThreadPoolExecutor(max_workers=6) as _ex:
+                for cd, r in _ex.map(_one, _codes_q):
+                    _zone_res[cd] = r
+        except Exception:
+            for t in targets:
+                _zone_res[orig.get(t, t)] = _shelf_in_zones(orig.get(t, t))
+
         for t in targets:
-            _zq, _zb, _zempty = _shelf_in_zones(orig.get(t, t))
-            if _zempty:                      # 没有货位索引 → 不限制，避免全挡住
+            _cd0 = orig.get(t, t)
+            _zq, _zb, _zempty = _zone_res.get(_cd0) or (None, [], True)
+            if _zempty:                      # 没有货位数据 → 不限制，避免全挡住
                 zone_cap[t] = maxs[t]
                 continue
             zone_cap[t] = max(0, int(_zq or 0))
             if zone_cap[t] < maxs[t]:
-                zone_note.append({"code": orig.get(t, t), "orders_max": maxs[t],
+                zone_note.append({"code": _cd0, "orders_max": maxs[t],
                                   "zone_shelf": zone_cap[t]})
     else:
         zone_cap = dict(maxs)
