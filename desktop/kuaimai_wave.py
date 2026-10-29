@@ -404,6 +404,57 @@ def _shelf_info(code):
     return {"shelf_qty": qty, "bins": bins, "bins_text": text, "shelf_index_empty": False}
 
 
+def _shelf_split(code):
+    """某编码的可用数按「允许分区 / 区外」拆分 → (区内, 区外, 区内货位, 是否有数据)。
+
+    ★ 为什么要拆：用户要求「生成波次之后只包含 A/B/C/D 货位」。
+      如果某编码在区外还有可用库存（G/F/XT），ERP 有可能把这一单绑到区外货位，
+      波次里就会出现非 A~D 货位。所以严格模式下**只挑「区外可用 = 0」的编码** ——
+      这样 ERP 无论怎么分配，都只能从 A~D 拣。
+    """
+    rows = None
+    try:
+        rows = section_rows(code)
+    except Exception:
+        rows = None
+    if not rows:
+        # 退回本机快照
+        info = _shelf_info(code)
+        if info["shelf_index_empty"]:
+            return None, None, [], True
+        try:
+            import kuaimai_scan as KS
+            zs = KS.stock_zones()
+            kept, tin = KS.bins_in_zones([[b[0], b[1]] for b in info["bins"]], zs)
+            tot = int(info["shelf_qty"] or 0)
+            return int(tin), max(0, tot - int(tin)), [(k[0], k[1]) for k in kept], False
+        except Exception:
+            return info["shelf_qty"], 0, info["bins"], False
+    try:
+        import kuaimai_scan as KS2
+        zs2 = KS2.stock_zones()
+    except Exception:
+        zs2 = set()
+    inside, outside, kept = 0, 0, []
+    for r in rows:
+        b = str(r.get("bin") or "")
+        q = int(r.get("avail") or 0)
+        if not q:
+            continue
+        z = ""
+        try:
+            import kuaimai_scan as KS3
+            z = KS3.stock_zone_of(b)
+        except Exception:
+            z = b.split("-")[0].upper() if b else ""
+        if (not zs2) or (z in zs2):
+            inside += q
+            kept.append((b, q))
+        else:
+            outside += q
+    return int(inside), int(outside), kept, False
+
+
 def _shelf_in_zones(code):
     """★ 某编码在**允许的分区**（默认 A/B/C/D）里的**可用数** → (件数, 货位列表, 索引是否为空)。
 
@@ -829,7 +880,7 @@ def plan(items, carrier="", on_step=None):
     #    用户口径：「生成波次时，锁定的订单只取 A/B/C/D 分区的货」。
     #    做法：把每个编码的上限压到「该编码在允许分区里的在架数」，
     #          超出部分不挑单 —— 这样锁定的订单一定能从 A~D 区拣出来。
-    zone_cap, zone_note = {}, []
+    zone_cap, zone_note, zone_blocked = {}, [], []
     _zone_on = False
     try:
         import kuaimai_scan as _KS
@@ -864,6 +915,25 @@ def plan(items, carrier="", on_step=None):
                 zone_cap[t] = maxs[t]
                 continue
             zone_cap[t] = max(0, int(_zq or 0))
+            # ★ 严格模式：区外还有库存的编码直接不参与成波
+            #   （否则 ERP 可能绑到区外货位 → 波次里混入非允许分区）
+            try:
+                import kuaimai_scan as _KSs
+                _strict = _KSs.stock_zone_strict()
+            except Exception:
+                _strict = True
+            if _strict:
+                try:
+                    _ins, _out, _bk, _be = _shelf_split(_cd0)
+                    if (not _be) and int(_out or 0) > 0:
+                        zone_cap[t] = 0
+                        zone_blocked.append({"code": _cd0, "inside": int(_ins or 0),
+                                             "outside": int(_out or 0),
+                                             "why": "该编码在所选分区之外还有可用库存，"
+                                                    "为保证波次只含所选货位，本单不参与成波"})
+                        continue
+                except Exception:
+                    pass
             if zone_cap[t] < maxs[t]:
                 zone_note.append({"code": _cd0, "orders_max": maxs[t],
                                   "zone_shelf": zone_cap[t]})
@@ -971,6 +1041,11 @@ def plan(items, carrier="", on_step=None):
         out["zone_dropped"] = zone_dropped[:50]
         out["zone_dropped_note"] = ("%d 单因「赠品/其它编码在允许分区没货」被剔除"
                                     % len(zone_dropped))
+    if zone_blocked:
+        out["zone_blocked"] = zone_blocked[:50]
+        out["zone_blocked_note"] = ("%d 个编码因「区外还有库存」被排除"
+                                    "（严格模式，保证波次只含所选货位）"
+                                    % len(zone_blocked))
     if _zone_on:
         try:
             import kuaimai_scan as _KS2
@@ -991,6 +1066,47 @@ def plan(items, carrier="", on_step=None):
                     "zone_locked": True, "codes": codes,
                     "zone_names": out.get("zone_names") or []}
     return out
+
+
+def wave_zone_check(wave_code, zones=None):
+    """★ 成波后核对：这个波次里的订单**绑定的货位是不是全在允许分区**。
+
+    用户要求：「生成波次之后包含的只有 A/B/C/D 货位，没有其他货位」。
+
+    数据来源：`/trade/wave/trade/list/log` 每单带 `positionCode`（该单绑定的货位）。
+    返回 {"ok","checked","no_pos","bad":[{bin,zone,count}],"zones"}：
+      · ok=True  → 所有已绑定货位都在允许分区
+      · bad      → 出现了不允许分区的货位（这些货可能要去别区拣）
+      · no_pos   → 还没绑定货位的单数（ERP 尚未分配，无法判断）
+    """
+    try:
+        import kuaimai_scan as KS
+        zs = set(zones) if zones is not None else set(KS.stock_zones())
+    except Exception:
+        zs = set(zones or [])
+    orders, total = wave_orders(wave_code)
+    cnt = {}
+    no_pos = 0
+    for o in (orders or []):
+        p = str(o.get("positionCode") or "").strip()
+        if not p:
+            no_pos += 1
+            continue
+        cnt[p] = cnt.get(p, 0) + 1
+    bad = []
+    for b, n in cnt.items():
+        z = ""
+        try:
+            import kuaimai_scan as KS2
+            z = KS2.stock_zone_of(b)
+        except Exception:
+            z = b.split("-")[0].upper() if b else ""
+        if zs and z not in zs:
+            bad.append({"bin": b, "zone": z, "count": n})
+    bad.sort(key=lambda x: -x["count"])
+    return {"ok": (not bad), "checked": len(orders or []), "no_pos": no_pos,
+            "bad": bad, "zones": sorted(zs),
+            "bins": sorted(cnt.keys())[:80]}
 
 
 def wave_orders(wave_code, page_size=500, max_pages=4):

@@ -364,6 +364,31 @@ def set_stock_zones(zones):
     return stock_zones()
 
 
+def stock_zone_strict():
+    """★ 严格模式（默认开）：只允许「库存全在允许分区」的编码成波。
+
+    用户要求：「生成波次之后包含的只有 A/B/C/D 货位，没有其他货位」。
+    如果某编码在区外（G/F/XT）还有可用库存，ERP 有可能把这一单绑到区外货位
+    → 波次里就混进了非 A~D 货位。
+    开启严格模式后，这类编码直接不参与成波，从而**保证波次里只有允许分区的货位**。
+    """
+    try:
+        s = load_settings() or {}
+        v = s.get("stock_zone_strict", None)
+        if v is None:
+            return True                  # 默认严格
+        return bool(v)
+    except Exception:
+        return True
+
+
+def set_stock_zone_strict(on):
+    s = load_settings() or {}
+    s["stock_zone_strict"] = bool(on)
+    save_settings(s)
+    return stock_zone_strict()
+
+
 def bins_in_zones(bins, zones=None):
     """按分区筛货位 → (过滤后的 [[名, 件数]...], 合计件数)。
 
@@ -4409,6 +4434,7 @@ class _WebHandler(BaseHTTPRequestHandler):
                     return deny
                 return self._json({"zones": sorted(stock_zones()),
                                    "default": list(STOCK_ZONES_DEFAULT),
+                                   "strict": stock_zone_strict(),
                                    "all_prefixes": _all_bin_prefixes()})
             if parsed.path == "/api/desktop/auto_audit":
                 # ★ GET 版：读「自动智能审核」设置。
@@ -5042,6 +5068,11 @@ class _WebHandler(BaseHTTPRequestHandler):
                     z = set_stock_zones(body.get("zones"))
                 except Exception as e:
                     return self._json({"error": str(e)[:160]}, 400)
+                if "strict" in body:
+                    try:
+                        set_stock_zone_strict(bool(body.get("strict")))
+                    except Exception:
+                        pass
                 try:
                     _app = (_WEB_STATE or {}).get("app")
                     if _app is not None:

@@ -1577,7 +1577,15 @@ function openZones(){
             + (info.qty||0) + ' 件</span></label>';
         });
         html += '<div style="color:#6e6e73;font-size:12px;margin-top:6px">'
-          + '只勾选的区才计入「在架数 / 可成波 / 可发件数」</div>';
+          + '只勾选的区才计入「在架数 / 可成波 / 可发件数」</div>'
+          + '<label style="display:block;margin-top:10px;padding:8px 10px;'
+          + 'background:#f2f6ff;border-radius:8px;font-size:13px">'
+          + '<input type="checkbox" id="zstrict"' + (d.strict ? ' checked' : '')
+          + '> <b>严格模式</b>：只让「库存全在所选分区」的编码成波'
+          + '<div style="color:#6e6e73;font-size:12px;margin-top:4px">'
+          + '开启后，如果某编码在其它区还有库存（ERP 可能绑到那些货位），'
+          + '它就不会参与成波 —— 这样才能保证<b>波次里只有所选货位</b>。'
+          + '</div></label>';
       }
       html += '</div>';
       box.innerHTML = html;
@@ -1600,9 +1608,10 @@ function openZones(){
         box.querySelectorAll('input[type=checkbox]').forEach(function(c){
           if(c.checked) picked.push(c.value);
         });
+        var _st = box.querySelector('#zstrict');
         fetch(withSid('/api/desktop/stock_zones'), {
           method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({zones: picked})
+          body: JSON.stringify({zones: picked, strict: !!(_st && _st.checked)})
         }).then(function(r){ return r.json(); }).then(function(rr){
           document.body.removeChild(mask);
           if(rr && rr.error){ flash(rr.error); return; }
