@@ -3008,7 +3008,11 @@ function addCode(code){
         + '</div>';
       /* 旧模式（单快递）：只处理当前快递，没有就提示可切到另一个快递 */
       if(!DUAL){
-        const cnum = parseInt(per[CARRIER], 10) || 0;
+        let cnum = parseInt(per[CARRIER], 10) || 0;
+          /* ★ 分区锁定：只算 A/B/C/D 区的在架，超出的部分不能锁定成波 */
+          if(d && d.zone_locked && d.max_zone != null){
+            cnum = Math.min(cnum, Math.max(0, parseInt(d.max_zone, 10) || 0));
+          }
         const cname0 = String(d.code || code).toUpperCase();
         if(cnum > 0){
           if(ITEMS.some(function(x){ return String(x.code).toUpperCase() === cname0; })){
@@ -3018,6 +3022,7 @@ function addCode(code){
           saveBags(); render(); syncCarrierButtons();
           $('hint').innerHTML = '<span class="qcode">' + esc(d.code || code) + '</span>：快递 <b>' + esc(CARRIER)
             + '</b> 最大可生成 <b>' + cnum + ' 件</b>'
+              + ((d.zone_locked && d.zone_shelf != null && d.zone_shelf < cnum + 1 && d.max_zone != null && d.max_zone < (parseInt(per[CARRIER],10)||0)) ? ('　<span style="color:#c62828">（按 ' + (d.zone_names||[]).join('/') + ' 区在架 ' + d.zone_shelf + ' 件锁定）</span>') : '')
             + (all ? '（全部：<span class="cex">' + esc(all) + '</span>）' : '') + liveBar + extra;
           return;
         }
@@ -3440,7 +3445,11 @@ function refreshMaxForCodes(codes, immediate){
       .then(function(d){
         if(!d || d.error) return;
         const per = d.carriers || {};
-        const cnum = parseInt(per[CARRIER], 10) || 0;
+        let cnum = parseInt(per[CARRIER], 10) || 0;
+          /* ★ 分区锁定：只算 A/B/C/D 区的在架，超出的部分不能锁定成波 */
+          if(d && d.zone_locked && d.max_zone != null){
+            cnum = Math.min(cnum, Math.max(0, parseInt(d.max_zone, 10) || 0));
+          }
         ITEMS.forEach(function(it){
           if(String(it.code).toUpperCase() !== key) return;
           /* 单快递模式：以该快递的可生成数为准；双快递：取两个快递之和 */
@@ -3472,7 +3481,11 @@ function refreshAllMaxQuiet(){
       .then(function(d){
         if(!d || d.error) return;
         const per = d.carriers || {};
-        const cnum = parseInt(per[CARRIER], 10) || 0;
+        let cnum = parseInt(per[CARRIER], 10) || 0;
+          /* ★ 分区锁定：只算 A/B/C/D 区的在架，超出的部分不能锁定成波 */
+          if(d && d.zone_locked && d.max_zone != null){
+            cnum = Math.min(cnum, Math.max(0, parseInt(d.max_zone, 10) || 0));
+          }
         const tot = DUAL ? Object.keys(per).reduce(function(a,k){ return a + (parseInt(per[k],10)||0); }, 0) : cnum;
         let changed = false;
         ITEMS.forEach(function(x){

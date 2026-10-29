@@ -389,6 +389,27 @@ def _shelf_info(code):
     return {"shelf_qty": qty, "bins": bins, "bins_text": text, "shelf_index_empty": False}
 
 
+def _shelf_in_zones(code):
+    """★ 某编码在**允许的分区**（默认 A/B/C/D）里的在架数 → (件数, 货位列表, 索引是否为空)。
+
+    用户口径：「生成波次时，锁定的订单只取 A/B/C/D 分区的货」。
+    分区白名单来自设置 `stock_zones`（空 = 不限制，等于全部）。
+    货位索引为空时返回 (None, [], True)，调用方据此**不做限制**（避免没数据时全挡住）。
+    """
+    info = _shelf_info(code)
+    if info["shelf_index_empty"]:
+        return None, [], True
+    try:
+        import kuaimai_scan as KS
+        zs = KS.stock_zones()
+        if not zs:
+            return info["shelf_qty"], info["bins"], False
+        kept, tot = KS.bins_in_zones([[b[0], b[1]] for b in info["bins"]], zs)
+        return int(tot), [(k[0], k[1]) for k in kept], False
+    except Exception:
+        return info["shelf_qty"], info["bins"], False
+
+
 def lookup(code):
     """某编码最大可生成件数（按快递分组）+ 候选订单明细 + 本机在架/货位 + 多件预留。
 
@@ -425,7 +446,27 @@ def lookup(code):
             other[name or "(空)"] = other.get(name or "(空)", 0) + n
     total = sum(o["qty"].get(k, 0) for o in orders)
     info = _shelf_info(code)
-    return {"ok": True, "code": code, "max": total, "carriers": per, "other": other,
+    # ★ 分区锁定：页面上「可生成多少」也要按 A/B/C/D 的在架封顶，
+    #   否则会显示 50 单、点下去只成 8 单（用户反馈过这种落差）。
+    _zc, _zb, _zempty = _shelf_in_zones(code)
+    _zone_on = False
+    _zn = []
+    try:
+        import kuaimai_scan as _KS
+        _zone_on = bool(_KS.stock_zones())
+        _zn = sorted(_KS.stock_zones())
+    except Exception:
+        _zone_on = False
+    cap = total
+    if _zone_on and not _zempty and _zc is not None:
+        cap = min(total, max(0, int(_zc)))
+    return {"ok": True, "code": code, "max": total,
+            "max_zone": cap,                     # ★ 按分区锁定后真正可生成的上限
+            "zone_locked": bool(_zone_on),
+            "zone_names": _zn,
+            "zone_shelf": (None if _zempty else int(_zc or 0)),
+            "zone_bins_text": " / ".join("%s(%d)" % (b[0], b[1]) for b in (_zb or [])),
+            "carriers": per, "other": other,
             "orders": len(orders), "det": det, "warehouseId": WAREHOUSE_ID,
             "multi_qty": multi_qty, "shelf_qty": info["shelf_qty"], "bins": info["bins"],
             "bins_text": info["bins_text"], "shelf_index_empty": info["shelf_index_empty"]}
@@ -656,7 +697,33 @@ def plan(items, carrier="", on_step=None):
         c.close()
 
     maxs = {t: sum(o["qty"].get(t, 0) for o in raw_by_code.get(t, [])) for t in targets}
-    eff = {t: min(targets[t], maxs[t]) for t in targets}
+
+    # ★★ 分区锁定：只挑「A/B/C/D 区有货」的那部分单
+    #    用户口径：「生成波次时，锁定的订单只取 A/B/C/D 分区的货」。
+    #    做法：把每个编码的上限压到「该编码在允许分区里的在架数」，
+    #          超出部分不挑单 —— 这样锁定的订单一定能从 A~D 区拣出来。
+    zone_cap, zone_note = {}, []
+    _zone_on = False
+    try:
+        import kuaimai_scan as _KS
+        _zone_on = bool(_KS.stock_zones())
+    except Exception:
+        _zone_on = False
+    if _zone_on:
+        _step("正在核对货位分区（只锁定 A/B/C/D 的在架）…")
+        for t in targets:
+            _zq, _zb, _zempty = _shelf_in_zones(orig.get(t, t))
+            if _zempty:                      # 没有货位索引 → 不限制，避免全挡住
+                zone_cap[t] = maxs[t]
+                continue
+            zone_cap[t] = max(0, int(_zq or 0))
+            if zone_cap[t] < maxs[t]:
+                zone_note.append({"code": orig.get(t, t), "orders_max": maxs[t],
+                                  "zone_shelf": zone_cap[t]})
+    else:
+        zone_cap = dict(maxs)
+
+    eff = {t: min(targets[t], maxs[t], zone_cap.get(t, maxs[t])) for t in targets}
     _step("正在挑单：候选 %d 单，按「超时→加急」排序…" % len(cand))
 
     # ★ 只查候选单的剩余时间（按 sids 精确查），不再按编码全量查 ——
@@ -682,14 +749,36 @@ def plan(items, carrier="", on_step=None):
             break
 
     codes = [{"code": orig.get(t, t), "target": targets[t], "max": maxs[t],
+              "zone_shelf": zone_cap.get(t, maxs[t]),
               "actual": covered.get(t, 0)} for t in targets]
     picks = []
     for sid in selected:
         p_rem = rem.get(sid)
         picks.append({"sid": sid, "remain": p_rem, "urgent": bool(sid in urg),
                       "contribute": {k: v for k, v in cand[sid].items() if k in eff}})
-    return {"ok": True, "carrier": carrier, "codes": codes, "sids": selected, "picks": picks,
-            "candidates": len(cand), "warehouseId": WAREHOUSE_ID}
+    out = {"ok": True, "carrier": carrier, "codes": codes, "sids": selected, "picks": picks,
+           "candidates": len(cand), "warehouseId": WAREHOUSE_ID,
+           "zone_locked": _zone_on}
+    if _zone_on:
+        try:
+            import kuaimai_scan as _KS2
+            out["zone_names"] = sorted(_KS2.stock_zones())
+        except Exception:
+            out["zone_names"] = []
+        if zone_note:
+            out["zone_capped"] = zone_note
+            out["zone_note"] = "；".join(
+                "%s 订单可生成 %s 单、但 %s 区在架只有 %s 件"
+                % (z["code"], z["orders_max"], "/".join(out.get("zone_names") or []),
+                   z["zone_shelf"]) for z in zone_note[:6])
+        # 全部编码在允许分区都没货 → 明确报错，别让用户以为"没单"
+        if all(zone_cap.get(t, 0) <= 0 for t in targets) and any(maxs.values()):
+            return {"error": "这些编码在 %s 区的在架都是 0，按分区锁定后没有可成波的货"
+                             "（可去「现货可发」页调整分区，或先上架补货）"
+                             % ("/".join(out.get("zone_names") or [])),
+                    "zone_locked": True, "codes": codes,
+                    "zone_names": out.get("zone_names") or []}
+    return out
 
 
 def wave_orders(wave_code, page_size=500, max_pages=4):

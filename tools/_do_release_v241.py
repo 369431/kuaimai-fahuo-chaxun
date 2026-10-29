@@ -1,0 +1,58 @@
+# -*- coding: utf-8 -*-
+"""发布 v2.41：生成波次时按 A/B/C/D 分区锁定（只挑这些区能拣的货）。"""
+import os
+import sys
+
+REPO = r"C:\Users\Kerwin\Desktop\kuaimai发货查询"
+INSTALLER = os.path.join(REPO, "packaging", "out", "快麦扫码查询_安装版_v2.41.exe")
+NOTES = (
+    "**v2.41：生成波次时「按货位分区锁定」—— 只挑 A/B/C/D 区能拣的货**\n"
+    "\n"
+    "**一、核心改动（按你的要求）**\n"
+    "· 生成波次挑单时，每个编码的可成波上限 =\n"
+    "  **min（你要的件数，ERP 可成波单数，该编码在 A/B/C/D 区的在架数）**\n"
+    "· 超出 A~D 在架数的部分**不会锁定成波** —— 保证锁定的订单都能从 A~D 区拣出来\n"
+    "· 某编码在 A~D 区在架为 0 → 明确提示\n"
+    "  「这些编码在 A/B/C/D 区的在架都是 0，按分区锁定后没有可成波的货」\n"
+    "  （不会像以前那样含糊地报「没有可成波的订单」）\n"
+    "\n"
+    "**二、页面显示与实际一致**\n"
+    "· 生成波次页的「最大可生成 N 件」现在也按 A~D 在架封顶\n"
+    "· 不再出现「显示能成 50 单、点下去只成 8 单」的落差\n"
+    "· 扫编码时有分区说明标注（按 X 区在架 N 件锁定）\n"
+    "\n"
+    "**三、⚠️ 必须先知道的实情**\n"
+    "```\n"
+    "货位库共 2,486 个编码\n"
+    "只锁 A/B/C/D 后「一件都拣不出来」= 1,319 个（53.1%），涉及库存 109,651 件\n"
+    "  · G  区独有/为主：883 个编码\n"
+    "  · F  区独有/为主：281 个编码\n"
+    "  · XT 区独有/为主：155 个编码\n"
+    "```\n"
+    "· 也就是：**一半以上的编码，货只在 F/G/XT 区，按新规则不能成波**\n"
+    "· 你已确认「A/B/C/D 确实是能拣货的区，其余不能发」，所以这是预期行为\n"
+    "· 如果哪天想让某些区也能拣：打开「现货可发」页 → 点顶部「分区 A/B/C/D ▾」→ 勾上即可\n"
+    "\n"
+    "**四、怎么改分区（不用找我改代码）**\n"
+    "· 现货可发页顶部 → **分区 A/B/C/D ▾** → 弹出勾选（每个区标了编码数/件数）\n"
+    "· 保存后立刻生效（成波锁定 + 在架数 + 可发件数 一起跟着变）\n"
+    "· 一个都不勾 = 不限制（全部区都算）\n"
+    "\n"
+    "**五、技术实现**\n"
+    "· 新增 `kuaimai_wave._shelf_in_zones(code)`：某编码在允许分区的在架数\n"
+    "· `plan()` 的 eff 上限加入 `zone_cap`；返回 `zone_locked/zone_names/zone_capped/zone_note`\n"
+    "· `lookup()` 返回 `max_zone`（按分区封顶后的可生成上限）+ `zone_shelf`\n"
+    "· 生成波次页把「最大可生成」改用 `max_zone`\n"
+    "· 离线实测：抽样 400 个编码，366 个被分区收窄；取消分区后与全量一致 ✓\n"
+)
+
+assert os.path.isfile(INSTALLER), "安装包不存在：%s" % INSTALLER
+sys.path.insert(0, REPO)
+os.chdir(REPO)
+sys.argv = ["release.py", "--version", "v2.41", "--installer", INSTALLER, "--notes", NOTES]
+
+import release  # noqa: E402
+
+rc = release.main()
+print("\nrelease.main() returned", rc)
+sys.exit(rc)
