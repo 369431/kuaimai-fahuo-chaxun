@@ -303,8 +303,23 @@ def _split_raw(res, code):
             if cd and n > 0:
                 k = _ci(cd)
                 qty[k] = qty.get(k, 0) + n
+        # ★ 严格校验用：**含赠品**的全部明细（赠品也要占库存，不能只算真实商品行）
+        allq = {}
+        for it in (o.get("orders") or []):
+            if not isinstance(it, dict) or _is_placeholder(it):
+                continue
+            cd = it.get("sysOuterId") or it.get("outerId") or ""
+            try:
+                n = int(it.get("num") or it.get("qty") or 0)
+            except Exception:
+                n = 0
+            if cd and n > 0:
+                k = _ci(cd)
+                allq[k] = allq.get(k, 0) + n
+                _CODE_ORIG.setdefault(k, str(cd))
         if _is_one_piece(o):
-            one.append({"sid": sid, "qty": qty, "carrier": _carrier_of(o)})
+            one.append({"sid": sid, "qty": qty, "all_qty": allq,
+                        "carrier": _carrier_of(o)})
         else:
             # 一单多件：不参与成波，但该编码的件数要预留
             multi_qty += qty.get(k0, 0)
@@ -592,6 +607,7 @@ def _search_form(code):
 
 _REM_CACHE = {}          # {sid: (timeoutActionTime 绝对秒, 记下的时刻)}  —— 剩余时间缓存
 _REM_CACHE_TTL = 900     # 15 分钟：超时时刻是订单属性，短时间内不会变
+_CODE_ORIG = {}          # {小写编码: 原始编码} —— 严格校验要拿原始大小写去查 ERP
 
 
 def _priority_sids(sids, chunk=1000):
@@ -777,6 +793,7 @@ def plan(items, carrier="", on_step=None):
     c = KP.open_cdp_page()
     try:
         cand, raw_by_code = {}, {}
+        cand_meta = {}          # {sid: 候选订单对象}（含赠品的完整明细，严格校验用）
         # 并发查：所有编码一次全发出去（浏览器自己并发），不再逐个串行
         _ts = list(targets)
         _codes = [orig.get(t, t) for t in _ts]
@@ -800,6 +817,9 @@ def plan(items, carrier="", on_step=None):
                 m = cand.setdefault(o["sid"], {})
                 for cc, qq in o["qty"].items():
                     m[cc] = max(m.get(cc, 0), qq)
+                # ★ 严格校验要用的「含赠品明细」：同一订单也会被多次返回，取一次即可
+                if o["sid"] not in cand_meta:
+                    cand_meta[o["sid"]] = o
     finally:
         c.close()
 
@@ -878,6 +898,67 @@ def plan(items, carrier="", on_step=None):
     codes = [{"code": orig.get(t, t), "target": targets[t], "max": maxs[t],
               "zone_shelf": zone_cap.get(t, maxs[t]),
               "actual": covered.get(t, 0)} for t in targets]
+
+    # ★★ 严格校验（A 方案）：逐单确认「这单里**每一件货**（含赠品）在允许分区都有可用量」
+    #    不满足就整单剔除 —— 目标是把「选中的订单 100% 都在 A/B/C/D 区能拣出来」做实。
+    zone_dropped = []
+    if _zone_on:
+        _step("正在逐单校验（每件货都要在允许分区有可用量）…")
+        try:
+            # 1) 收集选中订单里「不在目标编码里」的其它编码（典型是赠品）
+            _extra = set()
+            for sid in selected:
+                aq = (cand_meta.get(sid) or {}).get("all_qty") or {}
+                for cc in aq:
+                    if cc not in eff:
+                        _extra.add(cc)
+            # 2) 查这些编码的分区可用量（并发，带缓存）
+            _extra_cap = {}
+            if _extra:
+                from concurrent.futures import ThreadPoolExecutor
+                _el = sorted(_extra)
+
+                def _one_x(cc):
+                    try:
+                        q, _b, _e = _shelf_in_zones(_CODE_ORIG.get(cc, cc))
+                        return cc, (None if _e else int(q or 0))
+                    except Exception:
+                        return cc, None
+
+                with ThreadPoolExecutor(max_workers=6) as _ex2:
+                    for cc, q in _ex2.map(_one_x, _el):
+                        _extra_cap[cc] = q
+            # 3) 逐单扣预算：超了就剔除
+            _budget = dict(_extra_cap)
+            keep = []
+            for sid in selected:
+                aq = (cand_meta.get(sid) or {}).get("all_qty") or {}
+                bad = False
+                for cc, need in aq.items():
+                    if cc in eff:
+                        continue                     # 目标编码已由 zone_cap 累计保证
+                    b = _budget.get(cc)
+                    if b is not None and b < need:
+                        bad = True
+                        break
+                if bad:
+                    zone_dropped.append({"sid": sid,
+                                         "why": "赠品/其它编码在允许分区可用量不足"})
+                    continue
+                keep.append(sid)
+                for cc, need in aq.items():
+                    if cc in eff:
+                        continue
+                    if _budget.get(cc) is not None:
+                        _budget[cc] -= need
+            if len(keep) != len(selected):
+                selected = keep
+        except Exception as _e:
+            try:
+                _step("逐单校验跳过（%s）" % str(_e)[:60])
+            except Exception:
+                pass
+
     picks = []
     for sid in selected:
         p_rem = rem.get(sid)
@@ -886,6 +967,10 @@ def plan(items, carrier="", on_step=None):
     out = {"ok": True, "carrier": carrier, "codes": codes, "sids": selected, "picks": picks,
            "candidates": len(cand), "warehouseId": WAREHOUSE_ID,
            "zone_locked": _zone_on}
+    if zone_dropped:
+        out["zone_dropped"] = zone_dropped[:50]
+        out["zone_dropped_note"] = ("%d 单因「赠品/其它编码在允许分区没货」被剔除"
+                                    % len(zone_dropped))
     if _zone_on:
         try:
             import kuaimai_scan as _KS2
