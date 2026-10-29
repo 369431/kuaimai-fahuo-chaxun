@@ -1109,6 +1109,80 @@ def wave_zone_check(wave_code, zones=None):
             "bins": sorted(cnt.keys())[:80]}
 
 
+def zone_report(items, zones=None):
+    """★ 报告「这批订单/这个波次占用了哪些区的库存」→ dict。
+
+    items: [{"code": 商家编码, "qty": 件数}]
+    返回：
+      {"zones": {"A": 件数, "B": ..., "D": ...},      # 按区汇总（只统计允许分区）
+       "outside": {"G": 件数, ...},                    # 允许分区之外的（严格模式下应为空）
+       "bins": [{"bin","zone","code","qty"}],          # 具体货位（贪心分配，仅供参考）
+       "unknown": [{"code","qty"}],                    # 查不到货位数据的编码
+       "zones_allowed": [...]}
+    """
+    try:
+        import kuaimai_scan as KS
+        zs = set(zones) if zones is not None else set(KS.stock_zones())
+    except Exception:
+        zs = set(zones or [])
+    zsum, osum, bins_out, unknown = {}, {}, [], []
+    for it in (items or []):
+        cd = str(it.get("code") or "").strip()
+        try:
+            need = int(it.get("qty") or 0)
+        except Exception:
+            need = 0
+        if not cd or need <= 0:
+            continue
+        rows = None
+        try:
+            rows = section_rows(cd)
+        except Exception:
+            rows = None
+        if not rows:
+            unknown.append({"code": cd, "qty": need})
+            continue
+        left = need
+        # 按「允许分区的货位优先」分配（仅供参考，真正拣哪个由 ERP 决定）
+        ordered = sorted(rows, key=lambda r: (0 if _in_zones(r.get("bin"), zs) else 1,
+                                             -int(r.get("avail") or 0)))
+        for r in ordered:
+            if left <= 0:
+                break
+            b = str(r.get("bin") or "")
+            av = int(r.get("avail") or 0)
+            if av <= 0:
+                continue
+            take = min(left, av)
+            z = ""
+            try:
+                import kuaimai_scan as KS2
+                z = KS2.stock_zone_of(b)
+            except Exception:
+                z = b.split("-")[0].upper() if b else ""
+            if zs and z not in zs:
+                osum[z or "?"] = osum.get(z or "?", 0) + take
+            else:
+                zsum[z or "?"] = zsum.get(z or "?", 0) + take
+                bins_out.append({"bin": b, "zone": z, "code": cd, "qty": take})
+            left -= take
+        if left > 0:
+            unknown.append({"code": cd, "qty": left})
+    return {"zones": dict(sorted(zsum.items())), "outside": dict(sorted(osum.items())),
+            "bins": bins_out, "unknown": unknown,
+            "zones_allowed": sorted(zs),
+            "summary": "；".join("%s区 %d 件" % (k, v) for k, v in sorted(zsum.items())) or "-"}
+
+
+def _in_zones(bin_name, zs):
+    try:
+        import kuaimai_scan as KS
+        z = KS.stock_zone_of(bin_name)
+    except Exception:
+        z = str(bin_name or "").split("-")[0].upper()
+    return (not zs) or (z in zs)
+
+
 def wave_orders(wave_code, page_size=500, max_pages=4):
     """按波次号取该波次的**订单列表**（含每单打印状态）。
 
@@ -1482,6 +1556,15 @@ def create(items, carrier="", on_step=None):
         else:
             out["created"] = False
             out["verify_error"] = "ERP 未建出波次（可能权限/订单状态）"
+        # ★ 成波后报告「这个波次占用了哪些区的库存」
+        if out.get("created"):
+            try:
+                _step("正在统计本波次占用的货位分区…")
+                out["zone_report"] = zone_report(
+                    [{"code": c.get("code"), "qty": c.get("actual") or 0}
+                     for c in (out.get("codes") or [])])
+            except Exception as _e:
+                out["zone_report"] = {"summary": "统计失败：%s" % str(_e)[:80]}
         return out
     finally:
         c.close()

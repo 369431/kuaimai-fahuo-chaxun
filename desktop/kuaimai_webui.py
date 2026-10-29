@@ -3401,6 +3401,44 @@ function handleCreateResult(p, items){
     }
     const v = p.verify || {};
     if(p.created === true || v.ok){
+      /* ★ 本波次占用的货位分区（后端 zone_report：每个编码在哪个区、多少件） */
+      const zr = p.zone_report || null;
+      if(zr && ((zr.zones && Object.keys(zr.zones).length) || (zr.outside && Object.keys(zr.outside).length))){
+        let zhtml = '<div class="card" style="background:#f0f7ff">'
+          + '<h2>本波次占用的货位分区</h2>';
+        const zs = zr.zones || {};
+        const ks = Object.keys(zs);
+        if(ks.length){
+          zhtml += '<div class="muted" style="font-size:14px">'
+            + ks.map(function(k){ return '<b>' + esc(k) + ' 区</b> ' + zs[k] + ' 件'; }).join('　·　')
+            + '</div>';
+        } else {
+          zhtml += '<div class="muted">没统计到分区（货位数据缺失）</div>';
+        }
+        const out2 = zr.outside || {};
+        const oks = Object.keys(out2);
+        if(oks.length){
+          zhtml += '<div class="badtext" style="margin-top:6px">⚠ 有 '
+            + oks.map(function(k){ return esc(k) + ' 区 ' + out2[k] + ' 件'; }).join('、')
+            + ' 来自<b>所选分区之外</b></div>';
+        }
+        if(zr.bins && zr.bins.length){
+          zhtml += '<div class="muted" style="margin-top:6px">具体货位：'
+            + zr.bins.slice(0, 20).map(function(b){
+                return esc(b.bin) + '（' + esc(b.zone) + '区 ' + b.qty + ' 件）';
+              }).join('　')
+            + (zr.bins.length > 20 ? ' …共 ' + zr.bins.length + ' 个' : '')
+            + '</div>';
+        }
+        if(zr.unknown && zr.unknown.length){
+          zhtml += '<div class="muted" style="margin-top:4px">未取到货位数据：'
+            + zr.unknown.slice(0, 8).map(function(u){ return esc(u.code) + '×' + u.qty; }).join('、')
+            + '</div>';
+        }
+        zhtml += '</div>';
+        $('out').insertAdjacentHTML('afterbegin', zhtml);
+      }
+
       dropFromBag(CARRIER, p, items);   /* 只从「当前快递」清单移除已进波次的编码 */
       try{
         const imp = {};
