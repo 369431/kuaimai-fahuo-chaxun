@@ -603,6 +603,25 @@ def lookup(code):
     orders = raw.get("one") or []
     multi_qty = int(raw.get("multi_qty") or 0)
     k = _ci(code)
+
+    # ★★ 第 1 步：先按订单标签排除（「即入即出」等）
+    #    必须在按快递分组之前做，否则页面显示的「可生成」还是没扣掉的旧数字。
+    _tag_ex = 0
+    try:
+        _xt = wave_exclude_tags()
+        if _xt and orders:
+            _dt = sid_tags([o["sid"] for o in orders])
+            _keep = []
+            for o in orders:
+                if (set(_dt.get(o["sid"]) or set()) & _xt):
+                    _tag_ex += int(o["qty"].get(k, 0) or 0)
+                    continue
+                _keep.append(o)
+            orders = _keep
+    except Exception:
+        _tag_ex = 0
+
+    # ★★ 第 2 步：按（已排除标签后的）候选单算各快递件数
     per, other = {c2: 0 for c2 in CARRIERS}, {}
     det = []
     for o in orders:
@@ -633,8 +652,12 @@ def lookup(code):
     cap = total
     if _zone_on and not _zempty and _zc is not None:
         cap = min(total, max(0, int(_zc)))
-    return {"ok": True, "code": code, "max": total,
-            "max_zone": cap,                     # ★ 按分区锁定后真正可生成的上限
+    # ★ max 直接给**最终**可生成数量：已经扣掉「即入即出」标签 + 按分区封顶
+    #   （用户口径：显示 100 就代表这 100 已经排除过这些条件了）
+    return {"ok": True, "code": code, "max": cap,
+            "max_raw": total,                    # 未按分区封顶前（只扣了标签）
+            "tag_excluded": _tag_ex,             # 因「即入即出」等标签被排除的件数
+            "max_zone": cap,                     # 兼容旧字段，同 max
             "zone_locked": bool(_zone_on),
             "zone_names": _zn,
             "zone_shelf": (None if _zempty else int(_zc or 0)),
@@ -659,6 +682,45 @@ def _search_form(code):
 _REM_CACHE = {}          # {sid: (timeoutActionTime 绝对秒, 记下的时刻)}  —— 剩余时间缓存
 _REM_CACHE_TTL = 900     # 15 分钟：超时时刻是订单属性，短时间内不会变
 _CODE_ORIG = {}          # {小写编码: 原始编码} —— 严格校验要拿原始大小写去查 ERP
+_TAG_CACHE = {}          # {sid: (标签名集合, 时刻)} —— 顺带从 /trade/search 拿到的订单标签
+
+# 默认要排除的订单标签（用户口径：带「即入即出」的单不参与成波）
+WAVE_EXCLUDE_TAGS_DEFAULT = ("即入即出",)
+
+
+def wave_exclude_tags():
+    """当前要排除的订单标签集合（设置项 `wave_exclude_tags`，空列表 = 不排除）。"""
+    try:
+        import kuaimai_scan as KS
+        s = KS.load_settings() or {}
+        v = s.get("wave_exclude_tags", None)
+        if v is None:
+            return set(WAVE_EXCLUDE_TAGS_DEFAULT)
+        if isinstance(v, (list, tuple)):
+            return set(str(x).strip() for x in v if str(x).strip())
+        txt = str(v or "").strip()
+        if not txt:
+            return set()
+        return set(x.strip() for x in txt.replace("，", ",").split(",") if x.strip())
+    except Exception:
+        return set(WAVE_EXCLUDE_TAGS_DEFAULT)
+
+
+def sid_tags(sids):
+    """批量取订单标签 → {sid: set(标签名)}（复用 _priority_sids 的同一次请求，有缓存）。"""
+    ids = [str(x) for x in (sids or []) if str(x).strip()]
+    if not ids:
+        return {}
+    now = time.time()
+    need = [s for s in ids
+            if not (_TAG_CACHE.get(s) and (now - _TAG_CACHE[s][1]) < _REM_CACHE_TTL)]
+    if need:
+        try:
+            _priority_sids(need)          # 同一个 /trade/search 请求，顺手把标签写进缓存
+        except Exception:
+            pass
+    return {s: set((_TAG_CACHE.get(s) or (set(), 0))[0]) for s in ids}
+
 
 
 def _priority_sids(sids, chunk=1000):
@@ -726,6 +788,34 @@ def _priority_sids(sids, chunk=1000):
                 s = str(o.get("sid") or "")
                 if not s:
                     continue
+                # ★ 顺手记下订单标签（tagList / tagName）——「即入即出」排除要用，
+                #   同一个响应里就有，不用为标签再发一次请求。
+                try:
+                    _names = set()
+                    for _t in (o.get("tagList") or []):
+                        if isinstance(_t, dict):
+                            _nm = str(_t.get("tagName") or "").strip()
+                            if _nm:
+                                _names.add(_nm)
+                        elif _t:
+                            _names.add(str(_t).strip())
+                    _tn = str(o.get("tagName") or "")
+                    if _tn:
+                        # tagName 形如 "F2F2F2_333333_即入即出_1000000110"
+                        # → 只取中文/字母文本部分，跳过颜色码和纯数字 id
+                        import re as _re
+                        for _part in _tn.split("_"):
+                            _p = str(_part or "").strip()
+                            if not _p or len(_p) < 2:
+                                continue
+                            if _p.isdigit():
+                                continue
+                            if _re.fullmatch(r"[0-9A-Fa-f]{3}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8}", _p):
+                                continue          # 颜色码
+                            _names.add(_p)
+                    _TAG_CACHE[s] = (_names, now)
+                except Exception:
+                    pass
                 try:
                     to = float(o.get("timeoutActionTime") or 0)
                     to_s = (to / 1000.0) if to > 1e12 else 0.0
@@ -875,6 +965,32 @@ def plan(items, carrier="", on_step=None):
         c.close()
 
     maxs = {t: sum(o["qty"].get(t, 0) for o in raw_by_code.get(t, [])) for t in targets}
+
+    # ★★ 先按订单标签排除（用户口径：带「即入即出」标签的单不参与成波）
+    #    标签来自 /trade/search 同一个响应（sid_tags 内部就走它，有缓存、不额外发请求）。
+    #    必须在「分区上限 / eff」之前做，否则可生成数量不会跟着减。
+    tag_excluded = []
+    try:
+        _xtags = wave_exclude_tags()
+    except Exception:
+        _xtags = set()
+    if _xtags and cand:
+        _step("正在核对订单标签（排除 %s）…" % "/".join(sorted(_xtags)))
+        try:
+            _tags = sid_tags(list(cand.keys()))
+            _bad = [(s, sorted(ts & _xtags)) for s, ts in _tags.items() if (ts & _xtags)]
+            if _bad:
+                for _sid, _hit in _bad:
+                    _q = cand.pop(_sid, None)
+                    if _q is not None:
+                        tag_excluded.append({"sid": _sid, "tags": _hit,
+                                             "contribute": dict(_q)})
+                # 被排除的单要从每码「可生成数量」里扣掉
+                maxs = {t: sum(q.get(t, 0) for q in cand.values()) for t in targets}
+                _step("已排除 %d 单带「%s」标签的订单…"
+                      % (len(tag_excluded), "/".join(sorted(_xtags))))
+        except Exception:
+            pass
 
     # ★★ 分区锁定：只挑「A/B/C/D 区有货」的那部分单
     #    用户口径：「生成波次时，锁定的订单只取 A/B/C/D 分区的货」。
@@ -1037,6 +1153,11 @@ def plan(items, carrier="", on_step=None):
     out = {"ok": True, "carrier": carrier, "codes": codes, "sids": selected, "picks": picks,
            "candidates": len(cand), "warehouseId": WAREHOUSE_ID,
            "zone_locked": _zone_on}
+    if tag_excluded:
+        out["tag_excluded"] = tag_excluded[:50]
+        out["tag_excluded_note"] = ("%d 单因带「%s」标签被排除"
+                                    % (len(tag_excluded),
+                                       "/".join(sorted(wave_exclude_tags() or []))))
     if zone_dropped:
         out["zone_dropped"] = zone_dropped[:50]
         out["zone_dropped_note"] = ("%d 单因「赠品/其它编码在允许分区没货」被剔除"
@@ -1060,9 +1181,19 @@ def plan(items, carrier="", on_step=None):
                    z["zone_shelf"]) for z in zone_note[:6])
         # 全部编码在允许分区都没货 → 明确报错，别让用户以为"没单"
         if all(zone_cap.get(t, 0) <= 0 for t in targets) and any(maxs.values()):
-            return {"error": "这些编码在 %s 区的在架都是 0，按分区锁定后没有可成波的货"
-                             "（可去「现货可发」页调整分区，或先上架补货）"
-                             % ("/".join(out.get("zone_names") or [])),
+            _zn2 = "/".join(out.get("zone_names") or [])
+            if zone_blocked:
+                # 被严格模式排除的（区外还有库存），说清楚原因和数量
+                _e1 = zone_blocked[0]
+                return {"error": "严格模式：%s 在 %s 区有 %s 件，但区外还有 %s 件，"
+                                 "为保纯净被排除（可在「现货可发」→「分区」里取消严格模式）"
+                                 % (_e1["code"], _zn2, _e1["inside"], _e1["outside"]),
+                        "zone_locked": True, "zone_blocked": zone_blocked[:20],
+                        "codes": codes, "zone_names": out.get("zone_names") or []}
+            _e2 = [c for c in codes if (c.get("zone_shelf") or 0) <= 0]
+            return {"error": "%s 在 %s 区确实没有可用库存（可能库存都在 F/G/XT 区）"
+                             "，所以无法成波"
+                             % ("、".join(str(c["code"]) for c in _e2[:3]) or "这些编码", _zn2),
                     "zone_locked": True, "codes": codes,
                     "zone_names": out.get("zone_names") or []}
     return out

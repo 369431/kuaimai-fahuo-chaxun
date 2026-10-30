@@ -365,21 +365,24 @@ def set_stock_zones(zones):
 
 
 def stock_zone_strict():
-    """★ 严格模式（默认开）：只允许「库存全在允许分区」的编码成波。
+    """严格模式（**默认关**）：是否把「区外还有库存」的编码整个排除在成波之外。
 
-    用户要求：「生成波次之后包含的只有 A/B/C/D 货位，没有其他货位」。
-    如果某编码在区外（G/F/XT）还有可用库存，ERP 有可能把这一单绑到区外货位
-    → 波次里就混进了非 A~D 货位。
-    开启严格模式后，这类编码直接不参与成波，从而**保证波次里只有允许分区的货位**。
+    ★ 默认关的原因（实测踩过）：
+      像 `9718-加绒黑色M` 在 B-3-2-3 有 30 件，但在 XT（销退/暂存区）散落着
+      十几条「1 件」的残货。如果因为这几件就整编码不能成波，用户会完全没法用。
+      所以默认改为「按所选分区的可用数封顶」（该用多少要多少），
+      成波后再用 `zone_report` **如实显示实际占用了哪些区的货位**。
+
+    需要极致纯净（宁可少成波也不要区外货位）时，可在分区弹窗里勾上严格模式。
     """
     try:
         s = load_settings() or {}
         v = s.get("stock_zone_strict", None)
         if v is None:
-            return True                  # 默认严格
+            return False                 # 默认不严格
         return bool(v)
     except Exception:
-        return True
+        return False
 
 
 def set_stock_zone_strict(on):
