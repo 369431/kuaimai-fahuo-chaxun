@@ -1878,7 +1878,7 @@ function render(){
             const _act = ((w.codes && w.codes[0] && w.codes[0].actual) || qty);
             refreshStockRowAfterWave(code, _act);
           }catch(e){}
-          flash('✅ ' + code + ' 波次 ' + (w.wave_code || '?') + '（' + carrier + ' ' + ((w.codes && w.codes[0] && w.codes[0].actual) || qty) + ' 件）' + (w.capped_note ? '　' + w.capped_note : ''));
+          flash('✅ ' + code + ' 波次 ' + (w.wave_code || '?') + '（' + carrier + ' ' + ((w.codes && w.codes[0] && w.codes[0].actual) || qty) + ' 件）' + (w.bind_bin ? ('　拣选货位 ' + w.bind_bin) : '') + (w.capped_note ? '　' + w.capped_note : ''));
         } else {
           flash('✗ ' + code + '：' + ((w && (w.error || w.verify_error)) || '未生成（详情见「生成波次」页）'));
         }
@@ -3450,6 +3450,12 @@ function handleCreateResult(p, items){
         refreshMaxForCodes(Object.keys(imp), imp);
       }catch(e){}
       h += '<div class="card"><h2>成波成功</h2>';
+      if(p.bind_bin){
+        h += '<div style="margin:4px 0 8px;font-size:17px;font-weight:700">拣选货位：'
+           + '<span class="oktext">' + esc(p.bind_bin) + '</span>'
+           + '<span class="muted" style="font-size:12px;font-weight:400">（本波次绑定的货位）</span>'
+           + '</div>';
+      }
       h += '<div class="big oktext">波次号：' + esc(p.wave_code || v.wave_code || p.wave_id || '-') + '</div>'
          + '<div style="margin-top:6px"><span class="tag">状态 ' + esc(v.status_cn || v.status || '未拣') + '</span>'
          + '<span class="tag ok">已建出 ' + esc(v.item_count == null ? (p.sids || []).length : v.item_count) + ' 件</span>'
