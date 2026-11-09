@@ -117,6 +117,10 @@ def status_cn_full(s, pick_start_time=None, pick_end_time=None):
         return "未拣选"
     return str(s)
 CARRIERS = ("中通", "申通")            # 波次按快递拆开：一个波次只含一种快递（名称子串匹配）
+# ★ 固定「绑定货位」查询条件：对应 ERP「选择订单生成波次」弹窗里的「绑定货位」。
+#   用户口径：这个条件固定填 a-0，每次生成波次都只查绑定到该货位的订单。
+#   要改货位只改这里（大小写按 ERP 实际值；实测 ERP 该字段支持前缀/模糊匹配）。
+WAVE_BIND_BIN = "a-0"
 QUERY_PATH = "/trade/wave/checked/trade/query"
 SAVE_PATH = "/trade/wave/checked/trade/save"
 MANAGER_PATH = "/trade/wave/manager/list"   # ERP 网页「波次管理」列表（登录态，含未拣选波次）
@@ -327,7 +331,11 @@ def _split_raw(res, code):
 
 
 def _query_form(code):
-    """波次候选单查询的表单体（对齐 ERP 生成波次页的 queryWaveTradeByCondition）。"""
+    """波次候选单查询的表单体（对齐 ERP 生成波次页的 queryWaveTradeByCondition）。
+
+    ★ `bindGoodsSectionCode` = 固定绑定货位（默认 a-0）：
+      和 ERP 弹窗里「绑定货位」填 a-0 完全等价，避免把别的货位的订单也挑进来。
+    """
     return urllib.parse.urlencode({
         "warehouseId": WAREHOUSE_ID,
         "conditionId": "",
@@ -336,7 +344,7 @@ def _query_form(code):
         "itemNumDown": "",
         "sysSkuRemark": "",
         "sysItemRemark": "",
-        "bindGoodsSectionCode": "",
+        "bindGoodsSectionCode": WAVE_BIND_BIN,
         "titles": "",
         "skuPropertiesNames": "",
         "outerIdStr": code,
@@ -655,6 +663,7 @@ def lookup(code):
     # ★ max 直接给**最终**可生成数量：已经扣掉「即入即出」标签 + 按分区封顶
     #   （用户口径：显示 100 就代表这 100 已经排除过这些条件了）
     return {"ok": True, "code": code, "max": cap,
+            "bind_bin": WAVE_BIND_BIN,
             "max_raw": total,                    # 未按分区封顶前（只扣了标签）
             "tag_excluded": _tag_ex,             # 因「即入即出」等标签被排除的件数
             "max_zone": cap,                     # 兼容旧字段，同 max
@@ -1152,6 +1161,7 @@ def plan(items, carrier="", on_step=None):
                       "contribute": {k: v for k, v in cand[sid].items() if k in eff}})
     out = {"ok": True, "carrier": carrier, "codes": codes, "sids": selected, "picks": picks,
            "candidates": len(cand), "warehouseId": WAREHOUSE_ID,
+           "bind_bin": WAVE_BIND_BIN,
            "zone_locked": _zone_on}
     if tag_excluded:
         out["tag_excluded"] = tag_excluded[:50]

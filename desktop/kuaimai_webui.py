@@ -2699,6 +2699,7 @@ button:active{box-shadow:var(--neu-in-sm)}
   </div>
   <div class="muted" id="hint" style="margin-top:8px"></div>
   <div class="muted" id="shelfStat" style="margin-top:6px">货位库存：载入中…</div>
+  <div class="muted" id="bindBin" style="margin-top:4px">绑定货位：a-0（固定，只查绑定到该货位的订单）</div>
 </div>
 <div id="camBox" class="hidden" style="position:fixed;left:0;top:0;right:0;bottom:0;background:rgba(0,0,0,.72);z-index:999;display:flex;align-items:center;justify-content:center">
   <div style="background:#000;border-radius:14px;padding:10px;width:min(92vw,430px)">
@@ -3000,6 +3001,9 @@ function addCode(code){
     .then(function(d){
       if(d.error){ $('hint').innerHTML = '<span class="badtext">' + esc(d.error) + '</span>'; return; }
       refreshShelfStatus();
+      if(d.bind_bin && $('bindBin')){
+        $('bindBin').textContent = '绑定货位：' + d.bind_bin + '（固定，只查绑定到该货位的订单）';
+      }
       const per = d.carriers || {};
       const all = Object.keys(per).map(function(k){ return k + ' ' + per[k] + ' 件'; }).join('　/　');
       const mq = parseInt(d.multi_qty, 10) || 0;
