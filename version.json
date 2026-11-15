@@ -1,10 +1,10 @@
 {
-  "version": "v2.52",
-  "notes": "**v2.52：扫码成波只扣 A-0-0-0 区域 + 成波后显示实际拣货区域**\n\n**一、扫码添加商品 → 生成波次，库存只从 A-0-0-0 扣**\n· 「可生成数量」改成按 **A-0-0-0 区域可用数** 封顶（已扣「已配数」）\n· 因为被选中的订单里，这些货只有 A-0 有 → ERP 分配时只能从 A-0 扣\n· 实测：`9733-燕麦色M`（A-0 有 227 件）成波 → 波次 231008，ERP 货区 = **A**（只有 A 区）✓\n\n**二、成波后网页显示「实际拣货区域」**\n· 直接读 ERP 波次列表的 `sectionAreas` 字段（真实分配结果，不是我们估的）\n· 只扣 A-0 时显示：**a-0（A-0-0-0 区域，ERP 实际只从该区域扣库存）**\n· 混了别的区时红字警告：**⚠ 含 XT/F/G 区，不是纯 A-0**\n· 同时显示波次号、件数、ERP 原始区域值\n\n**三、实测对照（你店里的真实波次）**\n```\n波次 231008   区域=A                → 只用了 A 区（新逻辑生成）✓\n波次 228981   区域=XT,A,C,B         → 混了 4 个区\n波次 230474   区域=XT               → 从暂存区扣\n波次 228980   区域=XT,G,F,H,A,C,B   → 混了 7 个区\n```\n\n**四、这版排除了哪些（符合预期）**\n· 货不在 A-0-0-0 的编码 → 可生成 = 0\n  （如 `9711-常规燕麦色M`：2530 件全在 F/G/H 区，A-0 一件没有）\n· 只有「一单多件」订单的编码 → 可生成 = 0\n  （如 `7158-加绒白色M`：7 单全是「白色M + 深灰色L」这类两件组合单，按你的规则只挑一单一件，所以 0；它的 A-0 库存其实有 144 件）\n\n**五、当前 A-0 有货且能成波的编码（实测）**\n```\n9733-燕麦色M    A-0 227 件   228 单\n9733-燕麦色XL   A-0  50 件   176 单\n9733-燕麦色L    A-0  93 件   104 单\n9727-燕麦色M    A-0   3 件    23 单\n9722-黑色L      A-0  11 件    18 单\n```\n",
+  "version": "v2.53",
+  "notes": "**v2.53：修「ERP 明明已登录，网页却提示请在打单浏览器里登录 ERP」**\n\n**一、问题现象**\n· 浏览器里 ERP 已经登录（停在首页），网页却红字报错：\n  `波次查询失败：请在打单浏览器里登录 ERP（只需一次，以后会记住）`\n· 所有走 ERP 的功能都失败（波次查询、成波、货位库存…）\n\n**二、根因**\n· 程序找 ERP 页面时，默认优先匹配 `erpb.superboss.cc`\n· 只要浏览器里留着一个 **`erpb` 的 login.html 标签**，就选中了这个登录页\n  → 判定「未登录」，哪怕另一个 `erpa` 标签早就登录好了\n\n**三、修法**\n· 选页面时**跳过任何登录页**（URL 里带 login 的一律不用）\n· 优先选已登录的应用页（带 `/index.html#` 且不含 login）\n· 只有全部标签都是登录页时，才真正提示「需要登录」\n\n**四、实测**\n```\n修前：erp_page_ws 选中 = https://erpb.superboss.cc/login.html\n      ensure_browser → need_login（误报）\n修后：erp_page_ws 选中 = https://erpa.superboss.cc/index.html#/index/\n      ensure_browser → ok | 已登录 ✓\n```\n\n**五、同时说明（A-0 库存是实时变化的）**\n· 「即入即出」的货会先进 A-0-0-0，被订单分走后归零\n· 所以同一编码的可生成数量会随时间变化，这是正常的：\n  例如 `9733-燕麦色M` 早前 A-0 有 227 件 → 可生成 227；\n  现在 A-0 已被分完（0 件）→ 可生成 0\n· 只要 A-0 有货，扫码成波就能成，且波次只扣 A 区（实测波次 231008）\n",
   "page_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/latest",
-  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v2.52/kuaimai-scan-setup-v2.52.exe",
-  "sha256": "2caac9b5b1fc916850c5ad83dab29638aac9bc69581279936e449ef2a0f333f9",
-  "size": 46501002,
+  "setup_url": "https://github.com/369431/kuaimai-fahuo-chaxun/releases/download/v2.53/kuaimai-scan-setup-v2.53.exe",
+  "sha256": "3b5b71f4703e7cc1fc8a90cf8920c825629145ad073eeda25526d6f558a5d7fe",
+  "size": 46500965,
   "mandatory": false,
-  "published_at": "2026-11-16 03:47"
+  "published_at": "2026-11-16 03:55"
 }
