@@ -102,7 +102,13 @@ def erp_targets():
 
 
 def erp_page_ws(url_part="erpb.superboss.cc"):
-    """取打单页的 CDP 目标；找不到页面时抛 SystemExit（与旧 page_ws 行为一致）。"""
+    """取打单页的 CDP 目标；找不到页面时抛 SystemExit（与旧 page_ws 行为一致）。
+
+    ★★ 2026-11 修：以前第 ① 步只按 `url_part` 匹配，而默认值是 "erpb.superboss.cc"，
+    只要浏览器里留着一个 **erpb 的 login.html 标签**，就会选中登录页 →
+    所有 ERP 调用都报「请在打单浏览器里登录 ERP」，明明另一个 erpa 标签已经登录了。
+    现在：**跳过任何登录页**，并优先选已登录的应用页（带 /index.html# 且不含 login）。
+    """
     ts = erp_targets()
 
     def _is_erp(t):
@@ -114,20 +120,23 @@ def erp_page_ws(url_part="erpb.superboss.cc"):
             return False
         return "superboss.cc" in u
 
-    # ① 调用方指定片段（兼容旧调用）
+    def _is_login(t):
+        return "login" in (t.get("url") or "").lower()
+
+    # ① 调用方指定租户，但**跳过登录页**
     for t in ts:
-        if t.get("type") == "page" and url_part in (t.get("url") or ""):
+        u = t.get("url") or ""
+        if t.get("type") == "page" and url_part in u and not _is_login(t):
             return t
-    # ② 任何 ERP 租户页（viperp.superboss.cc / erpb.superboss.cc …），优先带 /index.html# 的应用页
-    #    修 v1.50 的坑：旧逻辑匹配不上就“取第一个 page”，可能拿到无关插件页（Tampermonkey）
-    #    → 所有 ERP 调用卡满 30s 超时（用户报「查询失败：Connection timed out」/「货位库存状态读取失败」）。
-    _cand = [t for t in ts if _is_erp(t)]
+    # ② 任何已登录的 ERP 应用页（优先带 /index.html# 的）
+    _cand = [t for t in ts if _is_erp(t) and not _is_login(t)]
     for t in _cand:
         if "/index.html#" in (t.get("url") or ""):
             return t
     if _cand:
         return _cand[0]
-    raise SystemExit("没找到页面（自动化 Edge 没开？CDP 9222 不通？）")
+    # ③ 只剩登录页 → 明确告诉调用方"需要登录"
+    raise SystemExit("没找到已登录的 ERP 页面（浏览器停在登录页？请点「登录 ERP」）")
 
 
 class CDP(object):
