@@ -364,6 +364,34 @@ def set_stock_zones(zones):
     return stock_zones()
 
 
+# ★★ 成波扣减用的「库存区域」（自定义货位）
+#    用户口径：「生成波次的货位现在是 A-0，我想改成自定义的」。
+#    设置项 `wave_stock_region`：货位/区域编码，前缀匹配货位码。
+#      "A-0-0-0" → 只算 A-0-0-0 这个货位（a-0）
+#      "D"       → 所有 D-... 货位
+#      ""        → 不限制（全部货位都算）
+WAVE_REGION_DEFAULT = "A-0-0-0"
+
+
+def wave_stock_region():
+    """当前成波扣减用的库存区域（货位编码，前缀匹配）。"""
+    try:
+        s = load_settings() or {}
+        if "wave_stock_region" in s:
+            return str(s.get("wave_stock_region") or "").strip().upper()
+    except Exception:
+        pass
+    return WAVE_REGION_DEFAULT
+
+
+def set_wave_stock_region(v):
+    """改成自定义货位/区域（空字符串 = 不限制）。"""
+    s = load_settings() or {}
+    s["wave_stock_region"] = str(v or "").strip().upper()
+    save_settings(s)
+    return wave_stock_region()
+
+
 def stock_zone_strict():
     """严格模式（**默认关**）：是否把「区外还有库存」的编码整个排除在成波之外。
 
@@ -3933,6 +3961,12 @@ class _WebHandler(BaseHTTPRequestHandler):
                                        "ship_cache": _ship_count_cache_get()})
                 except Exception as e:
                     return self._json({"error": "读取波次记录失败：%s" % str(e)[:200]}, 500)
+            if parsed.path == "/api/wave/stock_region":
+                # ★ 读「成波扣减货位」（可自定义）：GET 版（POST 在建波分支里）
+                if not self._can(me, "wave.view"):
+                    return self._deny("wave.view")
+                return self._json({"ok": True, "region": wave_stock_region(),
+                                   "default": WAVE_REGION_DEFAULT})
             if parsed.path == "/api/wave/lookup":
                 # 扫一个编码：查它在火火火仓库的最大可生成件数（只读，走 CDP 登录态）
                 if not self._can(me, "wave.view"):
@@ -5345,6 +5379,26 @@ class _WebHandler(BaseHTTPRequestHandler):
                 if not self._can(me, "wave.view"):
                     return self._deny("wave.view")
                 return self._json(_wave_last_get((qs.get("req") or [""])[0]))
+
+            if path == "/api/wave/stock_region":
+                # ★ 成波扣减用的货位/区域（可自定义）：读/写设置项 wave_stock_region
+                #   用户口径：「生成波次的货位现在是 A-0，我想改成自定义的」
+                deny = self._need(me, "wave.view")
+                if deny:
+                    return deny
+                if True:      # 本分支就是 do_POST，直接写设置
+                    try:
+                        v = body.get("region")
+                        if v is None:
+                            v = (qs.get("region") or [""])[0]
+                        _nv = set_wave_stock_region(v)
+                        print_jobs_log("[成波货位] 已改为 %s" % (_nv or "不限制"))
+                        return self._json({"ok": True, "region": _nv,
+                                           "default": WAVE_REGION_DEFAULT})
+                    except Exception as e:
+                        return self._json({"error": "保存失败：%s" % str(e)[:120]}, 500)
+                return self._json({"ok": True, "region": wave_stock_region(),
+                                   "default": WAVE_REGION_DEFAULT})
 
             if path == "/api/wave/generate_by_rule":
                 # ★ 按 ERP 波次规则生成波次（等价 ERP「生成波次」页选中规则再点生成）

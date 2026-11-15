@@ -131,6 +131,24 @@ CARRIERS = ("中通", "申通")            # 波次按快递拆开：一个波�
 WAVE_RULE_ID = ""                      # 不传 ruleId（传了会导致成不了波）
 WAVE_RULE_NAME = "地面-A-0"
 WAVE_STOCK_REGION = "A-0-0-0"          # 只算这个区域的可用库存（决定能成多少 / 扣哪儿）
+
+
+def stock_region():
+    """★ 当前成波扣减用的库存区域（**可自定义**，存设置项 `wave_stock_region`）。
+
+    用户口径：「生成波次的货位现在是 A-0，我想改成自定义的」。
+      "A-0-0-0" → 只算 a-0 这个货位
+      "D"       → 所有 D-... 货位
+      ""        → 不限制（全部货位都算，等于老行为）
+    优先读设置；读不到/没设置时用常量 WAVE_STOCK_REGION。
+    """
+    try:
+        import kuaimai_scan as _KS
+        v = _KS.wave_stock_region()
+        return str(v or "").strip().upper()
+    except Exception:
+        return str(WAVE_STOCK_REGION or "").strip().upper()
+
 # ★ 「绑定货位」查询参数（bindGoodsSectionCode）实测**不能替代区域规则**：
 #   它只影响查单结果、且会把绝大多数编码滤成 0 单，所以默认不使用（留空）。
 WAVE_BIND_BIN = ""
@@ -431,7 +449,7 @@ def _in_region(bin_name, region=None):
     区域码是货位码的前缀，例如区域 `A-0-0-0` 对应货位 `A-0-0-0`；
     区域 `D` 对应所有 `D-...`。大小写不敏感。
     """
-    reg = str(region if region is not None else WAVE_STOCK_REGION or "").strip().upper()
+    reg = str(region if region is not None else (stock_region() or "")).strip().upper()
     if not reg:
         return True
     b = str(bin_name or "").strip().upper()
@@ -452,7 +470,7 @@ def _shelf_split(code):
         rows = section_rows(code)
     except Exception:
         rows = None
-    _reg = str(WAVE_STOCK_REGION or "").strip()
+    _reg = stock_region()
     if not rows:
         # 退回本机快照
         info = _shelf_info(code)
@@ -497,7 +515,7 @@ def _shelf_in_zones(code):
       · ERP「货位库存」接口（每货位带 allocateNum 已配数、sku.avaliableNum 可用数）；
       · 拿不到就退回本机货位快照的在架数（不含已配数，会偏高）。
     """
-    _reg = str(WAVE_STOCK_REGION or "").strip()
+    _reg = stock_region()
     if _reg:
         _ins, _out, _bins, _empty = _shelf_split(code)
         if _empty:
@@ -1346,7 +1364,7 @@ def wave_areas(wave_code, pages=3, size=60):
            "rule_id": found.get("ruleId"),
            "item_count": found.get("itemCount"),
            "status": found.get("status")}
-    _reg = str(WAVE_STOCK_REGION or "").strip().upper()
+    _reg = (stock_region() or "").strip().upper()
     if _reg:
         _zone = _reg.split("-")[0]
         out["region_zone"] = _zone

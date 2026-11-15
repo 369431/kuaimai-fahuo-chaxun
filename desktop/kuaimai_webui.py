@@ -1170,6 +1170,7 @@ function sizeRank(code){
 let ROWS = [];
 function load(){
   try{ bindGenRule(); }catch(e){}
+  try{ bindRegion(); }catch(e){}
   HIDDEN = {};   /* 拉取全量数据 → 恢复显示（只保留本次生成后的临时隐藏） */
   const kw = $('kw').value.trim();
   if(!kw){ $('sum').textContent = '先输入款号（如 7107）'; return; }
@@ -1547,6 +1548,39 @@ function flash(msg){
   if(msg){ setTimeout(function(){ if(el.textContent === msg) el.textContent = ''; }, 5000); }
 }
 
+
+/* ★ 成波扣减货位（可自定义）：/api/wave/stock_region */
+function bindRegion(){
+  var inp = document.getElementById('regionIn');
+  var btn = document.getElementById('regionSave');
+  var msg = document.getElementById('regionMsg');
+  if(!inp || !btn || btn._bound) return;
+  btn._bound = 1;
+  fetch('/api/wave/stock_region', {credentials:'same-origin'})
+    .then(function(r){ return r.json(); })
+    .then(function(d){ if(d && d.region !== undefined) inp.value = d.region || ''; })
+    .catch(function(){});
+  btn.onclick = function(){
+    var v = (inp.value || '').trim();
+    btn.disabled = true;
+    if(msg) msg.textContent = '保存中…';
+    fetch('/api/wave/stock_region', {method:'POST', credentials:'same-origin',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({region: v})})
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        btn.disabled = false;
+        if(d.error){ if(msg) msg.innerHTML = '<span class="badtext">✗ ' + d.error + '</span>'; return; }
+        if(inp) inp.value = d.region || '';
+        if(msg) msg.innerHTML = '<span class="oktext">✓ 已保存为 '
+          + (d.region ? esc(d.region) : '不限制') + '，重扫编码生效</span>';
+        try{ if(typeof lastCode !== 'undefined' && lastCode){ doLookup(lastCode); } }catch(e){}
+      })
+      .catch(function(e){
+        btn.disabled = false;
+        if(msg) msg.innerHTML = '<span class="badtext">✗ ' + e.message + '</span>';
+      });
+  };
+}
 function bindGenRule(){ /* 按钮已移除：扫码流程自带 A-0 扣减 */ }
 function params(){ return 'kw=' + encodeURIComponent($('kw').value.trim()) + '&only=' + $('only').value + '&sort=' + $('sort').value; }
 
@@ -2702,7 +2736,8 @@ button:active{box-shadow:var(--neu-in-sm)}
   </div>
   <div class="muted" id="hint" style="margin-top:8px"></div>
   <div class="muted" id="shelfStat" style="margin-top:6px">货位库存：载入中…</div>
-  <div class="muted" id="bindBin" style="margin-top:4px">成波口径：数量按 <b>A-0-0-0</b> 区域可用库存封顶，ERP 只会从这个区域扣库存</div>
+  <div class="muted" id="bindBin" style="margin-top:4px">成波扣减货位：<input id="regionIn" type="text" spellcheck="false" style="width:120px;padding:4px 6px;font-size:13px" placeholder="如 A-0-0-0"> <button id="regionSave" class="ghost" style="font-size:12px;padding:4px 10px">保存</button> <span id="regionMsg" class="muted" style="font-size:12px"></span></div>
+  <div class="muted" style="margin-top:4px;font-size:12px">填货位编码或区：<b>A-0-0-0</b> = 只算 a-0；<b>D</b> = 所有 D 区；留空 = 不限制。改完重扫编码生效。</div>
 </div>
 <div id="camBox" class="hidden" style="position:fixed;left:0;top:0;right:0;bottom:0;background:rgba(0,0,0,.72);z-index:999;display:flex;align-items:center;justify-content:center">
   <div style="background:#000;border-radius:14px;padding:10px;width:min(92vw,430px)">
