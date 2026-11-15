@@ -1169,8 +1169,6 @@ function sizeRank(code){
 }
 let ROWS = [];
 function load(){
-  try{ bindGenRule(); }catch(e){}
-  try{ bindRegion(); }catch(e){}
   HIDDEN = {};   /* 拉取全量数据 → 恢复显示（只保留本次生成后的临时隐藏） */
   const kw = $('kw').value.trim();
   if(!kw){ $('sum').textContent = '先输入款号（如 7107）'; return; }
@@ -1549,49 +1547,7 @@ function flash(msg){
 }
 
 
-/* ★ 成波扣减货位（可自定义）：/api/wave/stock_region */
-function bindRegion(){
-  var inp = document.getElementById('regionIn');
-  var btn = document.getElementById('regionSave');
-  var msg = document.getElementById('regionMsg');
-  if(!inp || !btn || btn._bound) return;
-  btn._bound = 1;
-  fetch('/api/wave/stock_region', {credentials:'same-origin'})
-    .then(function(r){ return r.json(); })
-    .then(function(d){ if(d && d.region !== undefined) inp.value = d.region || ''; })
-    .catch(function(){});
-  btn.onclick = function(){
-    var v = (inp.value || '').trim();
-    btn.disabled = true;
-    if(msg) msg.textContent = '保存中…';
-    fetch('/api/wave/stock_region', {method:'POST', credentials:'same-origin',
-      headers:{'Content-Type':'application/json'}, body: JSON.stringify({region: v})})
-      .then(function(r){ return r.json(); })
-      .then(function(d){
-        btn.disabled = false;
-        if(d.error){ if(msg) msg.innerHTML = '<span class="badtext">✗ ' + d.error + '</span>'; return; }
-        if(inp) inp.value = d.region || '';
-        if(msg) msg.innerHTML = '<span class="oktext">✓ 已保存为 '
-          + (d.region ? esc(d.region) : '不限制') + '，重扫编码生效</span>';
-        try{ if(typeof lastCode !== 'undefined' && lastCode){ doLookup(lastCode); } }catch(e){}
-      })
-      .catch(function(e){
-        btn.disabled = false;
-        if(msg) msg.innerHTML = '<span class="badtext">✗ ' + e.message + '</span>';
-      });
-  };
-}
-function bindGenRule(){ /* 按钮已移除：扫码流程自带 A-0 扣减 */ }
-function params(){ return 'kw=' + encodeURIComponent($('kw').value.trim()) + '&only=' + $('only').value + '&sort=' + $('sort').value; }
 
-/* ★ 货位分区（默认 A/B/C/D）：点「分区 … ▾」弹出勾选。
-   只勾选的区才计入「在架数 / 可成波 / 可发件数」—— 其它区（F/G/XT）不算。 */
-function bindZones(){
-  var el = $('zones');
-  if(!el || el._bound) return;
-  el._bound = 1;
-  el.onclick = function(){ openZones(); };
-}
 function openZones(){
   fetch(withSid('/api/desktop/stock_zones'), {cache:'no-store'})
     .then(function(r){ return r.json(); })
@@ -3090,6 +3046,19 @@ function addCode(code){
           if(b){ b.onclick = function(){ setCarrier(o); setTimeout(function(){ addCode(d.code || code); }, 80); }; }
           return;
         }
+        /* ★ 区分两种「0」：货位没库存 vs 真没订单 */
+        const _zEmpty = (d.zone_locked && d.zone_shelf != null && (parseInt(d.zone_shelf,10)||0) === 0);
+        const _anyCand = Object.keys(per).some(function(k){ return (parseInt(per[k],10)||0) > 0; });
+        if(_zEmpty && _anyCand){
+          $('hint').innerHTML = '<span class="badtext">' + esc(d.code || code)
+            + '：成波货位没有可用库存</span>'
+            + '<div class="muted">当前成波扣减货位 <b>' + esc(d.region || '') + '</b> 里'
+            + '该编码可用 0 件，所以成不了波。'
+            + '该编码有 ' + (Object.keys(per).map(function(k){ return k + ' ' + per[k]; }).join(' / '))
+            + ' 个候选订单 —— 换一个货位（下方输入框）或等这批货进该货位后再扫。</div>'
+            + liveBar + extra;
+          return;
+        }
         $('hint').innerHTML = '<span class="badtext">' + esc(d.code || code) + '：没有可成波订单</span>'
           + liveBar
           + '<div class="muted">该编码在火火火仓库没有「待发货 + 未成波 + 一单一件」的订单'
@@ -3711,6 +3680,43 @@ $('fwPrev').onclick = function(){
 
 loadMode();                              /* 恢复上次选的模式（双快递 / 单快递旧模式） */
 restoreBags();                           /* 双快递模式下：刷新/重开时恢复上次两份清单，并问「保留/不保留」 */
+/* ★ 成波扣减货位（可自定义）：读写 /api/wave/stock_region */
+function bindRegion(){
+  var inp = document.getElementById('regionIn');
+  var btn = document.getElementById('regionSave');
+  var msg = document.getElementById('regionMsg');
+  if(!inp || !btn) return;
+  if(!btn._bound){
+    btn._bound = 1;
+    btn.onclick = function(){
+      var v = (inp.value || '').trim();
+      btn.disabled = true;
+      if(msg) msg.textContent = '保存中…';
+      fetch('/api/wave/stock_region', {method:'POST', credentials:'same-origin',
+        headers:{'Content-Type':'application/json'}, body: JSON.stringify({region: v})})
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+          btn.disabled = false;
+          if(d.error){ if(msg) msg.innerHTML = '<span class="badtext">✗ ' + d.error + '</span>'; return; }
+          if(inp) inp.value = d.region || '';
+          if(msg) msg.innerHTML = '<span class="oktext">✓ 已保存为 ' + esc(d.region || '不限制') + '</span>';
+          /* 保存后立刻按当前快递重算清单里所有编码 */
+          try{ refreshAllMaxQuiet(); }catch(e){}
+          var cur = $('code'); if(cur && cur.value){ try{ addCode(cur.value); }catch(e){} }
+        })
+        .catch(function(e){
+          btn.disabled = false;
+          if(msg) msg.innerHTML = '<span class="badtext">✗ ' + e.message + '</span>';
+        });
+    };
+  }
+  /* 进页面先读当前值 */
+  fetch('/api/wave/stock_region', {credentials:'same-origin'})
+    .then(function(r){ return r.json(); })
+    .then(function(d){ if(d && d.region !== undefined && !inp.value) inp.value = d.region || ''; })
+    .catch(function(){});
+}
+try{ bindRegion(); }catch(e){}
 render();
 syncCarrierButtons();
 $('code').focus();

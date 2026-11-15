@@ -713,6 +713,7 @@ def lookup(code):
     # ★ max 直接给**最终**可生成数量：已经扣掉「即入即出」标签 + 按分区封顶
     #   （用户口径：显示 100 就代表这 100 已经排除过这些条件了）
     return {"ok": True, "code": code, "max": cap,
+            "region": stock_region(),          # 当前成波扣减货位（可自定义）
             "bind_bin": WAVE_BIND_BIN,
             "max_raw": total,                    # 未按分区封顶前（只扣了标签）
             "tag_excluded": _tag_ex,             # 因「即入即出」等标签被排除的件数
