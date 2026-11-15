@@ -1547,42 +1547,7 @@ function flash(msg){
   if(msg){ setTimeout(function(){ if(el.textContent === msg) el.textContent = ''; }, 5000); }
 }
 
-/* ★ 按 ERP 波次规则生成波次（等价 ERP「生成波次」页选中「地面-A-0」再点生成）
-   规则里 specifyStockRegionCondition = {regions:[{code:"A-0-0-0"}], INCLUDE_ONLY}
-   ⇒ ERP 只从 A-0-0-0 区域扣库存。 */
-function bindGenRule(){
-  var b = document.getElementById('genRule');
-  if(!b || b._bound) return;
-  b._bound = 1;
-  b.onclick = function(){
-    if(!confirm('按「地面-A-0」规则生成波次？\n（ERP 会把所有符合该规则的订单成波，库存只从 A-0-0-0 扣）')) return;
-    var m = document.getElementById('ruleMsg');
-    b.disabled = true;
-    if(m) m.textContent = '正在让 ERP 按规则生成…（可能要十几秒）';
-    fetch('/api/wave/generate_by_rule', {method:'POST', credentials:'same-origin',
-      headers:{'Content-Type':'application/json'}, body: JSON.stringify({})})
-      .then(function(r){ return r.json(); })
-      .then(function(d){
-        b.disabled = false;
-        if(d.error){ if(m) m.innerHTML = '<span class="badtext">✗ ' + (d.error||'') + '</span>'; return; }
-        var txt = '';
-        if(d.count){
-          txt = '✓ 新增 ' + d.count + ' 个波次：'
-              + (d.waves||[]).map(function(w){
-                  return w.code + '（' + (w.item_count||0) + ' 件，货区 ' + (w.section_areas||'-') + '）';
-                }).join('、');
-        } else {
-          txt = 'ℹ ERP 已受理，但没有新建波次：' + (d.note || '当前没有符合该规则的订�单');
-        }
-        if(m) m.innerHTML = '<span class="' + (d.count ? 'oktext' : 'muted') + '">'
-                          + esc(txt) + '</span>';
-      })
-      .catch(function(e){
-        b.disabled = false;
-        if(m) m.innerHTML = '<span class="badtext">✗ ' + e.message + '</span>';
-      });
-  };
-}
+function bindGenRule(){ /* 按钮已移除：扫码流程自带 A-0 扣减 */ }
 function params(){ return 'kw=' + encodeURIComponent($('kw').value.trim()) + '&only=' + $('only').value + '&sort=' + $('sort').value; }
 
 /* ★ 货位分区（默认 A/B/C/D）：点「分区 … ▾」弹出勾选。
@@ -2737,11 +2702,7 @@ button:active{box-shadow:var(--neu-in-sm)}
   </div>
   <div class="muted" id="hint" style="margin-top:8px"></div>
   <div class="muted" id="shelfStat" style="margin-top:6px">货位库存：载入中…</div>
-  <div class="muted" id="bindBin" style="margin-top:4px">成波规则：<b>地面-A-0</b>（库存只从 A-0-0-0 区域扣）</div>
-  <div class="bar" style="margin-top:8px">
-    <button id="genRule" class="ghost" style="font-size:13px;padding:9px 12px">按规则生成波次（地面-A-0）</button>
-  </div>
-  <div class="muted" id="ruleMsg" style="margin-top:6px"></div>
+  <div class="muted" id="bindBin" style="margin-top:4px">成波口径：数量按 <b>A-0-0-0</b> 区域可用库存封顶，ERP 只会从这个区域扣库存</div>
 </div>
 <div id="camBox" class="hidden" style="position:fixed;left:0;top:0;right:0;bottom:0;background:rgba(0,0,0,.72);z-index:999;display:flex;align-items:center;justify-content:center">
   <div style="background:#000;border-radius:14px;padding:10px;width:min(92vw,430px)">
