@@ -3033,6 +3033,51 @@ function addCode(code){
             + (all ? '（全部：<span class="cex">' + esc(all) + '</span>）' : '') + liveBar + extra;
           return;
         }
+        /* ★ 货位没库存 → 把「有货的货位」列出来，点一下就能切过去
+           （用户口径：提示 z-0 没有时，要有货的货位给我） */
+        const _zEmpty = (d.zone_locked && d.zone_shelf != null && (parseInt(d.zone_shelf,10)||0) === 0);
+        const _anyCand = Object.keys(per).some(function(k){ return (parseInt(per[k],10)||0) > 0; });
+        if(_zEmpty && _anyCand){
+          var _opt = (d.all_bins || []).map(function(b){
+            return '<button class="ghost zpick" data-bin="' + esc(b.bin)
+              + '" style="margin:4px 6px 0 0;padding:5px 10px;font-size:13px">'
+              + esc(b.bin) + '（' + b.avail + '）</button>';
+          }).join('');
+          var _zon = (d.by_zone || []).map(function(z){
+            return '<button class="ghost zpick" data-bin="' + esc(z.zone)
+              + '" style="margin:4px 6px 0 0;padding:5px 10px;font-size:13px">'
+              + esc(z.zone) + ' 区（' + z.avail + '）</button>';
+          }).join('');
+          $('hint').innerHTML = '<span class="badtext">' + esc(d.code || code)
+            + '：成波货位 ' + esc(d.region || '') + ' 没有可用库存</span>'
+            + '<div class="muted" style="margin-top:4px">该编码有 '
+            + (Object.keys(per).map(function(k){ return k + ' ' + per[k]; }).join(' / '))
+            + ' 个候选订单，货在下面这些货位（点一下即可切换）：</div>'
+            + (_opt ? '<div style="margin-top:2px">' + _opt + '</div>' : '')
+            + (_zon ? '<div class="muted" style="margin-top:6px;font-size:12px">按区切：</div>'
+                      + '<div>' + _zon + '</div>' : '')
+            + liveBar + extra;
+          Array.prototype.forEach.call(document.querySelectorAll('.zpick'), function(el){
+            el.onclick = function(){
+              var bin = el.getAttribute('data-bin') || '';
+              el.disabled = true;
+              fetch('/api/wave/stock_region', {method:'POST', credentials:'same-origin',
+                headers:{'Content-Type':'application/json'}, body: JSON.stringify({region: bin})})
+                .then(function(r){ return r.json(); })
+                .then(function(x){
+                  el.disabled = false;
+                  var ri = document.getElementById('regionIn');
+                  if(ri) ri.value = (x && x.region) || bin;
+                  var rm = document.getElementById('regionMsg');
+                  if(rm) rm.innerHTML = '<span class="oktext">✓ 已切到 '
+                    + esc((x && x.region) || bin) + '</span>';
+                  try{ addCode(d.code || code); }catch(e){}
+                })
+                .catch(function(){ el.disabled = false; });
+            };
+          });
+          return;
+        }
         const oth = Object.keys(per).filter(function(k){
           return k !== CARRIER && (parseInt(per[k], 10) || 0) > 0;
         });
@@ -3044,19 +3089,6 @@ function addCode(code){
             + esc(o) + ' 并添加</button>' + extra;
           const b = $('swBtn');
           if(b){ b.onclick = function(){ setCarrier(o); setTimeout(function(){ addCode(d.code || code); }, 80); }; }
-          return;
-        }
-        /* ★ 区分两种「0」：货位没库存 vs 真没订单 */
-        const _zEmpty = (d.zone_locked && d.zone_shelf != null && (parseInt(d.zone_shelf,10)||0) === 0);
-        const _anyCand = Object.keys(per).some(function(k){ return (parseInt(per[k],10)||0) > 0; });
-        if(_zEmpty && _anyCand){
-          $('hint').innerHTML = '<span class="badtext">' + esc(d.code || code)
-            + '：成波货位没有可用库存</span>'
-            + '<div class="muted">当前成波扣减货位 <b>' + esc(d.region || '') + '</b> 里'
-            + '该编码可用 0 件，所以成不了波。'
-            + '该编码有 ' + (Object.keys(per).map(function(k){ return k + ' ' + per[k]; }).join(' / '))
-            + ' 个候选订单 —— 换一个货位（下方输入框）或等这批货进该货位后再扫。</div>'
-            + liveBar + extra;
           return;
         }
         $('hint').innerHTML = '<span class="badtext">' + esc(d.code || code) + '：没有可成波订单</span>'

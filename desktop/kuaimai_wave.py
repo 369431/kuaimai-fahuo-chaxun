@@ -712,8 +712,34 @@ def lookup(code):
         cap = min(total, max(0, int(_zc)))
     # ★ max 直接给**最终**可生成数量：已经扣掉「即入即出」标签 + 按分区封顶
     #   （用户口径：显示 100 就代表这 100 已经排除过这些条件了）
+    # ★ 该编码**所有有货的货位**（按可用数降序）：
+    #   用户口径：「提示 z-0 没有时，把有货的货位给我」→ 网页上做成可点的建议。
+    _all_bins = []
+    try:
+        _rows_all = section_rows(code) or []
+        for _r in _rows_all:
+            try:
+                _q = int(_r.get("avail") or 0)
+            except Exception:
+                _q = 0
+            if _q > 0:
+                _all_bins.append({"bin": str(_r.get("bin") or ""), "avail": _q})
+        _all_bins.sort(key=lambda x: -x["avail"])
+    except Exception:
+        _all_bins = []
+    # 按「区」聚合（取每区第一段），给一个更粗的建议
+    _by_zone = {}
+    for _b in _all_bins:
+        _z = str(_b["bin"]).split("-")[0].upper()
+        if _z:
+            _by_zone[_z] = _by_zone.get(_z, 0) + _b["avail"]
+    _zone_list = sorted(({"zone": k, "avail": v} for k, v in _by_zone.items()),
+                        key=lambda x: -x["avail"])
+
     return {"ok": True, "code": code, "max": cap,
             "region": stock_region(),          # 当前成波扣减货位（可自定义）
+            "all_bins": _all_bins[:12],        # 所有有货的货位（可用>0，降序）
+            "by_zone": _zone_list[:8],         # 按区聚合
             "bind_bin": WAVE_BIND_BIN,
             "max_raw": total,                    # 未按分区封顶前（只扣了标签）
             "tag_excluded": _tag_ex,             # 因「即入即出」等标签被排除的件数
