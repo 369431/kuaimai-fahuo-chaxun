@@ -5346,6 +5346,29 @@ class _WebHandler(BaseHTTPRequestHandler):
                     return self._deny("wave.view")
                 return self._json(_wave_last_get((qs.get("req") or [""])[0]))
 
+            if path == "/api/wave/generate_by_rule":
+                # ★ 按 ERP 波次规则生成波次（等价 ERP「生成波次」页选中规则再点生成）
+                #   用户口径：「用『地面-A-0』规则生成，库存只从 A-0-0-0 扣」
+                deny = self._need(me, "wave.view")
+                if deny:
+                    return deny
+                _bok2, _bwhy2 = ensure_erp_browser("按规则生成波次")
+                if not _bok2:
+                    return self._json({"error": _bwhy2}, 503)
+                try:
+                    import kuaimai_wave as _wv2
+                    _out = _wv2.generate_by_rule(rule_id=body.get("rule_id"))
+                    _msg = (("新增波次 %s 个：%s" % (
+                        _out.get("count"),
+                        "、".join(str(w.get("code")) for w in (_out.get("waves") or [])[:8])))
+                        if _out.get("count") else
+                        (_out.get("note") or _out.get("error") or ""))
+                    if _msg:
+                        print_jobs_log("[按规则成波] %s" % _msg)
+                    return self._json(_out)
+                except Exception as e:
+                    return self._json({"error": "按规则成波失败：%s" % str(e)[:180]}, 500)
+
             if path == "/api/wave/create":
                 # ★ 成波走浏览器 CDP：先把浏览器准备好（自动拉起 + 自愈），
                 #   否则用户会看到「<urlopen error [WinError 10061] …积极拒绝…>」这种天书。

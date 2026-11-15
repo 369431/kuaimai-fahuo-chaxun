@@ -117,10 +117,23 @@ def status_cn_full(s, pick_start_time=None, pick_end_time=None):
         return "未拣选"
     return str(s)
 CARRIERS = ("中通", "申通")            # 波次按快递拆开：一个波次只含一种快递（名称子串匹配）
-# ★ 固定「绑定货位」查询条件：对应 ERP「选择订单生成波次」弹窗里的「绑定货位」。
-#   用户口径：这个条件固定填 a-0，每次生成波次都只查绑定到该货位的订单。
-#   要改货位只改这里（大小写按 ERP 实际值；实测 ERP 该字段支持前缀/模糊匹配）。
-WAVE_BIND_BIN = "a-0"
+# ★★ 「只从 A-0-0-0 区域扣库存」的正确做法（2026-11 实测结论，别再改回去）
+#
+# 试过两条路，都不行：
+#   ① 成波接口 `/trade/wave/checked/trade/save` 带 ruleId=15940 →
+#      ERP **忽略 ruleId**：实测最近 20 个波次 ruleId 全是 -27（默认），
+#      波次货区由「货实际在哪个区」决定 → 这条走不通。
+#   ② 按规则生成 `/trade/wave/save` + ruleId=15940 → ERP 返回 success，
+#      但**不建波次**（按规则生成只认规则命中的订单，跟「扫码选品」无关）。
+#
+# ⇒ 可行方案：**把可成波数量限制为 A-0-0-0 区域的可用数**。
+#   这样被挑中的订单，其货品只有 A-0 有货 → ERP 分配时只能从 A-0 扣。
+WAVE_RULE_ID = ""                      # 不传 ruleId（传了会导致成不了波）
+WAVE_RULE_NAME = "地面-A-0"
+WAVE_STOCK_REGION = "A-0-0-0"          # 只算这个区域的可用库存（决定能成多少 / 扣哪儿）
+# ★ 「绑定货位」查询参数（bindGoodsSectionCode）实测**不能替代区域规则**：
+#   它只影响查单结果、且会把绝大多数编码滤成 0 单，所以默认不使用（留空）。
+WAVE_BIND_BIN = ""
 QUERY_PATH = "/trade/wave/checked/trade/query"
 SAVE_PATH = "/trade/wave/checked/trade/save"
 MANAGER_PATH = "/trade/wave/manager/list"   # ERP 网页「波次管理」列表（登录态，含未拣选波次）
@@ -412,50 +425,58 @@ def _shelf_info(code):
     return {"shelf_qty": qty, "bins": bins, "bins_text": text, "shelf_index_empty": False}
 
 
-def _shelf_split(code):
-    """某编码的可用数按「允许分区 / 区外」拆分 → (区内, 区外, 区内货位, 是否有数据)。
+def _in_region(bin_name, region=None):
+    """货位是否属于指定「库存区域」（ERP 规则里的 specifyStockRegionCondition.code）。
 
-    ★ 为什么要拆：用户要求「生成波次之后只包含 A/B/C/D 货位」。
-      如果某编码在区外还有可用库存（G/F/XT），ERP 有可能把这一单绑到区外货位，
-      波次里就会出现非 A~D 货位。所以严格模式下**只挑「区外可用 = 0」的编码** ——
-      这样 ERP 无论怎么分配，都只能从 A~D 拣。
+    区域码是货位码的前缀，例如区域 `A-0-0-0` 对应货位 `A-0-0-0`；
+    区域 `D` 对应所有 `D-...`。大小写不敏感。
+    """
+    reg = str(region if region is not None else WAVE_STOCK_REGION or "").strip().upper()
+    if not reg:
+        return True
+    b = str(bin_name or "").strip().upper()
+    if not b:
+        return False
+    return b == reg or b.startswith(reg + "-")
+
+
+def _shelf_split(code):
+    """某编码的可用数按「波次规则的库存区域 / 区域外」拆分。
+
+    ★ 为什么要拆：用户要求「成波只扣 a-0 区域的货」。
+      ERP 规则「地面-A-0」限定 specifyStockRegionCondition = A-0-0-0，
+      所以「可生成多少」应当只算这个区域的可用数；区外的不算。
     """
     rows = None
     try:
         rows = section_rows(code)
     except Exception:
         rows = None
+    _reg = str(WAVE_STOCK_REGION or "").strip()
     if not rows:
         # 退回本机快照
         info = _shelf_info(code)
         if info["shelf_index_empty"]:
             return None, None, [], True
-        try:
-            import kuaimai_scan as KS
-            zs = KS.stock_zones()
-            kept, tin = KS.bins_in_zones([[b[0], b[1]] for b in info["bins"]], zs)
-            tot = int(info["shelf_qty"] or 0)
-            return int(tin), max(0, tot - int(tin)), [(k[0], k[1]) for k in kept], False
-        except Exception:
-            return info["shelf_qty"], 0, info["bins"], False
-    try:
-        import kuaimai_scan as KS2
-        zs2 = KS2.stock_zones()
-    except Exception:
-        zs2 = set()
+        inside, outside, kept = 0, 0, []
+        for b in info["bins"]:
+            try:
+                name, q = str(b[0]), int(b[1] or 0)
+            except Exception:
+                continue
+            if _in_region(name, _reg):
+                inside += q
+                kept.append((name, q))
+            else:
+                outside += q
+        return int(inside), int(outside), kept, False
     inside, outside, kept = 0, 0, []
     for r in rows:
         b = str(r.get("bin") or "")
         q = int(r.get("avail") or 0)
         if not q:
             continue
-        z = ""
-        try:
-            import kuaimai_scan as KS3
-            z = KS3.stock_zone_of(b)
-        except Exception:
-            z = b.split("-")[0].upper() if b else ""
-        if (not zs2) or (z in zs2):
+        if _in_region(b, _reg):
             inside += q
             kept.append((b, q))
         else:
@@ -464,18 +485,25 @@ def _shelf_split(code):
 
 
 def _shelf_in_zones(code):
-    """★ 某编码在**允许的分区**（默认 A/B/C/D）里的**可用数** → (件数, 货位列表, 索引是否为空)。
+    """★ 某编码「可用来成波的可用数」→ (件数, 货位列表, 索引是否为空)。
 
-    用户口径：「生成波次时，锁定的订单只取 A/B/C/D 分区的货」。
+    ★★ 口径（按优先级）：
+      ① 设了 `WAVE_STOCK_REGION`（默认 A-0-0-0）→ **只算这个库存区域的可用数**，
+         因为成波用的规则「地面-A-0」就限定 regions=[A-0-0-0] INCLUDE_ONLY，
+         ERP 只会从这个区域扣库存。两者必须一致，否则「显示能成、点了成不了」。
+      ② 没设区域 → 退回「A/B/C/D 分区」口径（旧的 stock_zones 逻辑）。
+
     数据来源优先级：
-      ① **ERP「货位库存」接口**（`/wms/goodsSectionInventory/list`）——
-         每货位带 `allocateNum`(已配数) 和 `sku.avaliableNum`(可用数)，
-         可用数已扣掉已被别的订单/波次配走的量，最准；
-      ② 拿不到就退回本机货位快照的「在架数」（不含已配数，会偏高）。
-
-    分区白名单来自设置 `stock_zones`（空 = 不限制，等于全部）。
-    返回的件数是**可用数**之和，不是物理在架数。
+      · ERP「货位库存」接口（每货位带 allocateNum 已配数、sku.avaliableNum 可用数）；
+      · 拿不到就退回本机货位快照的在架数（不含已配数，会偏高）。
     """
+    _reg = str(WAVE_STOCK_REGION or "").strip()
+    if _reg:
+        _ins, _out, _bins, _empty = _shelf_split(code)
+        if _empty:
+            return None, [], True
+        return int(_ins or 0), list(_bins or []), False
+
     # ① 先试 ERP 货位库存（带已配数）
     try:
         rows = section_rows(code)
@@ -658,7 +686,11 @@ def lookup(code):
     except Exception:
         _zone_on = False
     cap = total
-    if _zone_on and not _zempty and _zc is not None:
+    # ★ 启用了「绑定货位」筛选（WAVE_BIND_BIN 非空）时，ERP 已经只返回**绑定到该货区**的订单，
+    #   **不要再用 A~D 分区可用量二次压缩** —— 否则会出现
+    #   「有 1 单绑定 a-0，但 A~D 可用量算出 0 → 被压成 0」的假 0（实测踩过）。
+    _bind_on = bool(str(WAVE_BIND_BIN or "").strip())
+    if (not _bind_on) and _zone_on and not _zempty and _zc is not None:
         cap = min(total, max(0, int(_zc)))
     # ★ max 直接给**最终**可生成数量：已经扣掉「即入即出」标签 + 按分区封顶
     #   （用户口径：显示 100 就代表这 100 已经排除过这些条件了）
@@ -1012,6 +1044,9 @@ def plan(items, carrier="", on_step=None):
         _zone_on = bool(_KS.stock_zones())
     except Exception:
         _zone_on = False
+    # ★ 启用「绑定货位」筛选时，ERP 已按该货区筛过订单 → 不再做 A~D 分区二次压缩
+    if str(WAVE_BIND_BIN or "").strip():
+        _zone_on = False
     if _zone_on:
         _step("正在核对货位分区（只锁定 A/B/C/D 的可用数）…")
         # ★ 并发查：每个编码一次 ERP 货位库存请求，串行会太慢
@@ -1250,7 +1285,150 @@ def wave_zone_check(wave_code, zones=None):
             "bins": sorted(cnt.keys())[:80]}
 
 
-def zone_report(items, zones=None):
+RULE_SAVE_PATH = "/trade/wave/save"   # ★ 按规则生成波次（注意不是 checked/trade/save）
+
+
+def wave_areas(wave_code, pages=3, size=60):
+    """★ 查某波次在 ERP 里的**实际拣货区域**（sectionAreas）→ dict。
+
+    ERP「波次管理」列表里每个波次带 `sectionAreas` 字段，值是实际分配的货区，
+    例如 "A"、"XT,A,C,B"、"C"、"XT,G,F,H,A,C,B"。
+    用户口径：成波后要在网页上显示「实际的拣货区域」，扣 A-0 就显示 a-0。
+
+    ★ 这里**直接调接口读原始字段**（`manager_waves` 做过字段裁剪，拿不到 sectionAreas）。
+
+    返回 {"code","areas":[...],"raw","rule_id","item_count","status",
+          "region_zone","region_hit","only_region"}
+    """
+    code = str(wave_code or "").strip()
+    if not code:
+        return {}
+    found = None
+    c = KP.open_cdp_page()
+    try:
+        for p in range(1, max(1, int(pages)) + 1):
+            body = json.dumps({"pageNo": p, "pageSize": size,
+                               "warehouseId": WAREHOUSE_ID})
+            res = _post(c, MANAGER_PATH, body, "application/json")
+            try:
+                j = json.loads((res or {}).get("text") or "")
+            except Exception:
+                break
+            data = j.get("data")
+            arr = None
+            if isinstance(data, dict):
+                for k in ("list", "rows", "records"):
+                    if isinstance(data.get(k), list):
+                        arr = data[k]
+                        break
+            elif isinstance(data, list):
+                arr = data
+            if not isinstance(arr, list) or not arr:
+                break
+            for w in arr:
+                if not isinstance(w, dict):
+                    continue
+                if str(w.get("code") or w.get("waveCode") or "") == code:
+                    found = w
+                    break
+            if found or len(arr) < int(size):
+                break
+    finally:
+        try:
+            c.close()
+        except Exception:
+            pass
+    if not found:
+        return {"code": code, "areas": [], "raw": ""}
+    raw = str(found.get("sectionAreas") or "")
+    areas = [x.strip() for x in raw.split(",") if x.strip()]
+    out = {"code": code, "areas": areas, "raw": raw,
+           "rule_id": found.get("ruleId"),
+           "item_count": found.get("itemCount"),
+           "status": found.get("status")}
+    _reg = str(WAVE_STOCK_REGION or "").strip().upper()
+    if _reg:
+        _zone = _reg.split("-")[0]
+        out["region_zone"] = _zone
+        out["region_hit"] = bool(areas) and all(a.upper() == _zone for a in areas)
+        out["only_region"] = out["region_hit"]
+    return out
+
+
+def generate_by_rule(rule_id=None, warehouse_id=None, readback=True):
+    """★★ 按 ERP 波次规则生成波次（等价于 ERP「生成波次」页选中某条规则再点生成）。
+
+    这是从 ERP 前端 JS 里挖出来的正确用法（`_fn_genWave`）：
+        POST /trade/wave/save      ← 注意**不是** /trade/wave/checked/trade/save
+        表单编码：warehouseId=556677&ruleId=<规则id>
+        （用 JSON body 会报「请选择仓库！」—— 实测必须表单编码）
+
+    用户口径：「波次管理里有条『地面-A-0』规则，是指定给 a-0 扣减的」。
+    该规则在 ERP 里是 specifyStockRegionCondition = {regions:[{code:"A-0-0-0"}], INCLUDE_ONLY}
+    ⇒ 用 ruleId=15940 生成，ERP 就只从 A-0-0-0 区域扣库存。
+
+    返回 {"ok","status","count","waves":[...],"note"}；count = 本次新增波次数。
+    """
+    rid = WAVE_RULE_ID if rule_id is None else rule_id
+    wid = WAREHOUSE_ID if warehouse_id is None else warehouse_id
+    c = KP.open_cdp_page()
+    try:
+        t0 = time.time() * 1000
+        body = urllib.parse.urlencode({"warehouseId": str(wid),
+                                       "ruleId": str(rid if rid else 0)})
+        res = _post(c, RULE_SAVE_PATH, body, "application/x-www-form-urlencoded")
+        text = (res or {}).get("text") or ""
+        ok, status, msg = False, "", ""
+        try:
+            j = json.loads(text)
+            d = j.get("data") or {}
+            status = str(d.get("status") or "")
+            ok = (status == "success") or (j.get("result") == 1)
+            msg = str(j.get("message") or "")
+        except Exception:
+            msg = text[:200]
+        out = {"ok": bool(ok), "status": status, "rule_id": rid,
+               "rule_name": WAVE_RULE_NAME, "msg": msg, "count": 0, "waves": []}
+        if not ok:
+            out["error"] = "ERP 拒绝：%s" % (msg or text[:160])
+            return out
+        if readback:
+            # 回读：看这一时间点之后新建的波次（最多 3 次，每次等 2/3 秒）
+            for _w in (0, 2, 3):
+                if _w:
+                    try:
+                        time.sleep(_w)
+                    except Exception:
+                        pass
+                try:
+                    waves = manager_waves(page_no=1, page_size=20, c=c) or []
+                except Exception:
+                    waves = []
+                new = []
+                for w in waves:
+                    try:
+                        cr = int(w.get("created") or 0)
+                    except Exception:
+                        cr = 0
+                    if cr and cr >= (t0 - 3000):
+                        new.append({"code": w.get("code") or w.get("wave_code"),
+                                    "item_count": w.get("itemCount"),
+                                    "rule_id": w.get("ruleId"),
+                                    "section_areas": w.get("sectionAreas"),
+                                    "status": w.get("status")})
+                if new:
+                    out["waves"] = new[:20]
+                    out["count"] = len(new)
+                    break
+            if not out["count"]:
+                out["note"] = ("ERP 受理了，但没有新建出波次 —— 说明这条规则当前"
+                               "没有符合条件的订单（比如 A-0 区域没库存）")
+        return out
+    finally:
+        try:
+            c.close()
+        except Exception:
+            pass
     """★ 报告「这批订单/这个波次占用了哪些区的库存」→ dict。
 
     items: [{"code": 商家编码, "qty": 件数}]
@@ -1654,7 +1832,8 @@ def create(items, carrier="", on_step=None):
             pass
         t0 = time.time() * 1000                  # save 前记时点：只认这之后新建的波次
         _step("正在提交成波：%d 个订单…" % len(sids))
-        body = json.dumps({"warehouseId": WAREHOUSE_ID, "ruleId": "", "sids": sids,
+        body = json.dumps({"warehouseId": WAREHOUSE_ID,
+                           "ruleId": (WAVE_RULE_ID or ""), "sids": sids,
                            "hasFilter": False})
         res = _post(c, SAVE_PATH, body, "application/json")
         text = (res or {}).get("text") or ""
@@ -1706,6 +1885,13 @@ def create(items, carrier="", on_step=None):
                      for c in (out.get("codes") or [])])
             except Exception as _e:
                 out["zone_report"] = {"summary": "统计失败：%s" % str(_e)[:80]}
+            # ★★ 再从 ERP 读「这个波次实际分配的拣货区域」（sectionAreas）
+            #    用户口径：成波后网页要显示实际拣货区域，扣 A-0 就显示 a-0。
+            try:
+                _step("正在读取 ERP 的实际拣货区域…")
+                out["pick_areas"] = wave_areas(out.get("wave_code") or "")
+            except Exception as _e2:
+                out["pick_areas"] = {"error": str(_e2)[:80]}
         return out
     finally:
         c.close()
