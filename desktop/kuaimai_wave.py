@@ -1461,26 +1461,17 @@ def set_rule_items(codes, region=None, rule_id=None):
             pass
 
 
-def _wave_newest(c=None, n=6):
-    """波次管理最新 n 条（含拣货库区）。"""
-    own = c is None
-    if own:
-        c = KP.open_cdp_page()
+def _wave_newest(c=None, n=50):
+    """今天的波次（按服务端顺序），返回 [(code, 件数, 库区, ruleId, 创建ms)]。
+
+    ★ 必须用 manager_waves（表单+api_name+时间范围），JSON 调用会永远返回老数据。
+    """
     try:
-        body = json.dumps({"pageNo": 1, "pageSize": n, "warehouseId": WAREHOUSE_ID})
-        res = _post(c, MANAGER_PATH, body, "application/json")
-        j = json.loads((res or {}).get("text") or "{}")
-        return [(str(w.get("code")), w.get("itemCount"), w.get("sectionAreas"),
-                 w.get("ruleId"), w.get("created"))
-                for w in (((j.get("data") or {}).get("list")) or [])]
+        ws = manager_waves(page_no=1, page_size=n, c=c)
     except Exception:
-        return []
-    finally:
-        if own:
-            try:
-                c.close()
-            except Exception:
-                pass
+        ws = []
+    return [(str(w.get("code")), w.get("item_count"), w.get("section_areas"),
+             w.get("rule_id"), w.get("created_ms")) for w in (ws or [])]
 
 
 def create_by_rule(codes, region=None, rule_id=None, on_step=None, timeout=60):
@@ -1550,15 +1541,11 @@ def create_by_rule(codes, region=None, rule_id=None, on_step=None, timeout=60):
             pass
 
 
-def wave_areas(wave_code, pages=3, size=60):
-    """★ 查某波次在 ERP 里的**实际拣货区域**（sectionAreas）→ dict。
+def wave_areas(wave_code, pages=17, size=50):
+    """★ 查某波次在 ERP 里的**实际拣货区域**（sectionAreas）。
 
-    ERP「波次管理」列表里每个波次带 `sectionAreas` 字段，值是实际分配的货区，
-    例如 "A"、"XT,A,C,B"、"C"、"XT,G,F,H,A,C,B"。
-    用户口径：成波后要在网页上显示「实际的拣货区域」，扣 A-0 就显示 a-0。
-
-    ★ 这里**直接调接口读原始字段**（`manager_waves` 做过字段裁剪，拿不到 sectionAreas）。
-
+    ★ 用 manager_waves（表单 + api_name + 当天时间范围）翻页找；
+      JSON 直调会永远返回老数据，找不到新波次（2026-11 实测）。
     返回 {"code","areas":[...],"raw","rule_id","item_count","status",
           "region_zone","region_hit","only_region"}
     """
@@ -1566,47 +1553,26 @@ def wave_areas(wave_code, pages=3, size=60):
     if not code:
         return {}
     found = None
-    c = KP.open_cdp_page()
-    try:
-        for p in range(1, max(1, int(pages)) + 1):
-            body = json.dumps({"pageNo": p, "pageSize": size,
-                               "warehouseId": WAREHOUSE_ID})
-            res = _post(c, MANAGER_PATH, body, "application/json")
-            try:
-                j = json.loads((res or {}).get("text") or "")
-            except Exception:
-                break
-            data = j.get("data")
-            arr = None
-            if isinstance(data, dict):
-                for k in ("list", "rows", "records"):
-                    if isinstance(data.get(k), list):
-                        arr = data[k]
-                        break
-            elif isinstance(data, list):
-                arr = data
-            if not isinstance(arr, list) or not arr:
-                break
-            for w in arr:
-                if not isinstance(w, dict):
-                    continue
-                if str(w.get("code") or w.get("waveCode") or "") == code:
-                    found = w
-                    break
-            if found or len(arr) < int(size):
-                break
-    finally:
+    for p in range(1, max(1, int(pages)) + 1):
         try:
-            c.close()
+            ws = manager_waves(page_no=p, page_size=size)
         except Exception:
-            pass
+            ws = []
+        if not ws:
+            break
+        for w in ws:
+            if str(w.get("code")) == code:
+                found = w
+                break
+        if found or len(ws) < int(size):
+            break
     if not found:
         return {"code": code, "areas": [], "raw": ""}
-    raw = str(found.get("sectionAreas") or "")
+    raw = str(found.get("section_areas") or "")
     areas = [x.strip() for x in raw.split(",") if x.strip()]
     out = {"code": code, "areas": areas, "raw": raw,
-           "rule_id": found.get("ruleId"),
-           "item_count": found.get("itemCount"),
+           "rule_id": found.get("rule_id"),
+           "item_count": found.get("item_count"),
            "status": found.get("status")}
     _reg = (stock_region() or "").strip().upper()
     if _reg:
@@ -1942,9 +1908,29 @@ def manager_waves(page_no=1, page_size=20, c=None, warehouse_id=None):
     if own:
         c = KP.open_cdp_page()
     try:
-        body = json.dumps({"pageNo": page_no, "pageSize": page_size,
-                           "warehouseId": warehouse_id or WAREHOUSE_ID})
-        res = _post(c, MANAGER_PATH, body, "application/json")
+        # ★★ 2026-11 修：此接口**必须表单编码 + api_name + 时间范围**。
+        #   以前发 JSON（只有 pageNo/pageSize/warehouseId）会被服务端忽略参数，
+        #   永远返回同一批老波次（首条一直是 231082），导致
+        #   「看不到刚生成的波次、误判生成 0 个、波次记录页一直是老数据」。
+        #   实测：带 startTime/endTime（今天）→ 立刻能看到今天的 786 个波次。
+        _now = int(time.time() * 1000)
+        _p = {
+            "api_name": "trade_wave_manager_list", "shopUserIds": "",
+            "warehouseId": str(warehouse_id or WAREHOUSE_ID),
+            "waveIdStr": "", "shortIdStr": "", "pickingCodeStr": "",
+            "outerIdQueryType": "0", "outerIdsVagueType": "2", "outerId": "",
+            "itemNumDown": "", "itemNumUp": "", "tradeNumDown": "",
+            "tradeNumUp": "", "assignStatus": "", "remarkQueryType": "",
+            "remarkKey": "", "sectionAreas": "", "cooperationNo": "",
+            "sellSite": "", "waveSendPrintStatus": "",
+            "uniqueCodePrintStatus": "", "specifyShipperIds": "",
+            "pageNo": str(page_no), "pageSize": str(page_size), "t": "0.5",
+            "startTime": str(_now - 24 * 3600 * 1000),
+            "endTime": str(_now + 3600 * 1000),
+            "distributionStatus": "", "status": "", "pickListPrintStatus": "",
+        }
+        res = _post(c, MANAGER_PATH, urllib.parse.urlencode(_p),
+                    "application/x-www-form-urlencoded")
     finally:
         if own:
             try:
@@ -1985,6 +1971,9 @@ def manager_waves(page_no=1, page_size=20, c=None, warehouse_id=None):
             "pick_start_ms": _int(w.get("pickStartTime")),
             "pick_end_ms": _int(w.get("pickEndTime")),
             "express": w.get("expressName") or "",
+            # ★ 实际拣货库区（如 "A" / "XT,A,C,B" / "D" / "Z"）和生成用的规则 id
+            "section_areas": str(w.get("sectionAreas") or ""),
+            "rule_id": w.get("ruleId"),
             "tags": tags or [],
             # ★ 人员字段（只有网页端有；开放平台那个接口一个都不返回）：
             #   pickerName       = 实际拣货/操作这个波次的人
