@@ -3961,6 +3961,16 @@ class _WebHandler(BaseHTTPRequestHandler):
                                        "ship_cache": _ship_count_cache_get()})
                 except Exception as e:
                     return self._json({"error": "读取波次记录失败：%s" % str(e)[:200]}, 500)
+            if parsed.path == "/api/wave/recent":
+                if not self._can(me, "wave.view"):
+                    return self._deny("wave.view")
+                try:
+                    import kuaimai_wave as _wv6
+                    _rid = (qs.get("rule_id") or [None])[0]
+                    return self._json({"ok": True,
+                                       "waves": _wv6.recent_waves(rule_id=_rid, limit=12)})
+                except Exception as e:
+                    return self._json({"error": str(e)[:160]}, 500)
             if parsed.path == "/api/wave/stock_region":
                 # ★ 读「成波扣减货位」（可自定义）：GET 版（POST 在建波分支里）
                 if not self._can(me, "wave.view"):
@@ -5399,6 +5409,45 @@ class _WebHandler(BaseHTTPRequestHandler):
                         return self._json({"error": "保存失败：%s" % str(e)[:120]}, 500)
                 return self._json({"ok": True, "region": wave_stock_region(),
                                    "default": WAVE_REGION_DEFAULT})
+
+            if path == "/api/wave/prepare_rule":
+                # ★ 扫码 → 把 ERP 规则配成「商品 + 快递 + 区域」，之后用户去 ERP 点生成
+                deny = self._need(me, "wave.create")
+                if deny:
+                    return deny
+                _codes = body.get("codes") or []
+                if isinstance(_codes, str):
+                    _codes = [x.strip() for x in _codes.replace("，", ",").split(",")
+                              if x.strip()]
+                _codes = [str(x).strip() for x in _codes if str(x).strip()]
+                if not _codes:
+                    return self._json({"error": "缺少 codes"}, 400)
+                try:
+                    import kuaimai_wave as _wv4
+                    _out = _wv4.prepare_rule(_codes, carrier=body.get("carrier") or "",
+                                             region=body.get("region"))
+                    print_jobs_log("[准备规则] 商品=%s 快递=%s 区域=%s 规则=%s"
+                                   % (_out.get("items"), _out.get("carrier"),
+                                      _out.get("region_code"), _out.get("rule_id")))
+                    _out["tip"] = ("规则已配好，请到 ERP「生成波次」页选中该规则并点"
+                                   "「生成波次」，然后回来点「读取最新波次」")
+                    return self._json(_out)
+                except Exception as e:
+                    return self._json({"error": "准备规则失败：%s" % str(e)[:160]}, 500)
+
+            if path == "/api/wave/recent":
+                # ★ 读最近波次（可按规则过滤），用于「用户生成后回读结果」
+                deny = self._need(me, "wave.view")
+                if deny:
+                    return deny
+                try:
+                    import kuaimai_wave as _wv5
+                    _rid = body.get("rule_id") or (qs.get("rule_id") or [None])[0]
+                    return self._json({"ok": True,
+                                       "waves": _wv5.recent_waves(rule_id=_rid,
+                                                                  limit=int(body.get("limit") or 12))})
+                except Exception as e:
+                    return self._json({"error": "读取最近波次失败：%s" % str(e)[:160]}, 500)
 
             if path == "/api/wave/create_by_rule":
                 # ★★ 按 ERP 波次规则成波：只挑这些编码的订单，且只从指定货位扣库存

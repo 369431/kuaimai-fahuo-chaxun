@@ -2716,7 +2716,7 @@ button:active{box-shadow:var(--neu-in-sm)}
     <button id="prev" class="ghost">预览（不建波）</button>
     <button id="mk" data-perm="wave.create">生成波次</button>
     
-  <button id="genByRule" class="ghost" style="width:100%;margin-top:8px;padding:12px;font-size:15px">按规则生成（只扣当前货位）</button>
+  <button id="genByRule" class="ghost" style="width:100%;margin-top:8px;padding:12px;font-size:15px">准备规则并等待生成</button>
   </div>
 </div>
 <div class="card">
@@ -3023,8 +3023,22 @@ function addCode(code){
           }
         const cname0 = String(d.code || code).toUpperCase();
         if(cnum > 0){
-          if(ITEMS.some(function(x){ return String(x.code).toUpperCase() === cname0; })){
-            $('hint').innerHTML = esc(d.code || code) + ' 已在清单里' + liveBar + extra; return;
+          var _ex = null;
+          ITEMS.forEach(function(x){
+            if(String(x.code).toUpperCase() === cname0) _ex = x;
+          });
+          if(_ex){
+            /* ★ 重扫已有编码：刷新它的最大可生成 + 若原数量为 0 自动填上 */
+            var oldMax = _ex.max || 0;
+            _ex.max = cnum;
+            if(!_ex.qty || _ex.qty === 0) _ex.qty = cnum;
+            if(_ex.qty > cnum) _ex.qty = cnum;
+            saveBags(); render(); syncCarrierButtons();
+            $('hint').innerHTML = '<span class="qcode">' + esc(d.code || code)
+              + '</span>：已在清单里，已刷新 最大可生成 <b>' + cnum + ' 件</b>'
+              + (oldMax && oldMax !== cnum ? ('（原 ' + oldMax + '）') : '')
+              + liveBar + extra;
+            return;
           }
           ITEMS.push({code: d.code || code, qty: cnum, max: cnum, info: info});
           saveBags(); render(); syncCarrierButtons();
@@ -3715,7 +3729,7 @@ loadMode();                              /* 恢复上次选的模式（双快递
 restoreBags();                           /* 双快递模式下：刷新/重开时恢复上次两份清单，并问「保留/不保留」 */
 /* ★ 成波扣减货位（可自定义）：读写 /api/wave/stock_region */
 
-/* ★ 按 ERP 波次规则生成（只扣当前货位）：调 /api/wave/create_by_rule */
+/* ★ 准备 ERP 规则（商品+快递+区域）→ 提示去 ERP 点生成 → 轮询读回波次 */
 function bindGenByRule(){
   var b = document.getElementById('genByRule');
   if(!b || b._bound) return;
@@ -3724,39 +3738,60 @@ function bindGenByRule(){
     var codes = (ITEMS || []).map(function(x){ return x.code; });
     if(!codes.length){ flash('清单里还没有编码'); return; }
     var reg = (document.getElementById('regionIn') || {}).value || '';
-    if(!confirm('按 ERP 规则生成波次？\n\n编码：' + codes.join('、')
-        + '\n只扣货位：' + (reg || '不限制')
-        + '\n\n注意：ERP 会把这些编码「所有可成波」的订单一次生成（数量由规则上限控制）。')) return;
-    b.disabled = true; b.textContent = '正在让 ERP 生成…（约 30~60 秒）';
-    fetch('/api/wave/create_by_rule', {method:'POST', credentials:'same-origin',
+    b.disabled = true; b.textContent = '正在配置 ERP 规则…';
+    var out = document.getElementById('ruleGenMsg');
+    if(!out){
+      out = document.createElement('div');
+      out.id = 'ruleGenMsg';
+      out.style.cssText = 'margin-top:8px;font-size:14px;line-height:1.7';
+      b.parentNode.insertBefore(out, b.nextSibling);
+    }
+    fetch('/api/wave/prepare_rule', {method:'POST', credentials:'same-origin',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({codes: codes, region: reg})})
+      body: JSON.stringify({codes: codes, carrier: CARRIER, region: reg})})
       .then(function(r){ return r.json(); })
       .then(function(d){
-        b.disabled = false; b.textContent = '按规则生成（只扣当前货位）';
-        var out = document.getElementById('ruleGenMsg');
-        if(!out){
-          out = document.createElement('div');
-          out.id = 'ruleGenMsg';
-          out.style.cssText = 'margin-top:8px;font-size:14px;line-height:1.7';
-          b.parentNode.insertBefore(out, b.nextSibling);
-        }
+        b.disabled = false; b.textContent = '准备规则并等待生成';
         if(d.error){ out.innerHTML = '<span class="badtext">✗ ' + esc(d.error) + '</span>'; return; }
-        var nw = d.new_waves || [];
-        if(nw.length){
-          out.innerHTML = '<span class="oktext">✓ 生成 ' + nw.length + ' 个波次</span><br>'
-            + nw.map(function(w){
-                return '波次 <b>' + esc(w.code) + '</b>　' + (w.item_count||0) + ' 件'
-                  + '　拣货库区 <b>' + esc(w.section_areas || '-') + '</b>';
-              }).join('<br>');
-        } else {
-          out.innerHTML = '<span class="badtext">没有生成波次</span><br>'
-            + '<span class="muted">' + esc(d.note || '该货位当前没有可成波的物理库存/订单') + '</span>';
-        }
+        out.innerHTML = '<span class="oktext">✓ 规则已配好</span>'
+          + '<div class="muted">商品：' + esc((d.items||[]).join('、'))
+          + '　快递：' + esc(d.carrier || '-')
+          + '　区域：' + esc(d.region_code || '不限') + '</div>'
+          + '<div style="margin-top:6px;font-weight:700">👉 请现在到 ERP「生成波次」页，'
+          + '选中规则并点「生成波次」，我在这里等结果…</div>'
+          + '<div class="muted" id="ruleWait">等待中（最多 3 分钟）…</div>';
+        var before = {};
+        fetch('/api/wave/recent?rule_id=' + encodeURIComponent(d.rule_id))
+          .then(function(r){ return r.json(); })
+          .then(function(x){ (x.waves||[]).forEach(function(w){ before[w.code]=1; }); });
+        var tries = 0;
+        var timer = setInterval(function(){
+          tries++;
+          if(tries > 36){
+            clearInterval(timer);
+            var wt = document.getElementById('ruleWait');
+            if(wt) wt.innerHTML = '<span class="badtext">等太久了，没检测到新波次</span>'
+              + '<div class="muted">去 ERP 看看是否提示了原因；也可以点下面重新读取</div>';
+            return;
+          }
+          fetch('/api/wave/recent?rule_id=' + encodeURIComponent(d.rule_id))
+            .then(function(r){ return r.json(); })
+            .then(function(x){
+              var ws = (x.waves||[]).filter(function(w){ return !before[w.code]; });
+              if(!ws.length) return;
+              clearInterval(timer);
+              out.innerHTML = '<span class="oktext">✓ 检测到新波次</span><br>'
+                + ws.map(function(w){
+                    return '波次 <b>' + esc(w.code) + '</b>　' + (w.item_count||0) + ' 件'
+                      + '　拣货库区 <b>' + esc(w.section_areas || '-') + '</b>';
+                  }).join('<br>');
+            })
+            .catch(function(){});
+        }, 5000);
       })
       .catch(function(e){
-        b.disabled = false; b.textContent = '按规则生成（只扣当前货位）';
-        flash('按规则生成失败：' + e.message);
+        b.disabled = false; b.textContent = '准备规则并等待生成';
+        out.innerHTML = '<span class="badtext">✗ ' + e.message + '</span>';
       });
   };
 }

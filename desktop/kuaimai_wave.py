@@ -1474,6 +1474,105 @@ def _wave_newest(c=None, n=50):
              w.get("rule_id"), w.get("created_ms")) for w in (ws or [])]
 
 
+# ---------- 扫码 → 准备 ERP 规则（商品 + 快递 + 区域） ----------
+CARRIER_IDS = {"中通": 4193, "申通": 3461}      # ERP logisticsCompanyId（实测）
+
+
+def _region_code_of(bin_name):
+    """货位编码 → ERP 库存区域码（如 z-0-0-0-0 → z；A-0-0-0 → A）。
+
+    ★ ERP 的区域最小粒度是「库区」，不是货位：A-0-0-0 属 A，z-0-0-0-0 属 Z。
+      Z 区只有 z-0-0-0-0 一个货位，所以「区域 z」≈ 只扣该货位。
+    """
+    b = str(bin_name or "").strip()
+    if not b:
+        return ""
+    segs = b.split("-")
+    head = segs[0].strip()
+    # 纯字母开头的库区（A/B/C/D/M/Z/XT…）直接用首段
+    return head
+
+
+def prepare_rule(codes, carrier="", region=None, rule_id=None):
+    """★ 把 ERP 波次规则配成「只含这些商品 + 指定快递 + 指定区域」。
+
+    用户流程：网页扫码 → 这里配规则 → 用户在 ERP 点「生成波次」→ 程序读回结果。
+
+    返回 {"ok","rule_id","items","carrier","carrier_id","region_code","error"}
+    """
+    rid = rule_id or rule_template_id()
+    codes = [str(x).strip() for x in (codes or []) if str(x).strip()]
+    if not rid:
+        return {"ok": False, "error": "没有配置规则 id"}
+    if not codes:
+        return {"ok": False, "error": "没有编码"}
+    items = []
+    for cd in codes:
+        it, sk = _item_ids(cd)
+        if not it or not sk:
+            return {"ok": False, "error": "取不到 %s 的 ERP 商品 ID" % cd}
+        items.append({"outerId": cd, "sysItemId": it, "sysSkuId": sk})
+
+    cid = CARRIER_IDS.get(str(carrier).strip(), 0)
+    reg = (region if region is not None else stock_region()) or ""
+    reg_code = _region_code_of(reg)
+
+    c = KP.open_cdp_page()
+    try:
+        one = _rule_get(rid, c=c)
+        if not one:
+            return {"ok": False, "error": "读不到规则 %s" % rid}
+        cond = one.get("ruleCondition") or {}
+        if isinstance(cond, str):
+            try:
+                cond = json.loads(cond)
+            except Exception:
+                cond = {}
+        cond["specifyItemCondition"] = {"items": items, "type": "INCLUDE_ONLY"}
+        cond["splitItemCondition"] = {"items": items, "type": "INCLUDE_ONLY"}
+        if cid:
+            cond["specifyLogisticsCompanyCondition"] = {
+                "logisticsCompanyIds": [cid], "type": "INCLUDE"}
+        if reg_code:
+            cond["specifyStockRegionCondition"] = {
+                "regions": [{"code": reg_code}], "type": "INCLUDE_ONLY"}
+        cond["waveRuleId"] = rid
+        one["ruleCondition"] = cond
+        one["condition"] = json.dumps(cond, ensure_ascii=False)
+        res = _post(c, RULES_SAVE_PATH, json.dumps(one, ensure_ascii=False),
+                    "application/json")
+        return {"ok": bool((res or {}).get("text")), "rule_id": rid,
+                "items": [x["outerId"] for x in items],
+                "carrier": carrier, "carrier_id": cid, "region_code": reg_code,
+                "error": ""}
+    finally:
+        try:
+            c.close()
+        except Exception:
+            pass
+
+
+def recent_waves(rule_id=None, limit=12):
+    """最近波次（今天的），可按规则过滤 → [{code,item_count,section_areas,rule_id,status}]。"""
+    out = []
+    for p in range(1, 6):
+        try:
+            ws = manager_waves(page_no=p, page_size=50)
+        except Exception:
+            ws = []
+        if not ws:
+            break
+        out.extend(ws)
+        if len(ws) < 50:
+            break
+    if rule_id:
+        out = [w for w in out if str(w.get("rule_id")) == str(rule_id)]
+    return [{"code": w.get("code"), "item_count": w.get("item_count"),
+             "section_areas": w.get("section_areas"), "rule_id": w.get("rule_id"),
+             "status": w.get("status"), "express": w.get("express")}
+            for w in out[:limit]]
+
+
 def create_by_rule(codes, region=None, rule_id=None, on_step=None, timeout=60):
     """★★ 按 ERP 波次规则成波：只挑 codes 的订单，且只从 region 扣库存。
 
