@@ -2239,7 +2239,18 @@ def create(items, carrier="", on_step=None):
             #    用户口径：成波后网页要显示实际拣货区域，扣 A-0 就显示 a-0。
             try:
                 _step("正在读取 ERP 的实际拣货区域…")
-                out["pick_areas"] = wave_areas(out.get("wave_code") or "")
+                # ★ 新波次可能延迟出现在列表里 → 重试几次
+                _pa = {}
+                for _i, _w in enumerate((0, 2, 3, 4)):
+                    if _w:
+                        try:
+                            time.sleep(_w)
+                        except Exception:
+                            pass
+                    _pa = wave_areas(out.get("wave_code") or "")
+                    if _pa.get("areas"):
+                        break
+                out["pick_areas"] = _pa
             except Exception as _e2:
                 out["pick_areas"] = {"error": str(_e2)[:80]}
         return out

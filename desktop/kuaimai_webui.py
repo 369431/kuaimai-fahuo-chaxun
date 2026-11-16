@@ -3535,7 +3535,15 @@ function handleCreateResult(p, items){
       h += '<div class="big oktext">波次号：' + esc(p.wave_code || v.wave_code || p.wave_id || '-') + '</div>'
          + '<div style="margin-top:6px"><span class="tag">状态 ' + esc(v.status_cn || v.status || '未拣') + '</span>'
          + '<span class="tag ok">已建出 ' + esc(v.item_count == null ? (p.sids || []).length : v.item_count) + ' 件</span>'
-         + '<span class="tag">订单数 ' + esc((p.sids || []).length) + '</span>';
+         + '<span class="tag">订单数 ' + esc((p.sids || []).length) + '</span>'
+         + (function(){
+             var pa = p.pick_areas || null;
+             var arr = (pa && pa.areas) || [];
+             if(!arr.length) return '';
+             var txt = arr.map(function(x){ return String(x).trim(); }).join('/');
+             return '<span class="tag" style="background:#e8f5e9;color:#1B7F35;'
+               + 'font-weight:700">拣货区域 ' + esc(txt) + '区</span>';
+           })();
       h += '</div>';
       h += '<h2 style="margin-top:12px">配货明细（每个 SKU 一行）</h2>' + skuLines(p)
          + '<div class="muted" style="margin-top:6px">波次号实时回读 ERP「波次管理」。</div>';
