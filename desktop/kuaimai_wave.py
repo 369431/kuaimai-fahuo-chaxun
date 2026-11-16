@@ -622,6 +622,9 @@ def section_rows(code, force=False):
                             "alloc": int(r.get("allocateNum") or 0),
                             "avail": int(s.get("avaliableNum") or 0),
                             "total": int(s.get("totalNum") or 0),
+                            # ★ ERP 内部 ID：建波次规则「指定商品」时要用
+                            "item_id": s.get("sysItemId"),
+                            "sku_id": s.get("sysSkuId"),
                             "code": str(s.get("showOuterId") or s.get("skuOuterId") or "")})
             except Exception:
                 continue
@@ -1331,6 +1334,220 @@ def wave_zone_check(wave_code, zones=None):
 
 
 RULE_SAVE_PATH = "/trade/wave/save"   # ★ 按规则生成波次（注意不是 checked/trade/save）
+
+
+# ---------- 按 ERP 波次规则成波（只扣指定货位） ----------
+# ★ 机制（2026-11 实测）：
+#   ERP「波次规则」才支持 specifyStockRegionCondition（只扣某货位区），
+#   「选择订单生成波次」不支持。所以「只扣 A-0」必须走规则。
+#   规则的条件结构（从用户建的规则里读出来的）：
+#       "specifyItemCondition": {"items":[{"outerId","sysItemId","sysSkuId"}], "type":"INCLUDE_ONLY"}
+#       "specifyStockRegionCondition": {"regions":[{"code":"A-0-0"}], "type":"INCLUDE_ONLY"}
+#   生成动作：打开 #/trade/genwave/ → 点中该规则 → 点 [data-name="gen-wave"]。
+RULE_TEMPLATE_DEFAULT = 16369     # 用来改写的规则 id（用户建的「测试1」）
+RULES_LIST_PATH = "/trade/wave/rules/list"
+RULES_SAVE_PATH = "/trade/wave/rules/save"
+
+
+def rule_template_id():
+    """当前用来承载「扫码成波」的 ERP 规则 id（可在设置里换）。"""
+    try:
+        import kuaimai_scan as _KS
+        v = (_KS.load_settings() or {}).get("wave_rule_id")
+        if v:
+            return int(v)
+    except Exception:
+        pass
+    return RULE_TEMPLATE_DEFAULT
+
+
+def _rule_get(rule_id, c=None):
+    """读一条波次规则的完整结构。"""
+    own = c is None
+    if own:
+        c = KP.open_cdp_page()
+    try:
+        body = json.dumps({"warehouseId": WAREHOUSE_ID, "pageNo": 1, "pageSize": 100})
+        res = _post(c, RULES_LIST_PATH, body, "application/json")
+        j = json.loads((res or {}).get("text") or "{}")
+        d = j.get("data")
+        arr = None
+        if isinstance(d, dict):
+            for k in ("list", "rules", "records"):
+                if isinstance(d.get(k), list):
+                    arr = d[k]
+                    break
+        elif isinstance(d, list):
+            arr = d
+        for one in (arr or []):
+            if not isinstance(one, dict):
+                continue
+            try:
+                if int(one.get("id") or 0) == int(rule_id):
+                    return one
+            except Exception:
+                continue
+        return None
+    finally:
+        if own:
+            try:
+                c.close()
+            except Exception:
+                pass
+
+
+def _item_ids(code):
+    """从 ERP 货位库存取 sysItemId / sysSkuId（规则「指定商品」要用）。"""
+    rows = section_rows(code, force=False) or []
+    for r in rows:
+        if r.get("item_id") and r.get("sku_id"):
+            return r.get("item_id"), r.get("sku_id")
+    return None, None
+
+
+def set_rule_items(codes, region=None, rule_id=None):
+    """把规则的「指定商品」改成 codes、「库区」改成 region（默认当前成波货位）。
+
+    返回 {"ok", "rule_id", "items":[...], "region", "error"}
+    """
+    rid = rule_id or rule_template_id()
+    reg = (region if region is not None else stock_region()) or ""
+    reg = str(reg).strip().upper()
+    codes = [str(x).strip() for x in (codes or []) if str(x).strip()]
+    if not rid:
+        return {"ok": False, "error": "没有配置规则 id"}
+    if not codes:
+        return {"ok": False, "error": "没有编码"}
+    items = []
+    for cd in codes:
+        it, sk = _item_ids(cd)
+        if not it or not sk:
+            return {"ok": False, "error": "取不到 %s 的 ERP 商品 ID（货位库存里没有该编码）" % cd}
+        items.append({"outerId": cd, "sysItemId": it, "sysSkuId": sk})
+    c = KP.open_cdp_page()
+    try:
+        one = _rule_get(rid, c=c)
+        if not one:
+            return {"ok": False, "error": "读不到规则 %s（请在 ERP 里确认该规则存在）" % rid}
+        cond = one.get("ruleCondition") or {}
+        if isinstance(cond, str):
+            try:
+                cond = json.loads(cond)
+            except Exception:
+                cond = {}
+        cond["specifyItemCondition"] = {"items": items, "type": "INCLUDE_ONLY"}
+        cond["splitItemCondition"] = {"items": items, "type": "INCLUDE_ONLY"}
+        if reg:
+            # 区域码：去掉末尾的 -0 段（A-0-0-0 → A-0-0，与 ERP 规则里的写法一致）
+            segs = reg.split("-")
+            rcode = "-".join(segs[:3]) if len(segs) >= 3 else reg
+            cond["specifyStockRegionCondition"] = {"regions": [{"code": rcode}],
+                                                  "type": "INCLUDE_ONLY"}
+        else:
+            cond.pop("specifyStockRegionCondition", None)
+        cond["waveRuleId"] = rid
+        one["ruleCondition"] = cond
+        one["condition"] = json.dumps(cond, ensure_ascii=False)
+        res = _post(c, RULES_SAVE_PATH, json.dumps(one, ensure_ascii=False),
+                    "application/json")
+        ok = bool((res or {}).get("text"))
+        return {"ok": ok, "rule_id": rid, "items": items,
+                "region": cond.get("specifyStockRegionCondition", {}).get("regions"),
+                "error": "" if ok else str((res or {}).get("text"))[:160]}
+    finally:
+        try:
+            c.close()
+        except Exception:
+            pass
+
+
+def _wave_newest(c=None, n=6):
+    """波次管理最新 n 条（含拣货库区）。"""
+    own = c is None
+    if own:
+        c = KP.open_cdp_page()
+    try:
+        body = json.dumps({"pageNo": 1, "pageSize": n, "warehouseId": WAREHOUSE_ID})
+        res = _post(c, MANAGER_PATH, body, "application/json")
+        j = json.loads((res or {}).get("text") or "{}")
+        return [(str(w.get("code")), w.get("itemCount"), w.get("sectionAreas"),
+                 w.get("ruleId"), w.get("created"))
+                for w in (((j.get("data") or {}).get("list")) or [])]
+    except Exception:
+        return []
+    finally:
+        if own:
+            try:
+                c.close()
+            except Exception:
+                pass
+
+
+def create_by_rule(codes, region=None, rule_id=None, on_step=None, timeout=60):
+    """★★ 按 ERP 波次规则成波：只挑 codes 的订单，且只从 region 扣库存。
+
+    等价于用户在 ERP「生成波次」页：选中该规则 → 点「生成波次」。
+    返回 {"ok","rule_id","new_waves":[{code,item_count,section_areas,rule_id}],
+          "note","error"}
+    """
+    def _step(t):
+        if on_step:
+            try:
+                on_step(t)
+            except Exception:
+                pass
+
+    rid = rule_id or rule_template_id()
+    _step("正在把规则「指定商品」改成 %s…" % ("、".join(codes or [])[:40]))
+    sp = set_rule_items(codes, region=region, rule_id=rid)
+    if not sp.get("ok"):
+        return {"ok": False, "error": sp.get("error") or "规则设置失败", "rule_id": rid}
+
+    c = KP.open_cdp_page()
+    try:
+        before = _wave_newest(c)
+        before_codes = {x[0] for x in before}
+        _step("正在打开 ERP 生成波次页…")
+        c.js("location.href = 'https://erpa.superboss.cc/index.html#/trade/genwave/'")
+        time.sleep(9)
+        _step("正在选中规则并点「生成波次」…")
+        sel = c.js("""(function(){
+          var els = document.querySelectorAll('.waveRule-item .btn');
+          for (var i = 0; i < els.length; i++) {
+            if (els[i].getAttribute('data-id') === '%s') { els[i].click(); return 'ok'; }
+          }
+          return 'notfound';
+        })()""" % str(rid))
+        if sel != "ok":
+            return {"ok": False, "error": "ERP 规则列表里没找到规则 %s（可能需要刷新页面）" % rid,
+                    "rule_id": rid}
+        time.sleep(1)
+        c.js("""(function(){var b=document.querySelector('[data-name="gen-wave"]');
+            if(b) b.click();})()""")
+        _step("已提交，正在回读新波次…")
+        new = []
+        waited = 0
+        for wait in (4, 5, 6, 8, 10, 12):
+            time.sleep(wait)
+            waited += wait
+            after = _wave_newest(c)
+            new = [x for x in after if x[0] not in before_codes]
+            if new:
+                break
+            if waited >= timeout:
+                break
+        out = {"ok": bool(new), "rule_id": rid, "region": sp.get("region"),
+               "new_waves": [{"code": x[0], "item_count": x[1],
+                              "section_areas": x[2], "rule_id": x[3]} for x in new]}
+        if not new:
+            out["note"] = ("ERP 说生成成功但没有新波次 —— 说明该货位当前没有可成波的"
+                           "物理库存（或没有一单一件的待成波订单）")
+        return out
+    finally:
+        try:
+            c.close()
+        except Exception:
+            pass
 
 
 def wave_areas(wave_code, pages=3, size=60):

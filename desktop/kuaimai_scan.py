@@ -5400,6 +5400,38 @@ class _WebHandler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, "region": wave_stock_region(),
                                    "default": WAVE_REGION_DEFAULT})
 
+            if path == "/api/wave/create_by_rule":
+                # ★★ 按 ERP 波次规则成波：只挑这些编码的订单，且只从指定货位扣库存
+                #    （ERP 只有「波次规则」支持库区限制，「选择订单生成波次」不支持）
+                deny = self._need(me, "wave.create")
+                if deny:
+                    return deny
+                _bok3, _bwhy3 = ensure_erp_browser("按规则成波")
+                if not _bok3:
+                    return self._json({"error": _bwhy3}, 503)
+                _codes = body.get("codes") or []
+                if isinstance(_codes, str):
+                    _codes = [x.strip() for x in _codes.replace("，", ",").split(",")
+                              if x.strip()]
+                _codes = [str(x).strip() for x in _codes if str(x).strip()]
+                if not _codes:
+                    return self._json({"error": "缺少 codes"}, 400)
+                try:
+                    import kuaimai_wave as _wv3
+                    _out = _wv3.create_by_rule(
+                        _codes, region=body.get("region"),
+                        on_step=lambda t: print_jobs_log("[按规则成波] %s" % t))
+                    _n = len(_out.get("new_waves") or [])
+                    _msg = ("生成 %d 个波次：%s" % (
+                        _n, "、".join("%s(货区%s)" % (w.get("code"), w.get("section_areas"))
+                                     for w in (_out.get("new_waves") or [])[:6]))
+                        if _n else (_out.get("note") or _out.get("error") or ""))
+                    if _msg:
+                        print_jobs_log("[按规则成波] %s" % _msg)
+                    return self._json(_out)
+                except Exception as e:
+                    return self._json({"error": "按规则成波失败：%s" % str(e)[:180]}, 500)
+
             if path == "/api/wave/generate_by_rule":
                 # ★ 按 ERP 波次规则生成波次（等价 ERP「生成波次」页选中规则再点生成）
                 #   用户口径：「用『地面-A-0』规则生成，库存只从 A-0-0-0 扣」

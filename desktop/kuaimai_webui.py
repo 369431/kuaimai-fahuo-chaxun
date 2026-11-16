@@ -2716,6 +2716,7 @@ button:active{box-shadow:var(--neu-in-sm)}
     <button id="prev" class="ghost">预览（不建波）</button>
     <button id="mk" data-perm="wave.create">生成波次</button>
     
+  <button id="genByRule" class="ghost" style="width:100%;margin-top:8px;padding:12px;font-size:15px">按规则生成（只扣当前货位）</button>
   </div>
 </div>
 <div class="card">
@@ -3713,6 +3714,52 @@ $('fwPrev').onclick = function(){
 loadMode();                              /* 恢复上次选的模式（双快递 / 单快递旧模式） */
 restoreBags();                           /* 双快递模式下：刷新/重开时恢复上次两份清单，并问「保留/不保留」 */
 /* ★ 成波扣减货位（可自定义）：读写 /api/wave/stock_region */
+
+/* ★ 按 ERP 波次规则生成（只扣当前货位）：调 /api/wave/create_by_rule */
+function bindGenByRule(){
+  var b = document.getElementById('genByRule');
+  if(!b || b._bound) return;
+  b._bound = 1;
+  b.onclick = function(){
+    var codes = (ITEMS || []).map(function(x){ return x.code; });
+    if(!codes.length){ flash('清单里还没有编码'); return; }
+    var reg = (document.getElementById('regionIn') || {}).value || '';
+    if(!confirm('按 ERP 规则生成波次？\n\n编码：' + codes.join('、')
+        + '\n只扣货位：' + (reg || '不限制')
+        + '\n\n注意：ERP 会把这些编码「所有可成波」的订单一次生成（数量由规则上限控制）。')) return;
+    b.disabled = true; b.textContent = '正在让 ERP 生成…（约 30~60 秒）';
+    fetch('/api/wave/create_by_rule', {method:'POST', credentials:'same-origin',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({codes: codes, region: reg})})
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        b.disabled = false; b.textContent = '按规则生成（只扣当前货位）';
+        var out = document.getElementById('ruleGenMsg');
+        if(!out){
+          out = document.createElement('div');
+          out.id = 'ruleGenMsg';
+          out.style.cssText = 'margin-top:8px;font-size:14px;line-height:1.7';
+          b.parentNode.insertBefore(out, b.nextSibling);
+        }
+        if(d.error){ out.innerHTML = '<span class="badtext">✗ ' + esc(d.error) + '</span>'; return; }
+        var nw = d.new_waves || [];
+        if(nw.length){
+          out.innerHTML = '<span class="oktext">✓ 生成 ' + nw.length + ' 个波次</span><br>'
+            + nw.map(function(w){
+                return '波次 <b>' + esc(w.code) + '</b>　' + (w.item_count||0) + ' 件'
+                  + '　拣货库区 <b>' + esc(w.section_areas || '-') + '</b>';
+              }).join('<br>');
+        } else {
+          out.innerHTML = '<span class="badtext">没有生成波次</span><br>'
+            + '<span class="muted">' + esc(d.note || '该货位当前没有可成波的物理库存/订单') + '</span>';
+        }
+      })
+      .catch(function(e){
+        b.disabled = false; b.textContent = '按规则生成（只扣当前货位）';
+        flash('按规则生成失败：' + e.message);
+      });
+  };
+}
 function bindRegion(){
   var inp = document.getElementById('regionIn');
   var btn = document.getElementById('regionSave');
@@ -3749,6 +3796,7 @@ function bindRegion(){
     .catch(function(){});
 }
 try{ bindRegion(); }catch(e){}
+try{ bindGenByRule(); }catch(e){}
 render();
 syncCarrierButtons();
 $('code').focus();
